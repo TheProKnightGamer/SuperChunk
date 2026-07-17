@@ -1,0 +1,9 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.fixes.chunkio.threading_issues.mixin",
+  "plugin": "dev.superchunk.com.ishland.c2me.base.common.ModuleMixinPlugin",
+  "mixins": [
+    "MixinStructurePoolElement"
+  ]
+}

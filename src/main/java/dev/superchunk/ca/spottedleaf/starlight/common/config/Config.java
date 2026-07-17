@@ -1,0 +1,62 @@
+package dev.superchunk.ca.spottedleaf.starlight.common.config;
+
+import dev.superchunk.ca.spottedleaf.starlight.common.thread.SchedulingUtil;
+import net.neoforged.fml.loading.FMLPaths;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.Properties;
+
+public class Config {
+    public static final int PARALLELISM;
+
+    static {
+        final Properties properties = new Properties();
+        final Properties newProperties = new Properties();
+        final Path path = FMLPaths.CONFIGDIR.get().resolve("scalablelux.properties");
+        if (Files.isRegularFile(path)) {
+            try (InputStream in = Files.newInputStream(path, StandardOpenOption.CREATE)) {
+                properties.load(in);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        if (!SchedulingUtil.isExternallyManaged()) {
+            int parallelism = getInt(properties, newProperties, "parallelism", -1);
+            if (parallelism < 1) {
+                parallelism = Math.max(1, Runtime.getRuntime().availableProcessors() / 3);
+            }
+            PARALLELISM = parallelism;
+        } else {
+            PARALLELISM = Math.max(1, Runtime.getRuntime().availableProcessors() / 3);
+        }
+
+        if (!newProperties.isEmpty()) {
+            try (OutputStream out = Files.newOutputStream(path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                newProperties.store(out, "Configuration file for ScalableLux");
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    public static void init() {
+    }
+
+    private static int getInt(Properties properties, Properties newProperties, String key, int def) {
+        try {
+            final int i = Integer.parseInt(properties.getProperty(key));
+            newProperties.setProperty(key, String.valueOf(i));
+            return i;
+        } catch (NumberFormatException e) {
+            newProperties.setProperty(key, String.valueOf(def));
+            return def;
+        }
+    }
+
+}

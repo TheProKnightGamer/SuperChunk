@@ -1,0 +1,135 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "LGPL-3.0-only"
+# TODO(unverified): no public repo/issue tracker is known for this project (source lives locally,
+# not on GitHub). Replace with the real URL if/when one exists, or drop this line — issueTrackerURL
+# is optional. Left as a best-guess placeholder for now.
+issueTrackerURL = "https://github.com/TheProKnightGamer/SuperChunk/issues"
+
+[[mods]]
+modId = "superchunk"
+version = "0.1.0"
+displayName = "SuperChunk"
+authors = "TheProKnightGamer (merge of C2ME, ScalableLux, NoisiumForked, Lithium)"
+description = '''
+Unified worldgen + chunk-performance super-mod. A from-source merge of:
+  - C2ME        (multithreaded chunk generation / IO / loading)
+  - ScalableLux (Starlight-fork lighting engine, parallel light updates)
+  - NoisiumForked (worldgen noise / biome / blockstate placement)
+  - Lithium     (general game-logic optimization)
+'''
+
+# Mixin configs. One per integrated domain so they can be staged/toggled.
+[[mixins]]
+config = "superchunk.mixins.json"
+
+[[mixins]]
+config = "scalablelux.mixins.json"
+
+# Renamed from lithium.mixins.json / lithium-neoforge.mixins.json to avoid a fatal
+# "Decoration with key fabric-modId already exists" clash with a STANDALONE Lithium install
+# (which ships configs under those exact original names). The mixin package / class lists,
+# the 'plugin', and the 'refmap' inside each config are unchanged (only the FILE NAME + these
+# two registrations change; the plugin still hardcodes getRefMapperConfig()="lithium.refmap.json").
+[[mixins]]
+config = "superchunk-lithium.mixins.json"
+
+[[mixins]]
+config = "superchunk-lithium-neoforge.mixins.json"
+
+[[mixins]]
+config = "vmp.mixins.json"
+
+[[mixins]]
+config = "noisium.mixins.json"
+
+[[mixins]]
+config = "c2me.mixins.json"
+
+[[mixins]]
+config = "c2me-base.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-allocs.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-math.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-worldgen-general.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-worldgen-vanilla.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-chunkio.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-scheduling.mixins.json"
+
+[[mixins]]
+config = "c2me-opts-dfc.mixins.json"
+
+[[mixins]]
+config = "c2me-server-utils.mixins.json"
+
+[[mixins]]
+config = "c2me-threading-lighting.mixins.json"
+
+[[mixins]]
+config = "c2me-fixes-chunkio-threading-issues.mixins.json"
+
+[[mixins]]
+config = "c2me-fixes-general-threading-issues.mixins.json"
+
+[[mixins]]
+config = "c2me-fixes-worldgen-vanilla-bugs.mixins.json"
+
+[[mixins]]
+config = "c2me-fixes-worldgen-threading-issues.mixins.json"
+
+[[mixins]]
+config = "c2me-rewrites-chunk-system.mixins.json"
+
+[[mixins]]
+config = "c2me-rewrites-chunkio.mixins.json"
+
+[[mixins]]
+config = "c2me-notickvd.mixins.json"
+
+[[mixins]]
+config = "c2me-rewrites-chunk-serializer.mixins.json"
+
+# opts-natives-math: native-FFI (java.lang.foreign, Java 22) world-gen acceleration.
+# UNPORTED on this Java 21 toolchain (revivable via the official C2ME-NeoForge recipe: a
+# separate Java-22 compilation unit + vendored .so/.dll natives, runtime-gated for Java 21 —
+# note upstream defaults nativeAcceleration.enabled=false anyway). The empty mixin list keeps
+# the config valid; a stub ModuleEntryPoint (enabled=false) makes ModuleMixinPlugin log a
+# clean "Disabling" INFO instead of a ClassNotFoundException WARN stack trace every launch.
+[[mixins]]
+config = "c2me-opts-natives-math.mixins.json"
+
+# Optional load-ORDER pin (NOT a hard dependency): when a standalone Lithium is present, force
+# SuperChunk to sort BEFORE it. This makes SuperChunk's mixin configs register — and therefore
+# SuperChunkMixinPlugin.onLoad() run its config write-through (config/lithium.properties, incl.
+# the five C2ME-overlap safety pins) — BEFORE standalone Lithium's LithiumMixinPlugin.onLoad()
+# reads that file. type="optional" so this is inert (no error) when Lithium is absent.
+[[dependencies.superchunk]]
+modId = "lithium"
+type = "optional"
+ordering = "BEFORE"
+side = "BOTH"
+
+[[dependencies.superchunk]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.0,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.superchunk]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1]"
+ordering = "NONE"
+side = "BOTH"

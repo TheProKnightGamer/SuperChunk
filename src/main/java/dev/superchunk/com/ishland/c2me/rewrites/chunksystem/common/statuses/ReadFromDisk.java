@@ -1,0 +1,233 @@
+package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.statuses;
+
+import dev.superchunk.com.ishland.c2me.base.common.threadstate.ThreadInstrumentation;
+import dev.superchunk.com.ishland.c2me.base.common.util.RxJavaUtils;
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IServerLightingProvider;
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IVersionedChunkStorage;
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IWorldChunk;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ChunkLoadingContext;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ChunkState;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.Config;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.NewChunkStatus;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ducks.IPOIUnloading;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.fapi.LifecycleEventInvoker;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.threadstate.ChunkTaskWork;
+import dev.superchunk.com.ishland.flowsched.scheduler.Cancellable;
+import dev.superchunk.com.ishland.flowsched.scheduler.ItemHolder;
+import dev.superchunk.com.ishland.flowsched.scheduler.KeyStatusPair;
+import dev.superchunk.com.ishland.flowsched.util.Assertions;
+import io.reactivex.rxjava3.annotations.NonNull;
+import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.core.CompletableObserver;
+import io.reactivex.rxjava3.core.Single;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+import net.minecraft.nbt.Tag;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.server.level.progress.ChunkProgressListener;
+import net.minecraft.server.level.ThreadedLevelLightEngine;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.storage.ChunkSerializer;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.ImposterProtoChunk;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+
+public class ReadFromDisk extends NewChunkStatus {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("ReadFromDisk");
+
+    public ReadFromDisk(int ordinal) {
+        super(ordinal, ChunkStatus.EMPTY);
+    }
+
+    @Override
+    public Completable upgradeToThis(ChunkLoadingContext context, Cancellable cancellable) {
+        final Single<ProtoChunk> single = invokeSyncRead(context)
+                .retryWhen(RxJavaUtils.retryWithExponentialBackoff(5, 100));
+        return finalizeLoading(context, single);
+    }
+
+    protected Completable finalizeLoading(ChunkLoadingContext context, Single<ProtoChunk> single) {
+        return single
+                .doOnError(throwable -> {
+                    MinecraftServer server = ((IThreadedAnvilChunkStorage) context.tacs()).getWorld().getServer();
+                    server.execute(() -> server.reportChunkLoadFailure(throwable, ((IVersionedChunkStorage) context.tacs()).invokeGetStorageKey(), context.holder().getKey()));
+                })
+                .onErrorResumeNext(throwable -> {
+                    try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(context, this, true))) {
+                        if (Config.recoverFromErrors) {
+                            return Single.just(createEmptyProtoChunk(context));
+                        } else {
+                            return Single.error(throwable);
+                        }
+                    }
+                })
+                .doOnSuccess(chunk -> {
+                    context.holder().getItem().set(new ChunkState(chunk, chunk, ChunkStatus.EMPTY));
+                    if (!Config.lowMemoryMode) {
+                        context.holder().getUserData().get().triggerDeferredLoad(NewChunkStatus.DISK);
+                    }
+                })
+                .ignoreElement()
+                .cache();
+    }
+
+    protected @NonNull Single<ProtoChunk> invokeSyncRead(ChunkLoadingContext context) {
+        return Single.defer(() -> Single.fromCompletionStage(((IThreadedAnvilChunkStorage) context.tacs()).invokeGetUpdatedChunkNbt(context.holder().getKey())))
+                .map(nbt -> nbt.filter(nbt2 -> {
+                    boolean bl = nbt2.contains("Status", Tag.TAG_STRING);
+                    if (!bl) {
+                        LOGGER.error("ChunkAccess file at {} is missing level data, skipping", context.holder().getKey());
+                    }
+
+                    return bl;
+                }))
+                .observeOn(Schedulers.from(((IThreadedAnvilChunkStorage) context.tacs()).getMainThreadExecutor()))
+                .map(nbt -> {
+                    try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(context, this, true))) {
+                        if (nbt.isPresent()) {
+                            ProtoChunk chunk = ChunkSerializer.read(
+                                    ((IThreadedAnvilChunkStorage) context.tacs()).getWorld(),
+                                    ((IThreadedAnvilChunkStorage) context.tacs()).getPointOfInterestStorage(),
+                                    ((IVersionedChunkStorage) context.tacs()).invokeGetStorageKey(),
+                                    context.holder().getKey(),
+                                    nbt.get()
+                            );
+                            return chunk;
+                        } else {
+                            return createEmptyProtoChunk(context);
+                        }
+                    }
+                })
+                .doOnError(throwable -> LOGGER.warn("Failed to load chunk at {}", context.holder().getKey(), throwable));
+    }
+
+    protected static @NotNull ProtoChunk createEmptyProtoChunk(ChunkLoadingContext context) {
+        final ServerLevel world = ((IThreadedAnvilChunkStorage) context.tacs()).getWorld();
+        return new ProtoChunk(context.holder().getKey(), UpgradeData.EMPTY, world, world.registryAccess().registryOrThrow(Registries.BIOME), null);
+    }
+
+    @Override
+    public Completable postUpgradeToThis(ChunkLoadingContext context) {
+        return Completable.complete();
+    }
+
+    @Override
+    public Completable preDowngradeFromThis(ChunkLoadingContext context, Cancellable cancellable) {
+        return Completable.defer(() -> Completable.fromCompletionStage(syncWithLightEngine(context)))
+                .observeOn(Schedulers.from(((IThreadedAnvilChunkStorage) context.tacs()).getMainThreadExecutor()))
+                .andThen((CompletableObserver observer) -> {
+                    if (context.holder().getTargetStatus().ordinal() >= this.ordinal()) { // saving cancelled
+                        cancellable.cancel();
+                        observer.onError(new CancellationException());
+                    } else {
+                        observer.onComplete();
+                    }
+                });
+    }
+
+    @Override
+    public Completable downgradeFromThis(ChunkLoadingContext context, Cancellable cancellable) {
+        return Completable.defer(() -> {
+                    Assertions.assertTrue(((IThreadedAnvilChunkStorage) context.tacs()).getMainThreadExecutor().isSameThread());
+                    try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(context, this, false))) {
+                        final ChunkState chunkState = context.holder().getItem().get();
+                        ChunkAccess chunk = chunkState.chunk();
+                        if (chunk instanceof ImposterProtoChunk protoChunk) chunk = protoChunk.getWrapped();
+
+                        final boolean loadedToWorld;
+                        if (chunk instanceof LevelChunk worldChunk) {
+                            loadedToWorld = ((IWorldChunk) worldChunk).isLoadedToWorld();
+                            worldChunk.setLoaded(false);
+                        } else {
+                            loadedToWorld = false;
+                        }
+
+                        // No fabric gate: on NeoForge the invoker posts ChunkEvent.Unload itself
+                        // (the vanilla post site in ChunkMap.processUnloads is bypassed by this
+                        // chunk system) — upstream C2ME-NeoForge removes the gate the same way.
+                        if (loadedToWorld && chunk instanceof LevelChunk worldChunk) {
+                            LifecycleEventInvoker.invokeChunkUnload(((IThreadedAnvilChunkStorage) context.tacs()).getWorld(), worldChunk);
+                        }
+
+                        if ((context.holder().getFlags() & ItemHolder.FLAG_BROKEN) != 0 && chunk instanceof ProtoChunk) { // do not save broken ProtoChunks
+                            LOGGER.warn("Not saving partially generated broken chunk {}", context.holder().getKey());
+                        } else if (chunk instanceof LevelChunk && !chunkState.reachedStatus().isOrAfter(ChunkStatus.FULL)) {
+                            // do not save WorldChunks that doesn't reach full status: Vanilla behavior
+                            // If saved, block entities will be lost
+                        } else {
+                            ((IThreadedAnvilChunkStorage) context.tacs()).invokeSave(chunk);
+                        }
+
+                        if (loadedToWorld && chunk instanceof LevelChunk worldChunk) {
+                            ((IThreadedAnvilChunkStorage) context.tacs()).getWorld().unload(worldChunk);
+                        }
+
+                        ((IServerLightingProvider) ((IThreadedAnvilChunkStorage) context.tacs()).getLightingProvider()).invokeUpdateChunkStatus(chunk.getPos());
+                        ((IThreadedAnvilChunkStorage) context.tacs()).getLightingProvider().tryScheduleUpdate();
+                        ((IThreadedAnvilChunkStorage) context.tacs()).getWorldGenerationProgressListener().onStatusChange(chunk.getPos(), null);
+                        ((IThreadedAnvilChunkStorage) context.tacs()).getChunkToNextSaveTimeMs().remove(chunk.getPos().toLong());
+
+                        final ChunkProgressListener listener = ((IThreadedAnvilChunkStorage) context.tacs()).getWorldGenerationProgressListener();
+                        if (listener != null) {
+                            listener.onStatusChange(context.holder().getKey(), null);
+                        }
+
+                        ((IPOIUnloading) ((IThreadedAnvilChunkStorage) context.tacs()).getPointOfInterestStorage()).c2me$unloadPoi(context.holder().getKey());
+
+                        context.holder().getItem().set(new ChunkState(null, null, null));
+
+                        return Completable.complete();
+                    }
+                })
+                .doOnError((throwable) -> {
+                    try {
+                        if ((context.holder().getFlags() & ItemHolder.FLAG_BROKEN) != 0) {
+                            LOGGER.warn("Broken chunk {} was unloaded", context.holder().getKey());
+                            context.holder().clearFlag(ItemHolder.FLAG_BROKEN);
+                        }
+                    } catch (Throwable t) {
+                        t.printStackTrace();
+                    }
+                });
+    }
+
+    protected CompletionStage<Void> syncWithLightEngine(ChunkLoadingContext context) {
+        final CompletableFuture<Void> future = new CompletableFuture<>();
+        ((IServerLightingProvider) ((IThreadedAnvilChunkStorage) context.tacs()).getLightingProvider()).invokeEnqueue(
+                context.holder().getKey().x,
+                context.holder().getKey().z,
+                () -> 0,
+                ThreadedLevelLightEngine.TaskType.POST_UPDATE,
+                () -> future.complete(null)
+        );
+        return future;
+    }
+
+    @Override
+    public String toString() {
+        return "minecraft:empty";
+    }
+
+    @Override
+    public KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] getDependenciesToRemove(ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, ?> holder) {
+        return EMPTY_DEPENDENCIES;
+    }
+
+    @Override
+    public KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] getDependenciesToAdd(ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, ?> holder) {
+        return EMPTY_DEPENDENCIES;
+    }
+}

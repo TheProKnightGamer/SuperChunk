@@ -1,0 +1,21 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.opts.dfc.mixin",
+  "plugin": "dev.superchunk.com.ishland.c2me.base.common.ModuleMixinPlugin",
+  "mixins": [
+    "MixinChunkNoiseSampler",
+    "MixinChunkNoiseSampler1",
+    "MixinChunkNoiseSamplerCache2D",
+    "MixinChunkNoiseSamplerCacheOnce",
+    "MixinChunkNoiseSamplerCellCache",
+    "MixinChunkNoiseSamplerDensityInterpolator",
+    "MixinChunkNoiseSamplerFlatCache",
+    "MixinChunkNoiseSamplerGpuGrid",
+    "MixinNoiseInterpolatorOnDeviceInterp",
+    "MixinDFTBinaryOperation",
+    "MixinDFTWrapping",
+    "MixinNoiseConfig",
+    "MixinSplineImplementation"
+  ]
+}

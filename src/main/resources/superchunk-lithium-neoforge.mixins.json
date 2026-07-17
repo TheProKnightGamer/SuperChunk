@@ -1,0 +1,20 @@
+{
+  "package" : "dev.superchunk.net.caffeinemc.mods.lithium.neoforge.mixin",
+  "required" : true,
+  "compatibilityLevel" : "JAVA_21",
+  "plugin" : "dev.superchunk.net.caffeinemc.mods.lithium.mixin.LithiumMixinPlugin",
+  "injectors" : {
+    "defaultRequire" : 1
+  },
+  "overwrites" : {
+    "conformVisibility" : true
+  },
+  "mixins" : [
+    "block.hopper.LevelMixin",
+    "chunk_load_tricks.ChunkLoadTricksMixin",
+    "util.inventory_change_listening.ChestBlockEntityMixin"
+  ],
+  "client" : [
+    "startup.MinecraftMixin"
+  ]
+}

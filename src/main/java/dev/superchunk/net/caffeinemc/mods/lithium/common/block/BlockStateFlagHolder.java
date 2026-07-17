@@ -1,0 +1,7 @@
+package dev.superchunk.net.caffeinemc.mods.lithium.common.block;
+
+public interface BlockStateFlagHolder {
+    int lithium$getAllFlags();
+
+    void lithium$initializeFlags();
+}

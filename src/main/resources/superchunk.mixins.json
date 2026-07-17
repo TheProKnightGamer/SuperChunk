@@ -1,0 +1,38 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "dev.superchunk.mixin",
+  "plugin": "dev.superchunk.SuperChunkMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "IHeightmapAccess",
+    "IWorldGenRegionAccess",
+    "MixinOreFeatureFast",
+    "MixinCarverPlainRandom",
+    "MixinChunkAccessBiome",
+    "MixinHeightmapPrimeFast",
+    "MixinSurfaceColumnMemo",
+    "MixinXoroshiroReseedInPlace",
+    "MixinChunkAccessInlineHeights",
+    "MixinChunkGeneratorDecorationStepCache",
+    "MixinChunkMapClimateDimLabel",
+    "MixinChunkMapPredictiveGen",
+    "MixinClimateSampler",
+    "MixinNoiseChunkGeneratorCompactIds",
+    "MixinNoiseChunkVeinCensus",
+    "MixinPalettedContainerGetAll",
+    "MixinPlacedFeatureImperative",
+    "MixinPlainWorldgenRandomSites",
+    "MixinPlayerChunkSenderFullSpeed",
+    "MixinPlayerChunkSenderLatencyMetrics",
+    "MixinWorldCarverLavaState",
+    "MixinWorldGenRegionInlineHeights"
+  ],
+  "client": [
+    "client.MixinOptionsExtendRenderDistance"
+  ],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.opts.allocs.mixin",
+  "plugin": "dev.superchunk.com.ishland.c2me.opts.allocs.MixinPlugin",
+  "mixins": [
+    "MixinIdentifier",
+    "MixinNbtCompound",
+    "MixinNbtCompound1",
+    "MixinNbtList",
+    "MixinNbtList1",
+    "MixinUtil",
+    "object_pooling_caching.MixinOreFeature",
+    "surfacebuilder.MixinMaterialRuleContext",
+    "surfacebuilder.MixinMaterialRulesSequenceBlockStateRule",
+    "surfacebuilder.MixinMaterialRulesSequenceMaterialRule"
+  ]
+}

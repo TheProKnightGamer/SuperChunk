@@ -1,0 +1,20 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.opts.scheduling.mixin",
+  "plugin": "dev.superchunk.com.ishland.c2me.opts.scheduling.mixin.MixinPlugin",
+  "mixins": [
+    "general_overheads.MixinThreadedAnvilChunkStorage",
+    "idle_tasks.autosave.disable_vanilla_mid_tick_autosave.MixinThreadedAnvilChunkStorage",
+    "idle_tasks.autosave.enhanced_autosave.MixinMinecraftServer",
+    "idle_tasks.autosave.enhanced_autosave.MixinThreadedAnvilChunkStorage",
+    "mid_tick_chunk_tasks.MixinMinecraftServer",
+    "mid_tick_chunk_tasks.MixinServerChunkManager",
+    "mid_tick_chunk_tasks.MixinServerWorld",
+    "mid_tick_chunk_tasks.MixinWorld",
+    "ordering.player_move.MixinServerPlayNetworkHandler",
+    "task_scheduling.MixinChunkHolder",
+    "task_scheduling.MixinEntityChunkDataAccess",
+    "task_scheduling.MixinServerChunkManager"
+  ]
+}

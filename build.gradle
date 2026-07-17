@@ -1,0 +1,380 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.moddev' version '2.0.119'
+    id 'idea'
+}
+
+tasks.named('wrapper', Wrapper).configure {
+    // Define wrapper values here so as to not have to always do so when updating gradlew.properties.
+    // Switching this to Wrapper.DistributionType.ALL will download the full gradle sources that comes with
+    // documentation attached on cursor hover of gradle classes and methods. However, this comes with increased
+    // file size for Gradle. If you do switch this to ALL, run the Gradle wrapper task twice afterwards.
+    // (Verify by checking gradle/wrapper/gradle-wrapper.properties to see if distributionUrl now points to `-all`)
+    distributionType = Wrapper.DistributionType.BIN
+}
+
+version = mod_version
+group = mod_group_id
+
+repositories {
+    mavenCentral()
+    // C2ME pulls MixinSquared from jitpack (com.github.bawnorton.mixinsquared:*-neoforge).
+    maven { url 'https://jitpack.io' }
+    // MixinSquared's own release maven (group com.bawnorton.mixinsquared).
+    maven {
+        url 'https://maven.bawnorton.com/releases'
+        content {
+            includeGroup 'com.bawnorton.mixinsquared'
+        }
+    }
+}
+
+base {
+    archivesName = mod_id
+}
+
+// Mojang ships Java 21 to end users in 1.21.1, so mods should target Java 21.
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// === LWJGL bundling is SIDE-SPECIFIC — AUTO-ADAPTING, NO FLAG ====================================
+// A Minecraft CLIENT already ships module `org.lwjgl` (core) + `org.lwjgl.natives` at 3.3.3 (it
+// renders with LWJGL). Embedding our own copy makes the module layer read TWO modules named
+// org.lwjgl -> "reads more than one module named org.lwjgl" boot crash. A headless dedicated SERVER
+// ships NO lwjgl at all, so there module org.lwjgl MUST be present or our lwjgl-opencl (module
+// org.lwjgl.opencl, `requires transitive org.lwjgl`) fails resolution ("org.lwjgl not found").
+//
+// One static artifact cannot satisfy both: whether to add module org.lwjgl is INHERENTLY a runtime
+// (dist) decision the module system cannot express. NeoForge/FML (4.0.42, verified against the
+// loader source) only lets you contribute a library conditionally via an IDependencyLocator /
+// IModFileCandidateLocator service, and any jar that DECLARES such a service at its TOP LEVEL is
+// hoisted into modlauncher's SERVICE layer and EXCLUDED from mod loading (and nested jar-in-jar
+// service files are never scanned in time).
+//
+// SINGLE-JAR SHELL SCHEME (replaces the old two-jar mod + `-lwjgl-server-locator` companion):
+// the distributed superchunk-<ver>.jar is a thin SHELL — just the bootstrap IDependencyLocator
+// (dev.superchunk.loader.SuperChunkBootstrapLocator), its top-level META-INF/services
+// registration, and two side-stashed jars under META-INF/jarjar/ that are in NO jarJar metadata:
+// the REAL mod jar (superchunk-core.jar — mods.toml, mixins, nested libs, lwjgl natives) and
+// lwjgl-core. FML hoists the service-declaring shell into the modlauncher SERVICE layer and skips
+// it as a mods-folder candidate; the locator then contributes the nested core as the regular mod
+// file (both dists), plus lwjgl-core (module org.lwjgl) ONLY when FMLEnvironment.dist ==
+// DEDICATED_SERVER. It runs at a priority above the built-in JarInJar locator, whose per-locator
+// snapshot is taken at its own turn, so the core's nested jarJar libraries load in the normal
+// global selection.
+//
+// Why the mod cannot simply BE the hoisted jar (first single-jar attempt, real boot failure):
+// a hoisted jar becomes an AUTOMATIC module in the SERVICE layer exporting EVERY package it
+// contains; re-contributing the same jar as the GAME-layer mod then has two layers exporting the
+// mod's packages, and any automatic module in the game layer (e.g. jarJar'd mixinextras) reads
+// both -> "ResolutionException: Modules superchunk and dev.superchunk.bootstrap export package
+// ...". The shell holds ONLY dev.superchunk.loader, which the core jar excludes -> no overlap.
+// The shell's SERVICE-layer module name is pinned via Automatic-Module-Name; the GAME-layer mod
+// module is named after the modid ("superchunk", per FML's ModJarMetadata) — no name clash either.
+//
+// The service file is injected at JAR-BUILD time only (never src/main/resources), so dev-run
+// classpaths carry no loader service (ClasspathTransformerDiscoverer would hoist the dev classes
+// and the dev mod would not load). Dev runs keep loading the mod from classes as always.
+//
+// Result of `./gradlew build`:
+//   * superchunk-<ver>.jar       the SHELL — the ONE file users install, client and server alike.
+//   * superchunk-<ver>-core.jar  the real mod (internal artifact; rides inside the shell).
+// Deploy: the shell jar in mods/ on client AND dedicated server. (Delete any old
+// superchunk-*-lwjgl-server-locator.jar from earlier installs; it is redundant but harmless —
+// duplicate org.lwjgl contributions collapse in FML's UniqueModListBuilder.)
+// See dev.superchunk.loader.SuperChunkBootstrapLocator for the full rationale.
+
+// LBP-4: derive the LWJGL native classifier from the HOST OS. The headless server/gameTestServer
+// dev runs ship no game-provided org.lwjgl, so they must add lwjgl-core + one matching native
+// themselves. Hardcoding natives-linux broke GPU init on Windows/macOS dev boxes; pick the native
+// for whatever OS Gradle is running on instead. Dev-run only — no effect on any shipped jar.
+def hostOsName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def lwjglNativesClassifier =
+        hostOsName.contains('win')                                ? 'natives-windows' :
+        (hostOsName.contains('mac') || hostOsName.contains('darwin')) ? 'natives-macos' :
+                                                                    'natives-linux'
+
+neoForge {
+    // Specify the version of NeoForge to use.
+    version = project.neo_version
+
+    parchment {
+        mappingsVersion = project.parchment_mappings_version
+        minecraftVersion = project.parchment_minecraft_version
+    }
+
+    // This line is optional. Access Transformers are automatically detected
+    // accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
+
+    // Default run configurations.
+    // These can be tweaked, removed, or duplicated as needed.
+    runs {
+        client {
+            client()
+
+            // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // Headless dev server has no lwjgl; lwjgl-opencl `requires org.lwjgl`. Add the core +
+            // ITS host-OS native to THIS run only — never the client run (would duplicate org.lwjgl).
+            // (Only ONE native: the natives jar is module org.lwjgl.natives, so two would collide.)
+            additionalRuntimeClasspathConfiguration.dependencies.add(
+                    project.dependencies.create('org.lwjgl:lwjgl:3.3.3') { transitive = false })
+            additionalRuntimeClasspathConfiguration.dependencies.add(
+                    project.dependencies.create("org.lwjgl:lwjgl:3.3.3:${lwjglNativesClassifier}") { transitive = false })
+        }
+
+        // This run config launches GameTestServer and runs all registered gametests, then exits.
+        // By default, the server will crash when no gametests are provided.
+        // The gametest system is also enabled by default for other run configs under the /test command.
+        gameTestServer {
+            type = "gameTestServer"
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // Same as the server run: headless, no lwjgl -> supply core + one native here only.
+            additionalRuntimeClasspathConfiguration.dependencies.add(
+                    project.dependencies.create('org.lwjgl:lwjgl:3.3.3') { transitive = false })
+            additionalRuntimeClasspathConfiguration.dependencies.add(
+                    project.dependencies.create("org.lwjgl:lwjgl:3.3.3:${lwjglNativesClassifier}") { transitive = false })
+        }
+
+        data {
+            data()
+
+            // example of overriding the workingDirectory set in configureEach above, uncomment if you want to use it
+            // gameDirectory = project.file('run-data')
+
+            // Specify the modid for data generation, where to output the resulting resource, and where to look for existing resources.
+            programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
+        }
+
+        // applies to all the run configs above
+        configureEach {
+            // Recommended logging data for a userdev environment
+            // The markers can be added/remove as needed separated by commas.
+            // "SCAN": For mods scan.
+            // "REGISTRIES": For firing of registry events.
+            // "REGISTRYDUMP": For getting the contents of all registries.
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+
+            // Recommended logging level for the console
+            // You can set various levels here.
+            // Please read: https://stackoverflow.com/questions/2031163/when-to-use-the-different-log-levels
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        // define mod <-> source bindings
+        // these are used to tell the game which sources are for which mod
+        // multi mod projects should define one per mod
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+// Include resources generated by data generators.
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+// Sets up a dependency configuration called 'localRuntime'.
+// This configuration should be used instead of 'runtimeOnly' to declare
+// a dependency that will be present for runtime testing but that is
+// "optional", meaning it will not be pulled by dependents of this mod.
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+    // lwjgl-core + platform natives that get stashed inside the mod jar as plain resources (NOT as
+    // jarJar modules). Resolved only to copy the artifact files into the jar; never on any classpath.
+    lwjglServerBundle {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
+dependencies {
+    // === SuperChunk merged-mod dependencies ===
+    // FlowSched (vendored at dev.superchunk.com.ishland.flowsched) needs RxJava + reactive-streams.
+    // jarJar(implementation(...)) = on the compile classpath AND embedded as a nested library jar,
+    // so NeoForge's module loader makes them visible to the mod at runtime (dev + production).
+    // (Plain `implementation` libs aren't in the mod's module layer -> ClassNotFoundException at boot.)
+    jarJar(implementation('io.reactivex.rxjava3:rxjava:3.1.12'))
+    jarJar(implementation('org.reactivestreams:reactive-streams:1.0.4'))
+    // C2ME bundled libraries:
+    jarJar(implementation('com.ibm.async:asyncutil:0.1.0'))        // async locks + Either (c2me-base)
+    jarJar(implementation('net.objecthunter:exp4j:0.4.8'))         // expression eval (C2ME config)
+    jarJar(implementation('org.jctools:jctools-core:4.0.5'))       // lock-free queues
+    jarJar(implementation('com.github.ben-manes.caffeine:caffeine:3.2.1')) // caching
+    // MixinSquared: neoforge = runtime impl (embedded); common = annotation/AP surface (compile only).
+    jarJar(implementation('com.github.bawnorton.mixinsquared:mixinsquared-neoforge:0.3.3'))
+    // GPU compute (OpenCL) via LWJGL. The OpenCL ICD itself comes from the system GPU driver; the
+    // LWJGL Java bindings glue our code to it. See the "LWJGL dist-switch packaging" block (the
+    // `neoForge {` header comment + the `jar`/locator tasks below) for the client-vs-server split
+    // and the duplicate-module crash it avoids.
+    //
+    // lwjgl-opencl (module org.lwjgl.opencl): ALWAYS embedded — neither a client nor a server ships
+    // it. Its module-info `requires transitive org.lwjgl`, so whatever layer loads it must resolve
+    // module org.lwjgl (provided by the game on a client; by the bundled core below on a server).
+    jarJar(implementation('org.lwjgl:lwjgl-opencl:3.3.3') { transitive = false })
+    // org.lwjgl core classes are needed to COMPILE (CL.create, Configuration, MemoryStack, …).
+    // compileOnly = on the compile classpath but NOT embedded and NOT on the runtime module path,
+    // so it never becomes a second org.lwjgl module at runtime. The actual runtime org.lwjgl comes
+    // from the game (client) or from the dist-switch locator on a server (see lwjglServerBundle).
+    compileOnly 'org.lwjgl:lwjgl:3.3.3'
+    // lwjgl-core (module org.lwjgl) + its platform natives. These are placed into the mod jar as
+    // PLAIN resources under META-INF/jarjar/ (see the `jar` task wiring below) and are deliberately
+    // NOT registered as jarJar deps, so they are absent from META-INF/jarjar/metadata.json and the
+    // built-in JarInJar locator ignores them. On a SERVER, SuperChunkBootstrapLocator (registered
+    // inside the mod jar itself) contributes the core jar as module org.lwjgl; the GPU backend
+    // extracts the matching native from the natives jar. On a CLIENT nothing reads them as a module,
+    // so the game's own org.lwjgl is used and there is no duplicate-module crash.
+    lwjglServerBundle('org.lwjgl:lwjgl:3.3.3') { transitive = false }
+    lwjglServerBundle('org.lwjgl:lwjgl:3.3.3:natives-linux') { transitive = false }
+    lwjglServerBundle('org.lwjgl:lwjgl:3.3.3:natives-windows') { transitive = false }
+    compileOnly 'com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3'
+    annotationProcessor 'com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3'
+
+    // Dev-run classpath: C2ME's mixin config plugins (ModuleMixinPlugin) + ConfigSystem run in the
+    // early bootstrap/mixin classloader, BEFORE jar-in-jar libs become visible. Expose these libs to
+    // the dev run so the plugins/config can load them. (In a packaged jar, jarJar handles this.)
+    additionalRuntimeClasspath 'io.reactivex.rxjava3:rxjava:3.1.12'
+    additionalRuntimeClasspath 'org.reactivestreams:reactive-streams:1.0.4'
+    additionalRuntimeClasspath 'com.ibm.async:asyncutil:0.1.0'
+    additionalRuntimeClasspath 'net.objecthunter:exp4j:0.4.8'
+    additionalRuntimeClasspath 'org.jctools:jctools-core:4.0.5'
+    additionalRuntimeClasspath 'com.github.ben-manes.caffeine:caffeine:3.2.1'
+    additionalRuntimeClasspath 'com.github.bawnorton.mixinsquared:mixinsquared-neoforge:0.3.3'
+    // lwjgl-opencl is needed by EVERY dev run (client + server) — neither side's game ships it.
+    // (lwjgl CORE + native are NOT added here: the client run gets them from the real game, and the
+    // headless server/gameTestServer runs add them per-run above — adding them globally would put a
+    // second org.lwjgl on the client run's module path and reproduce the duplicate-module crash.)
+    additionalRuntimeClasspath('org.lwjgl:lwjgl-opencl:3.3.3') { transitive = false }
+    // The neoforge wrapper only carries platform/* classes; the core (MixinSquaredBootstrap,
+    // DynamicSelectorHandler, the extension) lives in a NESTED jar that jarJar only unpacks in a
+    // packaged build. For the dev run, the mixin bootstrap classloader needs the core on the
+    // classpath directly, so add mixinsquared-common (== the full MixinSquared core) too.
+    additionalRuntimeClasspath 'com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3'
+
+    // Example optional mod dependency with JEI
+    // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime
+    // compileOnly "mezz.jei:jei-${mc_version}-common-api:${jei_version}"
+    // compileOnly "mezz.jei:jei-${mc_version}-neoforge-api:${jei_version}"
+    // We add the full version to localRuntime, not runtimeOnly, so that we do not publish a dependency on it
+    // localRuntime "mezz.jei:jei-${mc_version}-neoforge:${jei_version}"
+
+    // Example mod dependency using a mod jar from ./libs with a flat dir repository
+    // This maps to ./libs/coolmod-${mc_version}-${coolmod_version}.jar
+    // The group id is ignored when searching -- in this case, it is "blank"
+    // implementation "blank:coolmod-${mc_version}:${coolmod_version}"
+
+    // Example mod dependency using a file as dependency
+    // implementation files("libs/coolmod-${mc_version}-${coolmod_version}.jar")
+
+    // Example project dependency using a sister or child project:
+    // implementation project(":myproject")
+
+    // For more info:
+    // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
+    // http://www.gradle.org/docs/current/userguide/dependency_management.html
+}
+
+// LBP-3: the mod manifest (src/main/resources/META-INF/neoforge.mods.toml) is INTENTIONALLY STATIC.
+// The stock MDK ships a `generateModMetadata` ProcessResources task that expands ${...} properties
+// from gradle.properties into templates under src/main/templates/. That directory has never existed
+// in this project, so the task always ran NO-SOURCE (a silent no-op) while the real, hardcoded toml
+// was shipped verbatim — i.e. gradle.properties (mod_version / loader_version_range /
+// minecraft_version_range / authors / etc.) was silently ignored. Rather than keep a dead task that
+// pretends the manifest is generated, the template/ideSync wiring is removed and the toml is treated
+// as the single hand-maintained source. If you bump versions, edit BOTH gradle.properties (used by
+// this build script for `version`, run configs, etc.) AND neoforge.mods.toml to keep them in sync.
+
+
+// === LWJGL dist-switch packaging (SINGLE-JAR SHELL — see the header comment near the top) =======
+// (A) CORE jar (`jar`, classifier 'core') = the real mod. Excludes the shell-only locator package
+//     (the shell's SERVICE-layer module and the mod's GAME-layer module must share NO packages).
+//     Carries ONLY the lwjgl platform natives as plain META-INF/jarjar/ resources — they feed
+//     OpenCLBackend.ensureNativeLibrary(), and they are in no jarJar metadata so FML never loads
+//     them as modules. lwjgl-CORE moves to the shell (it feeds the locator's server-only branch).
+// (B) SHELL jar (`shellJar`, the unclassified superchunk-<ver>.jar) = locator classes + generated
+//     service file + stashed superchunk-core.jar + stashed lwjgl-core.
+var bootstrapLocatorService = tasks.register('bootstrapLocatorService') {
+    var outDir = layout.buildDirectory.dir('generated/bootstrapLocator')
+    outputs.dir(outDir)
+    doLast {
+        var svc = outDir.get().file('META-INF/services/net.neoforged.neoforgespi.locating.IDependencyLocator').asFile
+        svc.parentFile.mkdirs()
+        svc.text = 'dev.superchunk.loader.SuperChunkBootstrapLocator\n'
+    }
+}
+tasks.named('jar') {
+    archiveClassifier = 'core'
+    exclude 'dev/superchunk/loader/**'
+    from(configurations.lwjglServerBundle) {
+        into 'META-INF/jarjar'
+        include '*natives*'
+    }
+}
+var shellJar = tasks.register('shellJar', Jar) {
+    dependsOn tasks.named('jar'), bootstrapLocatorService
+    archiveBaseName = mod_id
+    archiveVersion = mod_version
+    from(sourceSets.main.output) {
+        include 'dev/superchunk/loader/**'
+    }
+    from(bootstrapLocatorService)
+    // The core mod jar under the STABLE name the locator looks up (version-free on purpose).
+    from(tasks.named('jar').flatMap { it.archiveFile }) {
+        into 'META-INF/jarjar'
+        rename { 'superchunk-core.jar' }
+    }
+    from(configurations.lwjglServerBundle) {
+        into 'META-INF/jarjar'
+        exclude '*natives*'
+    }
+    manifest {
+        // Pins the SERVICE-layer module name away from the GAME-layer mod module ("superchunk").
+        attributes('Automatic-Module-Name': 'dev.superchunk.bootstrap')
+    }
+}
+tasks.named('assemble') { dependsOn shellJar }
+
+// === LBP-1: one-command deploy set ==============================================================
+// ONE jar (the shell) serves client and dedicated server alike. `./gradlew deployBundle` stays the
+// canonical "give me the shippable mods set" command.
+tasks.register('deployBundle', Copy) {
+    group = 'build'
+    description = 'Collects the (single) shell mod jar into build/deploy (a server-complete mods set).'
+    from shellJar.flatMap { it.archiveFile }
+    into layout.buildDirectory.dir('deploy')
+}
+
+
+// Example configuration to allow publishing using the maven-publish plugin
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            from components.java
+        }
+    }
+    repositories {
+        maven {
+            url "file://${project.projectDir}/repo"
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+}
+
+// IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}

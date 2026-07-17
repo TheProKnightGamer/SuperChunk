@@ -1,0 +1,23 @@
+package dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla;
+
+import dev.superchunk.com.ishland.c2me.base.common.ModuleMixinPlugin;
+import dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.common.Config;
+
+public class MixinPlugin extends ModuleMixinPlugin {
+
+    @Override
+    public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
+        if (!super.shouldApplyMixin(targetClassName, mixinClassName)) return false;
+
+        if (mixinClassName.startsWith("dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.aquifer."))
+            return Config.optimizeAquifer;
+
+        if (mixinClassName.startsWith("dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.the_end_biome_cache."))
+            return Config.useEndBiomeCache;
+
+        if (mixinClassName.startsWith("dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.structure_weight_sampler."))
+            return Config.optimizeStructureWeightSampler;
+
+        return true;
+    }
+}

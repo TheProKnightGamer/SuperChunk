@@ -1,0 +1,27 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.notickvd.mixin",
+  "plugin": "dev.superchunk.com.ishland.c2me.notickvd.MixinPlugin",
+  "mixins": [
+    "MixinChunkHolder",
+    "MixinChunkTicketManager",
+    "MixinChunkTicketManagerNearbyChunkTicketUpdater",
+    "MixinMinecraftServer",
+    "MixinPlayerManager",
+    "MixinPlayerNoTickLoaderFullSpeed",
+    "MixinServerAccessibleChunkSending",
+    "MixinServerBlockTicking",
+    "MixinServerChunkManager",
+    "MixinSimulationDistanceLevelPropagator",
+    "MixinThreadedAnvilChunkStorage",
+    "MixinWorld",
+    "MixinWorldChunk",
+    "ext_render_distance.MixinServerConfigurationNetworkHandler",
+    "ext_render_distance.MixinServerPlayNetworkHandler",
+    "servercore.MixinServerChunkManager"
+  ],
+  "client": [
+    "client.MixinIntegratedServer"
+  ]
+}
