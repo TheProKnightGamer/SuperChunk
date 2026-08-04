@@ -60,7 +60,7 @@ public final class PlayerLatency {
     public static final boolean LATENCY_METRICS;
 
     static {
-        boolean sendAtChunkSending = false;
+        boolean sendAtChunkSending = true; // default ON (the port-defect fix); see SuperChunkConfig
         boolean priorityBias = false;
         boolean latencyMetrics = false;
         try {
@@ -70,8 +70,10 @@ public final class PlayerLatency {
             latencyMetrics = parseBoolean(p, KEY_LATENCY_METRICS);
         } catch (Throwable t) {
             // Never let config trouble take down class init (would poison every hook site with
-            // NoClassDefFoundError). Fall back to defaults == all flags OFF == shipped behavior.
-            LOGGER.warn("[SuperChunk-PlayerLatency] Failed to read player latency settings — all flags stay OFF.", t);
+            // NoClassDefFoundError). Fall back to defaults: sendAtChunkSending ON (the fix),
+            // priorityBias / latencyMetrics OFF.
+            LOGGER.warn("[SuperChunk-PlayerLatency] Failed to read player latency settings — using defaults "
+                    + "(sendAtChunkSending on, others off).", t);
         }
         SEND_AT_CHUNK_SENDING = sendAtChunkSending;
         PRIORITY_BIAS = priorityBias;

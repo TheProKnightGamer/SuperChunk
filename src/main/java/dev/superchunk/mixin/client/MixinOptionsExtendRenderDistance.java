@@ -31,6 +31,14 @@ public class MixinOptionsExtendRenderDistance {
             index = 1,
             require = 0)
     private int superchunk$extendRenderDistanceMax(int maxInclusive) {
-        return Math.max(maxInclusive, ExtendedRenderDistance.maxRenderDistance());
+        int cap = ExtendedRenderDistance.maxRenderDistance();
+        int widened = Math.max(maxInclusive, cap);
+        // One-time boot line (Options.<init> runs once): confirms this mixin applied and shows the
+        // values. If you never see it, the mixin didn't apply; if widened==maxInclusive, the config
+        // read client.maxRenderDistance as the vanilla cap.
+        dev.superchunk.SuperChunk.LOGGER.info(
+                "[SuperChunk] render-distance slider cap {} -> {} (client.maxRenderDistance={})",
+                maxInclusive, widened, cap);
+        return widened;
     }
 }

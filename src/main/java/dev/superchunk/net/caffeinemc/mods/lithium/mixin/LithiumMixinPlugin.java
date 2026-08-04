@@ -50,25 +50,50 @@ public class LithiumMixinPlugin implements IMixinConfigPlugin {
         return STANDALONE_LITHIUM;
     }
 
+    /**
+     * Mod-ids that ARE Lithium (the original, or a fork/repackage that ships Lithium's mixins under
+     * the same {@code net.caffeinemc.mods.lithium.*} classes). Any of these standing alongside
+     * SuperChunk means two copies of the same Lithium mixins would target the same vanilla classes —
+     * a fatal double-application (observed as e.g. {@code Critical injection failure: Redirector
+     * removeOldMapAlloc ... (0/1) succeeded} on {@code alloc.nbt.CompoundTagMixin} when Radium is
+     * present). Detecting them here stands the bundled copy down so the external one is authoritative,
+     * exactly as for the original standalone Lithium. Radium keeps the {@code net.caffeinemc.mods.lithium}
+     * package and reads {@code config/lithium.properties} (so SuperChunk's five C2ME-overlap pins,
+     * written there, still apply) — verified compatible via server boot test.
+     */
+    private static final String[] LITHIUM_EQUIVALENT_MODIDS = {"lithium", "radium"};
+
     private static boolean detectStandaloneLithium() {
-        // Primary: the FML loading mod list, available at mixin-plugin time and keyed by modId.
-        // SuperChunk declares only modId "superchunk", so a "lithium" mod file can only be a standalone.
+        // Primary: scan the FML loading mod list BY MOD-ID (populated during mod discovery, before
+        // mixin config plugins run). We iterate getMods() — the same approach C2ME's own module
+        // detection uses — rather than getModFileById, which does not reliably resolve every mod at
+        // this early phase (that is why an earlier getModFileById("radium") probe silently missed
+        // Radium, a legacy me.jellysquid Lithium fork). SuperChunk declares only modId "superchunk",
+        // so any of these ids can only be an external Lithium/Radium.
         try {
             net.neoforged.fml.loading.LoadingModList lml = net.neoforged.fml.loading.LoadingModList.get();
-            if (lml != null && lml.getModFileById("lithium") != null) {
-                return true;
+            if (lml != null) {
+                java.util.List<String> ids = java.util.Arrays.asList(LITHIUM_EQUIVALENT_MODIDS);
+                if (lml.getMods().stream().anyMatch(mi -> ids.contains(mi.getModId()))) {
+                    return true;
+                }
             }
         } catch (Throwable ignored) {
-            // LoadingModList not ready / API mismatch — fall through to the class-presence probe.
+            // LoadingModList not ready / API mismatch — fall through to the class-presence probes.
         }
-        // Fallback: the standalone lives under net.caffeinemc.mods.lithium.* (bundled is dev.superchunk.*).
-        // initialize=false so we only test presence, never run its static init.
-        try {
-            Class.forName("net.caffeinemc.mods.lithium.mixin.LithiumMixinPlugin", false,
-                    LithiumMixinPlugin.class.getClassLoader());
-            return true;
-        } catch (Throwable ignored) {
-            // absent — no standalone Lithium
+        // Fallback: class-presence of a standalone Lithium's plugin/config, under either the modern
+        // (net.caffeinemc) or legacy (me.jellysquid, e.g. Radium) package. The bundled copy lives
+        // under dev.superchunk.*, so either of these can only come from an external mod.
+        // initialize=false: test presence only, never run static init.
+        for (String probe : new String[]{
+                "net.caffeinemc.mods.lithium.mixin.LithiumMixinPlugin",
+                "me.jellysquid.mods.lithium.common.config.LithiumConfig"}) {
+            try {
+                Class.forName(probe, false, LithiumMixinPlugin.class.getClassLoader());
+                return true;
+            } catch (Throwable ignored) {
+                // absent — try next probe
+            }
         }
         return false;
     }

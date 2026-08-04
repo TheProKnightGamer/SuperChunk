@@ -47,6 +47,7 @@ public class PlayerNoTickLoader {
     private boolean dirtyManagedChunks = false;
     private boolean recreateIterators = false;
     private volatile long pendingLoadsCountSnapshot = 0L;
+    private volatile int managedChunksCountSnapshot = 0;
 
     public PlayerNoTickLoader(ChunkMap tacs, NoTickSystem noTickSystem) {
         this.tacs = tacs;
@@ -141,6 +142,13 @@ public class PlayerNoTickLoader {
             }
             this.pendingLoadsCountSnapshot = pendingLoadsCount;
         }
+
+        this.managedChunksCountSnapshot = this.managedChunks.size();
+    }
+
+    /** Diagnostic gauge (see {@code ChunkCensus}): size of the no-tick ring this loader holds. */
+    public int getManagedChunksCount() {
+        return this.managedChunksCountSnapshot;
     }
 
     private boolean addOneTicket() {

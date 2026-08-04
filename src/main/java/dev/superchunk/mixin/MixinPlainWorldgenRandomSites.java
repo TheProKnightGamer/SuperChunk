@@ -3,13 +3,13 @@ package dev.superchunk.mixin;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.superchunk.worldgen.PlainWorldgenRandom;
+import dev.superchunk.worldgen.PlainWorldgenRandomGate;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 
 /**
@@ -31,10 +31,6 @@ import org.spongepowered.asm.mixin.injection.At;
 @Mixin(value = {NoiseBasedChunkGenerator.class, ChunkGenerator.class, RandomSpreadStructurePlacement.class})
 public abstract class MixinPlainWorldgenRandomSites {
 
-    @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
-            Boolean.parseBoolean(System.getProperty("superchunk.worldgen.plainWorldgenRandom", "true"));
-
     @WrapOperation(
             method = "*",
             at = @At(
@@ -42,6 +38,6 @@ public abstract class MixinPlainWorldgenRandomSites {
                     target = "(Lnet/minecraft/util/RandomSource;)Lnet/minecraft/world/level/levelgen/WorldgenRandom;"),
             require = 0)
     private WorldgenRandom superchunk$plainWorldgenRandom(RandomSource delegate, Operation<WorldgenRandom> original) {
-        return SUPERCHUNK$ENABLED ? new PlainWorldgenRandom(delegate) : original.call(delegate);
+        return PlainWorldgenRandomGate.ENABLED ? new PlainWorldgenRandom(delegate) : original.call(delegate);
     }
 }

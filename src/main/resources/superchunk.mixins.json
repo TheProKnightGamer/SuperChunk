@@ -6,15 +6,23 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "IHeightmapAccess",
+    "IHeightmapPlacementAccess",
+    "IHeightRangePlacementAccess",
+    "IPalettedContainerUnpackAccess",
+    "IPlacementFilterAccess",
+    "IRandomOffsetPlacementAccess",
+    "IRepeatingPlacementAccess",
     "IWorldGenRegionAccess",
     "MixinOreFeatureFast",
     "MixinCarverPlainRandom",
     "MixinChunkAccessBiome",
     "MixinHeightmapPrimeFast",
+    "MixinLevelChunkPostProcessSkip",
     "MixinSurfaceColumnMemo",
     "MixinXoroshiroReseedInPlace",
     "MixinChunkAccessInlineHeights",
     "MixinChunkGeneratorDecorationStepCache",
+    "MixinChunkSerializerFastPalette",
     "MixinChunkMapClimateDimLabel",
     "MixinChunkMapPredictiveGen",
     "MixinClimateSampler",
@@ -25,11 +33,16 @@
     "MixinPlainWorldgenRandomSites",
     "MixinPlayerChunkSenderFullSpeed",
     "MixinPlayerChunkSenderLatencyMetrics",
+    "MixinSpringFeatureScratch",
+    "MixinWorldCarverContextReuse",
+    "MixinWorldCarverEllipsoidScratch",
     "MixinWorldCarverLavaState",
     "MixinWorldGenRegionInlineHeights"
   ],
   "client": [
-    "client.MixinOptionsExtendRenderDistance"
+    "client.LevelRendererViewAreaAccessor",
+    "client.MixinOptionsExtendRenderDistance",
+    "client.MixinSodiumRenderDistanceCap"
   ],
   "server": [],
   "injectors": {

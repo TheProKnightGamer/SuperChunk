@@ -52,6 +52,28 @@ public final class JigsawFreeShape {
     }
 
     /**
+     * Skip-blocked early-out (see {@link JigsawShapeTracker#maybeSkipBlockedCandidate}): is the
+     * connector block cell {@code [x,x+1]×[y,y+1]×[z,z+1]} — where a RIGID child's matching jigsaw
+     * would sit — necessarily unusable? True iff that cell pokes past the boundary or overlaps an
+     * already-placed box. A rigid child's bounding box always contains its own jigsaw block, so when
+     * this returns true the child provably fails the full free-space test and can be rejected without
+     * enumerating its jigsaw blocks. (One-directional: a false here does NOT assert the child fits —
+     * the full {@link #candidateSticksOut} test still runs.)
+     */
+    public boolean connectorBlocks(int x, int y, int z) {
+        double cMinX = x, cMinY = y, cMinZ = z;
+        double cMaxX = x + 1.0, cMaxY = y + 1.0, cMaxZ = z + 1.0;
+        // Cell pokes outside the positive boundary?
+        if (cMinX < pMinX - EPS || cMaxX > pMaxX + EPS
+                || cMinY < pMinY - EPS || cMaxY > pMaxY + EPS
+                || cMinZ < pMinZ - EPS || cMaxZ > pMaxZ + EPS) {
+            return true;
+        }
+        // Cell overlaps an already-placed (subtracted) box?
+        return this.placed.intersects(cMinX, cMinY, cMinZ, cMaxX, cMaxY, cMaxZ);
+    }
+
+    /**
      * Equivalent to {@code Shapes.joinIsNotEmpty(this, Shapes.create(cand), ONLY_SECOND)}:
      * returns true iff {@code cand} is NOT fully contained in the free region — i.e. it pokes
      * past the boundary, or it overlaps a previously-placed box.

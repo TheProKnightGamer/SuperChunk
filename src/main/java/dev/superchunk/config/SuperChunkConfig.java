@@ -135,7 +135,13 @@ public final class SuperChunkConfig {
                         + "#                                               round-trip parity check before enabling\n"
                         + "#   chunkSystem.recoverFromErrors (false)     - true = salvage worldgen exceptions instead of\n"
                         + "#                                               crashing (good for play; keep false for parity R&D)\n"
-                        + "#   chunkSystem.lowMemoryMode (false)         - trade throughput for heap headroom");
+                        + "#   chunkSystem.lowMemoryMode (false)         - trade throughput for heap headroom\n"
+                        + "#   chunkSystem.suppressGhostMushrooms        - SuperChunk defaults this TRUE: with\n"
+                        + "#                                               player.sendAtChunkSending on, the outer no-tick\n"
+                        + "#                                               ring reaches the client before post-processing,\n"
+                        + "#                                               which would briefly show MC-276863 ghost\n"
+                        + "#                                               mushrooms; this suppresses them (no other\n"
+                        + "#                                               worldgen effect). Set false to restore.");
         def("c2me.globalExecutorParallelism", DEFAULT_PLACEHOLDER);
         def("c2me.noTickViewDistance.enabled", DEFAULT_PLACEHOLDER);
         def("c2me.noTickViewDistance.maxConcurrentChunkLoads", DEFAULT_PLACEHOLDER);
@@ -145,15 +151,30 @@ public final class SuperChunkConfig {
         def("c2me.ioSystem.gcFreeChunkSerializer", DEFAULT_PLACEHOLDER);
         def("c2me.chunkSystem.recoverFromErrors", DEFAULT_PLACEHOLDER);
         def("c2me.chunkSystem.lowMemoryMode", DEFAULT_PLACEHOLDER);
+        // TRUE by default (companion to player.sendAtChunkSending, below): sending the no-tick ring
+        // at CHUNK_SENDING exposes non-post-processed chunks, so mushrooms could briefly appear
+        // (MC-276863). This C2ME workaround suppresses them with no other worldgen effect.
+        def("c2me.chunkSystem.suppressGhostMushrooms", "true");
 
         section("client.maxRenderDistance",
                 "Extended render distance (client). Raises the vanilla render-distance slider cap (32)\n"
                         + "# up to this value; terrain past simulation distance is served by C2ME's no-tick view\n"
                         + "# distance (works on the integrated server too). >127 additionally needs the\n"
                         + "# c2me ext_render_distance channel (vanilla's own packet caps at 127) - sent\n"
-                        + "# automatically on login. 32 = vanilla, exact no-op. Memory note: client chunk\n"
-                        + "# storage grows O(r^2) - 64 is ~4x the vanilla-32 footprint.");
-        def("client.maxRenderDistance", "32");
+                        + "# automatically on login. This is the slider CAP, not a forced value: raising it to\n"
+                        + "# 64 lets the client select up to 64 (the server still clamps to what its own no-tick\n"
+                        + "# view distance allows), and a linear 2..64 slider puts the vanilla-32 point at the\n"
+                        + "# midpoint (the bar 'reads' half-scale). 32 = vanilla, exact no-op. Memory note: client\n"
+                        + "# chunk storage grows O(r^2) - a client that actually picks 64 uses ~4x the 32 footprint.");
+        def("client.maxRenderDistance", "64");
+
+        section("client.grayPlaceholders",
+                "Client-only: draw a flat gray 16x16 quad at sea level for chunks the client has received\n"
+                        + "# from the server but whose render mesh isn't built yet, so the world reads as filled-in\n"
+                        + "# while the section renderer catches up (helps at the extended render distance). The\n"
+                        + "# placeholder vanishes as each chunk finishes meshing. true = on. Server-side installs\n"
+                        + "# ignore this key.");
+        def("client.grayPlaceholders", "true");
 
         section("lithium.gen.cached_generator_settings",
                 "Lithium game-logic opts. These five overlap C2ME's chunk-system/serializer rewrites\n"
@@ -196,7 +217,8 @@ public final class SuperChunkConfig {
         def("player.fullSpeedLoading.noTickVdMaxConcurrentLoads", "128");
 
         section("player.sendAtChunkSending",
-                "Player chunk-arrival latency fixes + proof metrics (all false = shipped behavior).\n"
+                "Player chunk-arrival fixes + proof metrics. sendAtChunkSending defaults TRUE (the port-defect\n"
+                        + "# fix below); priorityBias/latencyMetrics default false.\n"
                         + "# sendAtChunkSending: 1.21.1 port-defect fix — the C2ME chunk holder never overrode vanilla\n"
                         + "#   ChunkHolder.getChunkToSend(), so chunks only became client-sendable at BLOCK_TICKING\n"
                         + "#   (and with view distance > simulation distance the outer no-tick rings NEVER sent).\n"
@@ -207,12 +229,12 @@ public final class SuperChunkConfig {
                         + "#   player movement. Pure reordering of the existing work queue — no budget, no new work.\n"
                         + "# latencyMetrics: 1s [player-latency] log lines — per-player collect-miss counter, work-queue\n"
                         + "#   depth buckets {<=17, 18-32, 33, 34+}, send-latency p50/p99 (now - CHUNK_SENDING completion).");
-        def("player.sendAtChunkSending", "false");
+        def("player.sendAtChunkSending", "true");
         def("player.priorityBias", "false");
         def("player.latencyMetrics", "false");
 
         section("player.predictiveGen",
-                "Predictive chunk generation along a fast player's projected path (false = off).\n"
+                "Predictive chunk generation along a fast player's projected path (default true; set false to disable).\n"
                         + "# When true, a per-player velocity tracker (EMA of the per-tick horizontal position\n"
                         + "# delta, measured server-side) activates at >= minSpeedBps blocks/second and projects\n"
                         + "# the position lookaheadSeconds ahead; the chunk corridor from here to there — width\n"
@@ -227,8 +249,8 @@ public final class SuperChunkConfig {
                         + "# threshold, disconnects or changes dimension. logMetrics=true emits a 1s\n"
                         + "# [predictive-gen] line with ticket counters and the hit rate (predicted chunk entered\n"
                         + "# the player's real view within hitWindowSeconds = HIT; misses = wasted generation).\n"
-                        + "# Zero effect while false, and zero effect on pregen either way (real players only).");
-        def("player.predictiveGen", "false");
+                        + "# On by default; set false for zero effect. Zero effect on pregen either way (real players only).");
+        def("player.predictiveGen", "true");
         def("player.predictiveGen.lookaheadSeconds", "4");
         def("player.predictiveGen.maxPredictedChunks", "64");
         def("player.predictiveGen.minSpeedBps", "8");
@@ -426,6 +448,9 @@ public final class SuperChunkConfig {
             applyC2me(p);
             writeLithium(p);
             writeLighting(p);
+            // Mod-compat C2ME overrides layered AFTER applyC2me so an explicit user value wins.
+            // Currently: disable the relocated fluid post-processing filter when Bye?Pregen! is present.
+            dev.superchunk.compat.ByePregenCompat.applyEarlyOverrides();
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-Config] applyEarly write-through failed (engines fall back to their own defaults).", t);
         }

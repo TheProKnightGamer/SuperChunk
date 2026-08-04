@@ -41,10 +41,10 @@ import java.util.Properties;
  * no-tick view within {@link #HIT_WINDOW_SECONDS}; misses = wasted generation — watch the rate).
  *
  * <p>All values are read ONCE from {@link SuperChunkConfig} (boot-time; no hot reload) and the
- * class never throws from static init — parse failures fall back to defaults. Defaults with the
- * master toggle OFF leave shipped behavior byte-identical (every hook is a checked no-op on a
- * static-final flag), and the predictor only ever activates for real connected players, so
- * pregen is entirely unaffected.
+ * class never throws from static init — parse failures fall back to defaults (the master toggle
+ * now defaults ON). Setting the toggle OFF leaves shipped behavior byte-identical (every hook is
+ * a checked no-op on a static-final flag). The predictor only ever activates for real connected
+ * players moving at/above the speed threshold, so pregen is entirely unaffected either way.
  */
 public final class PredictiveGen {
 
@@ -60,7 +60,7 @@ public final class PredictiveGen {
     private static final String KEY_HIT_WINDOW_SECONDS = "player.predictiveGen.hitWindowSeconds";
     private static final String KEY_LOG_METRICS = "player.predictiveGen.logMetrics";
 
-    /** Master toggle; false (default) = shipped behavior unchanged, no tracker ever allocates. */
+    /** Master toggle; true (default). Set false and no tracker ever allocates (shipped behavior unchanged). */
     public static final boolean ENABLED;
 
     /** How far ahead (seconds) the position is projected along the measured velocity. */
@@ -92,7 +92,7 @@ public final class PredictiveGen {
     public static final boolean LOG_METRICS;
 
     static {
-        boolean enabled = false;
+        boolean enabled = true;
         double lookaheadSeconds = 4.0;
         int maxPredictedChunks = 64;
         double minSpeedBps = 8.0;
@@ -103,7 +103,7 @@ public final class PredictiveGen {
         boolean logMetrics = true;
         try {
             Properties p = SuperChunkConfig.get();
-            enabled = parseBoolean(p, KEY_ENABLED, false);
+            enabled = parseBoolean(p, KEY_ENABLED, true);
             lookaheadSeconds = parseDoubleClamped(p, KEY_LOOKAHEAD_SECONDS, 4.0, 0.5, 30.0);
             maxPredictedChunks = parseIntClamped(p, KEY_MAX_PREDICTED_CHUNKS, 64, 1, 1024);
             minSpeedBps = parseDoubleClamped(p, KEY_MIN_SPEED_BPS, 8.0, 0.5, 500.0);
@@ -114,8 +114,8 @@ public final class PredictiveGen {
             logMetrics = parseBoolean(p, KEY_LOG_METRICS, true);
         } catch (Throwable t) {
             // Never let config trouble take down class init (would poison every hook site with
-            // NoClassDefFoundError). Fall back to defaults == toggle OFF == shipped behavior.
-            LOGGER.warn("[SuperChunk-PredictiveGen] Failed to read player.predictiveGen settings — toggle stays OFF.", t);
+            // NoClassDefFoundError). Fall back to the built-in defaults (toggle defaults ON).
+            LOGGER.warn("[SuperChunk-PredictiveGen] Failed to read player.predictiveGen settings — using defaults (toggle ON).", t);
         }
         ENABLED = enabled;
         LOOKAHEAD_SECONDS = lookaheadSeconds;

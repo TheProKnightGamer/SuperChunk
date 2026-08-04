@@ -1,4 +1,4 @@
-# SuperChunk 0.1.0 — standalone merged worldgen/chunk super-mod (NeoForge 1.21.1)
+# SuperChunk 0.2.0 — standalone merged worldgen/chunk super-mod (NeoForge 1.21.1)
 
 **One mod, one source tree** — the optimizations of five mods merged into a single
 NeoForge 1.21.1 jar (Mojmap, ~200 mixins, ~990 source files):
@@ -18,7 +18,7 @@ nested third-party mod jars; everything is one mod id (`superchunk`).
 
 ## Install — ONE jar, client and server alike
 1. NeoForge **1.21.1** (neoforge `21.1.x`, Java **21**), client or dedicated server.
-2. Copy **`superchunk-0.1.0.jar`** into `mods/`. That single jar is the complete build for
+2. Copy **`superchunk-0.2.0.jar`** into `mods/`. That single jar is the complete build for
    BOTH sides: it is a thin bootstrap shell that loads the real mod from inside itself and,
    *only on a dedicated server*, also supplies the LWJGL core module (`org.lwjgl`) the
    bundled GPU/OpenCL backend needs (a headless server ships no LWJGL of its own; a client

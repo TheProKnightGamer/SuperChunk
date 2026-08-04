@@ -145,6 +145,11 @@ public class NoTickSystem {
         return this.playerNoTickLoader.getPendingLoadsCount();
     }
 
+    /** Diagnostic gauge (see {@code ChunkCensus}): size of the no-tick ring for this world. */
+    public int getManagedChunksCount() {
+        return this.playerNoTickLoader.getManagedChunksCount();
+    }
+
     public void close() {
         this.playerNoTickLoader.close();
         if (this.predictiveLoader != null) this.predictiveLoader.close();

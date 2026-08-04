@@ -50,6 +50,14 @@ Noisium (forked) — worldgen block-storage optimizations.
     License:   GNU LGPL-3.0-or-later
     Copyright: (c) 2023-present Darion Spaargaren (steveplays28)
 
+Bye?Pregen! — post-processing optimization technique adapted (NOT a code import).
+    The "skip provably-no-op Block.updateFromNeighbourShapes" approach in
+    dev.superchunk.worldgen.PostProcessNeighbourShapes is adapted from Bye?Pregen!'s
+    com.moepus.byepregen.PostProcess.PostProcessGenerationOptimizer.
+    Upstream:  https://github.com/MoePus/Bye-Pregen
+    License:   GNU LGPL-3.0
+    Copyright: (c) MoePus and the Bye?Pregen! contributors
+
 --------------------------------------------------------------------------------
 Original work
 --------------------------------------------------------------------------------

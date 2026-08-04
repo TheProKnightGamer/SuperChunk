@@ -4,6 +4,7 @@ import dev.superchunk.config.PredictiveGen;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.ref.WeakReference;
 import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,18 +44,33 @@ public final class PredictiveGenMetrics {
     /** Hit samples dropped because the pending-hit table hit its bound (untracked, neither hit nor miss). */
     static final AtomicLong HIT_SAMPLES_DROPPED = new AtomicLong();
 
-    /** Per-world loaders, registered on first activity, unregistered on world close. */
-    private static final CopyOnWriteArrayList<PredictiveChunkLoader> LOADERS = new CopyOnWriteArrayList<>();
+    /**
+     * Per-world loaders, registered on first activity, unregistered on world close. Held by
+     * {@link WeakReference} so that if a world is ever torn down WITHOUT {@code close()} running
+     * (e.g. runtime dimension removal by another mod, which never calls {@code stopServer}), the
+     * loader — and the whole {@code ChunkMap}/{@code ServerLevel} graph it references — can still be
+     * collected instead of being pinned here forever. Cleared entries are pruned on the next tick.
+     */
+    private static final CopyOnWriteArrayList<WeakReference<PredictiveChunkLoader>> LOADERS = new CopyOnWriteArrayList<>();
 
     private PredictiveGenMetrics() {
     }
 
     static void register(PredictiveChunkLoader loader) {
-        LOADERS.addIfAbsent(loader);
+        for (WeakReference<PredictiveChunkLoader> ref : LOADERS) {
+            if (ref.get() == loader) {
+                return; // already registered
+            }
+        }
+        LOADERS.add(new WeakReference<>(loader));
     }
 
     static void unregister(PredictiveChunkLoader loader) {
-        LOADERS.remove(loader);
+        // Drop the target and sweep any entries whose world was already collected.
+        LOADERS.removeIf(ref -> {
+            PredictiveChunkLoader l = ref.get();
+            return l == null || l == loader;
+        });
     }
 
     /** Starts the 1s collector thread once; cheap checked no-op afterwards (and when logging is OFF). */
@@ -84,7 +100,12 @@ public final class PredictiveGenMetrics {
                 final long dropped = HIT_SAMPLES_DROPPED.get();
 
                 int players = 0, desired = 0, ticketed = 0, inFlight = 0, pendingHits = 0;
-                for (PredictiveChunkLoader loader : LOADERS) {
+                for (WeakReference<PredictiveChunkLoader> ref : LOADERS) {
+                    PredictiveChunkLoader loader = ref.get();
+                    if (loader == null) {
+                        LOADERS.remove(ref); // self-clean a collected world's entry
+                        continue;
+                    }
                     players += loader.gaugeActivePlayers;
                     desired += loader.gaugeDesiredChunks;
                     ticketed += loader.gaugeTicketedChunks;

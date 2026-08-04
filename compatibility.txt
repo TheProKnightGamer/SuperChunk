@@ -1,0 +1,117 @@
+SuperChunk — Optimization-Mod Compatibility (NeoForge 1.21.1)
+=============================================================
+SuperChunk 0.2.0 · dedicated NeoForge server boot test (server 21.1.248), GPU offload disabled
+(the mixin surface is identical with the GPU on, so this reflects real mod-load / mixin compat).
+Tested 2026-08-03.
+
+METHOD
+  Source list: Modrinth "optimization" category, loader=neoforge, game=1.21.1, ranked by downloads;
+  top 50 after removing the mods SuperChunk already bundles/handles (see "ALREADY KNOWN").
+  Each mod was booted on a dedicated server ALONGSIDE SuperChunk and observed to reach
+  "Done (…)! For help, type help" (PASS) or crash / fail mixin application (FAIL). Required library
+  dependencies were supplied. Client-only mods (Modrinth server_side=unsupported) are not loaded by
+  a dedicated server and cannot touch SuperChunk's server-side mixins — listed separately as N/A.
+  A final "all-in" boot ran SuperChunk + ALL server-relevant mods + their libs together (62 jars):
+  it reached Done cleanly.
+
+  Scope: this verifies mod LOADING + mixin APPLICATION + world load to server-ready. It is not a
+  long gameplay/worldgen soak. Two mods (radium) required SuperChunk-side fixes, now shipped.
+
+SUMMARY
+  Server-relevant mods tested ......... 17
+    PASS out of the box ............... 16
+    PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
+    Unfixable incompatibilities ....... 0
+  Client-only (N/A on a server) ....... 33
+
+=============================================================
+COMPATIBLE  (booted cleanly alongside SuperChunk)
+=============================================================
+  ai-improvements ....... AI Improvements (mob AI opt) ............ PASS
+  alternate-current ..... Alternate Current (redstone perf) ....... PASS
+  distanthorizons ....... Distant Horizons (LOD) .................. PASS
+  krypton-fnp ........... Krypton Reno (network opt) .............. PASS
+  ksyxis ................ Ksyxis (skip spawn-chunk load) .......... PASS
+  modernfix ............. ModernFix (memory/startup) .............. PASS
+  packet-fixer .......... Packet Fixer ............................ PASS
+  saturn ................ Saturn (GC/alloc opt) ................... PASS
+  servercore ............ ServerCore (server perf) ................ PASS
+  zfastnoise ............ Fast Noise (worldgen noise opt) ......... PASS  [needs NeoForge >= 21.1.233]
+  ferrite-core .......... FerriteCore (memory dedup) .............. PASS  [needs NeoForge >= 21.1.218]
+  fast-paintings ........ Fast Paintings .......................... PASS  [needs lib: moonlight]
+  leaves-be-gone ........ Leaves Be Gone .......................... PASS  [needs lib: puzzleslib]
+  lmd ................... Let Me Despawn .......................... PASS  [needs lib: almanac]
+  notenoughrecipebook ... Not Enough Recipe Book (NERB) ........... PASS  [needs libs: octolib, architectury]
+  redirected ............ Redirected .............................. PASS  [needs lib: txnilib]
+
+  Notes:
+   - The [needs …] tags are the mod's OWN requirements (a newer NeoForge build, or a library mod),
+     NOT a SuperChunk conflict. The harness was bumped 21.1.216 -> 21.1.248 and the libraries were
+     supplied; all then reached Done alongside SuperChunk.
+   - When Architectury is present, C2ME automatically disables its gc-free chunk serializer
+     ("Disabling ioSystem.gcFreeChunkSerializer: Incompatible with architectury") — a graceful
+     built-in stand-down, not a crash. Nothing to do.
+
+=============================================================
+FIXED  (was incompatible; SuperChunk changed to support it)
+=============================================================
+  radium ................ Radium (a Lithium fork) ................. PASS (after fix)
+
+    Radium IS Lithium (it ships Lithium's mixins under the legacy me.jellysquid.mods.lithium
+    package with config lithium.mixins.json). Alongside SuperChunk's BUNDLED Lithium this produced,
+    in order, two fatal conflicts — both now handled SuperChunk-side:
+      1. Double Lithium application: "Critical injection failure: Redirector removeOldMapAlloc …
+         (0/1) succeeded" on CompoundTag. FIX: SuperChunk now recognises Radium (and any Lithium
+         fork) as a standalone Lithium and stands its own bundled Lithium down, so the external copy
+         is authoritative — the same mechanism already used for a standalone Lithium. Detection now
+         scans the mod list by mod-id (LoadingModList.getMods()) plus a legacy me.jellysquid
+         class-presence probe. Radium reads config/lithium.properties, so SuperChunk's five
+         C2ME-overlap safety pins still apply to it.
+      2. NoSuchFieldError on RandomSpreadStructurePlacement (SUPERCHUNK$ENABLED): SuperChunk's
+         MixinPlainWorldgenRandomSites carried a @Unique static-final flag across a 3-class
+         multi-target mixin; on a target with no <clinit> that is ALSO transformed by Radium, the
+         field injection was dropped while the reference remained. FIX: the flag moved to a plain
+         holder class (PlainWorldgenRandomGate) — behaviour-identical, and no field is injected into
+         any target, so the wrap now applies regardless of who else transforms those classes.
+
+    NOTE: Radium is REDUNDANT with SuperChunk (SuperChunk already bundles Lithium). It no longer
+    crashes, but installing it adds nothing — SuperChunk's Lithium simply steps aside for it.
+
+=============================================================
+INCOMPATIBLE  (unfixable)
+=============================================================
+  (none — every server-relevant mod in the top 50 works with SuperChunk)
+
+=============================================================
+ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per request)
+=============================================================
+  Lithium ....................... BUNDLED. A standalone Lithium (or Radium fork) is auto-detected
+                                  and SuperChunk's bundled copy stands down.
+  C2ME (concurrent-chunk-        BUNDLED (relocated under dev.superchunk.*). Do not install the
+    management-engine, c2me-      standalone; redundant and conflicting.
+    neoforge) ...................
+  ScalableLux ................... BUNDLED. Do not install standalone.
+  NoisiumForked / Noisium ....... BUNDLED. Do not install standalone (same worldgen mixins).
+  VMP (very-many-players) ....... BUNDLED. Do not install standalone.
+  Sodium ........................ Client renderer; compatible. SuperChunk widens Sodium's
+                                  render-distance slider cap (client-side).
+  Bye?Pregen! (byepregen) ....... Compatible. SuperChunk defers fluid post-processing to it.
+  Structure Layout Optimizer .... Compatible. SuperChunk stands its jigsaw octree down so SLO owns
+                                  jigsaw placement.
+
+=============================================================
+CLIENT-ONLY (Modrinth server_side = unsupported) — N/A on a dedicated server
+  Render/UI/client mods a dedicated server does not load, so they cannot conflict with SuperChunk's
+  server-side worldgen/chunk/tick mixins. Listed for completeness (they are in the top-50 ranking).
+=============================================================
+  iris (Iris Shaders)                 sodium-extra (Sodium Extra)         dynamic-fps (Dynamic FPS)
+  entityculling (Entity Culling)      moreculling (More Culling)          badoptimizations
+  immediatelyfast (ImmediatelyFast)   embeddium (Embeddium)               modelfix (Model Gap Fix)
+  cubes-without-borders               rrls (Remove Reloading Screen)      fast-ip-ping (Fast IP Ping)
+  modern-ui (Modern UI)               sodium-options-api                  sodium-dynamic-lights
+  chloride ((Sodium) Chloride)        crash-assistant                     bettergrassify
+  particle-core (Particle Core)       boat-item-view                      sodium-extras
+  cull-leaves (Cull Leaves)           better-beds                         rubidium-extra (Embeddium Extra)
+  ixeris (Ixeris)                     fps-reducer (FPS Reducer)           better-block-entities
+  sodiumleafculling                   sodium-options-mod-compat           asyncparticles (AsyncParticles)
+  gputape (GPUBooster)                better-clouds (Better Clouds)       clean-f3 (Clean F3)

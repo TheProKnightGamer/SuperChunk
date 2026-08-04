@@ -37,6 +37,12 @@ public final class SuperChunk {
 
     public SuperChunk(IEventBus modEventBus) {
         LOGGER.info("[SuperChunk] initializing — unified worldgen/chunk super-mod.");
+        // Diagnostic: periodic chunk census (leak-vs-plateau); daemon self-idles when no server runs.
+        // Off by default — enable with -Dsuperchunk.diag.chunkCensus=true.
+        dev.superchunk.diag.ChunkCensus.start();
+        // One-time GC advisory: high render distances stutter under stop-the-world GC (G1/Aikar) —
+        // recommend Generational ZGC. Advice only; a mod cannot change the running collector.
+        dev.superchunk.diag.GcAdvisory.maybeAdvise();
         // --- ScalableLux (lighting) ---
         ScalableLuxEntrypoint.init();
         // --- Lithium ---
@@ -49,6 +55,8 @@ public final class SuperChunk {
         // touches client-only types, so it is only loaded inside the dist check.
         if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {
             dev.superchunk.client.ExtendedRenderDistance.init();
+            // Gray sea-level placeholder quads for received-but-unmeshed chunks (client-only types).
+            dev.superchunk.client.GrayChunkPlaceholders.init();
         }
         // --- C2ME gc-free chunk serializer: register serializer when enabled ---
         dev.superchunk.com.ishland.c2me.rewrites.chunk_serializer.ModuleEntryPoint.init();

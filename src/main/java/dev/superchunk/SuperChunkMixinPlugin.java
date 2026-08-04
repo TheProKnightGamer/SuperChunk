@@ -72,6 +72,19 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         if (mixinClassName.endsWith("InlineHeights")) {
             return Boolean.parseBoolean(System.getProperty("superchunk.worldgen.inlineHeights", "true"));
         }
+        // Post-process neighbour-shape no-op skip (see MixinLevelChunkPostProcessSkip): defers to
+        // Bye?Pregen!'s own redirect of the same call site when it is installed (avoids a duplicate
+        // injection), and honours the -D kill switch. Load-time gate so the applied path has no
+        // per-call branch.
+        if (mixinClassName.endsWith("PostProcessSkip")) {
+            return !dev.superchunk.compat.ByePregenCompat.INSTALLED
+                    && Boolean.parseBoolean(System.getProperty("superchunk.worldgen.postProcessSkipNoOp", "true"));
+        }
+        // Sodium-only: widen Sodium's hardcoded render-distance slider cap to client.maxRenderDistance.
+        // Inert without Sodium (target class absent); the -D kill switch allows bisection.
+        if (mixinClassName.endsWith("SodiumRenderDistanceCap")) {
+            return Boolean.parseBoolean(System.getProperty("superchunk.client.sodiumRenderDistanceCap", "true"));
+        }
         return true;
     }
 
