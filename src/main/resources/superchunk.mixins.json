@@ -40,7 +40,6 @@
     "MixinWorldGenRegionInlineHeights"
   ],
   "client": [
-    "client.LevelRendererViewAreaAccessor",
     "client.MixinOptionsExtendRenderDistance",
     "client.MixinSodiumRenderDistanceCap"
   ],

@@ -168,14 +168,6 @@ public final class SuperChunkConfig {
                         + "# chunk storage grows O(r^2) - a client that actually picks 64 uses ~4x the 32 footprint.");
         def("client.maxRenderDistance", "64");
 
-        section("client.grayPlaceholders",
-                "Client-only: draw a flat gray 16x16 quad at sea level for chunks the client has received\n"
-                        + "# from the server but whose render mesh isn't built yet, so the world reads as filled-in\n"
-                        + "# while the section renderer catches up (helps at the extended render distance). The\n"
-                        + "# placeholder vanishes as each chunk finishes meshing. true = on. Server-side installs\n"
-                        + "# ignore this key.");
-        def("client.grayPlaceholders", "true");
-
         section("lithium.gen.cached_generator_settings",
                 "Lithium game-logic opts. These five overlap C2ME's chunk-system/serializer rewrites\n"
                         + "# and MUST stay disabled (double-application corrupts/crashes). Written to\n"
