@@ -52,6 +52,16 @@ public final class PredictiveGenTracker {
     private static final double EMA_ALPHA = 0.3;
 
     /**
+     * Sudden-stop detection. Per-tick displacement (squared) at/below which the player counts as
+     * stationary this tick — 2 blocks/s = 0.1 blocks/tick, far under {@link PredictiveGen#MIN_SPEED_BPS}
+     * (8 b/s), so it only ever fires on a genuine hard stop, never a gradual slowdown (the EMA path
+     * already retires the corridor for those).
+     */
+    private static final double STOP_DISP_SQ_PER_TICK = 0.1 * 0.1;
+    /** Consecutive stationary ticks that confirm a stop (0.15 s) — robust to a single-tick hitch. */
+    private static final int STOP_CONFIRM_TICKS = 3;
+
+    /**
      * Per-tick displacement (squared) above which the movement is treated as a teleport:
      * 16 blocks/tick = 320 blocks/s, beyond any legitimate continuous movement.
      */
@@ -91,7 +101,8 @@ public final class PredictiveGenTracker {
             motion.lastX = x;
             motion.lastZ = z;
 
-            if (dx * dx + dz * dz > TELEPORT_DISTANCE_SQ) {
+            final double distSq = dx * dx + dz * dz;
+            if (distSq > TELEPORT_DISTANCE_SQ) {
                 // Teleport/respawn: forget the motion history; the next interval retires any
                 // corridor because the EMA speed collapses below the threshold.
                 motion.emaVx = 0.0;
@@ -99,6 +110,24 @@ public final class PredictiveGenTracker {
             } else {
                 motion.emaVx += EMA_ALPHA * (dx - motion.emaVx);
                 motion.emaVz += EMA_ALPHA * (dz - motion.emaVz);
+            }
+
+            // Sudden-stop fast path: the EMA lags a hard stop by a few ticks, and a recompute that
+            // lands in that window would (re)project a corridor up to LOOKAHEAD_SECONDS AHEAD of a
+            // now-stationary player — generating chunks in the old direction that are instantly
+            // irrelevant. When the instantaneous movement stays at/below the stop threshold for
+            // STOP_CONFIRM_TICKS in a row, zero the stale EMA and retire the corridor immediately
+            // rather than waiting for it to decay below MIN_SPEED_BPS at the next recompute. Fires
+            // exactly once per stop; the hit-window position feed (set while moving) is untouched,
+            // so outstanding hit samples still resolve.
+            if (distSq <= STOP_DISP_SQ_PER_TICK) {
+                if (motion.stillTicks < STOP_CONFIRM_TICKS && ++motion.stillTicks == STOP_CONFIRM_TICKS) {
+                    motion.emaVx = 0.0;
+                    motion.emaVz = 0.0;
+                    this.retireCorridor(player.getUUID(), motion);
+                }
+            } else {
+                motion.stillTicks = 0;
             }
 
             if (publish) {
@@ -128,11 +157,7 @@ public final class PredictiveGenTracker {
             this.updatePredictedSources(motion, motion.lastX, motion.lastZ, motion.emaVx, motion.emaVz);
             return;
         }
-        if (motion.corridorActive) {
-            motion.corridorActive = false;
-            this.noTickSystem.superchunk$predictiveRemove(playerId);
-            this.clearPredictedSources(motion);
-        }
+        this.retireCorridor(playerId, motion);
         if (motion.hitFeedTicksRemaining > 0) {
             // Slowed down recently: keep feeding positions (only) so outstanding hit samples of
             // this player can still resolve as hits; strictly bounded by the hit window.
@@ -140,6 +165,19 @@ public final class PredictiveGenTracker {
             this.noTickSystem.superchunk$predictivePosition(playerId, motion.lastX, motion.lastZ);
         }
         // Fully idle (walking/standing): zero calls, zero queue traffic.
+    }
+
+    /**
+     * Retire an active corridor: drop its no-tick tickets and P2 predicted sources. Idempotent —
+     * a checked no-op when no corridor is active. Called from {@link #publish} (EMA speed fell
+     * below the threshold) and from the per-tick sudden-stop fast path.
+     */
+    private void retireCorridor(UUID playerId, PlayerMotion motion) {
+        if (motion.corridorActive) {
+            motion.corridorActive = false;
+            this.noTickSystem.superchunk$predictiveRemove(playerId);
+            this.clearPredictedSources(motion);
+        }
     }
 
     /** Removes state for players that left this world (disconnect or dimension change). */
@@ -211,6 +249,8 @@ public final class PredictiveGenTracker {
         double emaVz;
         long seenTick;
         boolean corridorActive;
+        /** Consecutive ticks at/below the stop threshold — drives the immediate sudden-stop clear. */
+        int stillTicks;
         /** Position-only hit feed remaining after slowing down, in ticks. */
         int hitFeedTicksRemaining;
         /** Chunk positions currently registered in the P2 band as predicted sources. */
