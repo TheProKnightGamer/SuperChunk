@@ -158,11 +158,11 @@ public final class DecideBench {
             queue = program.createQueue(true);   // profiling ON: kernel START->END device time
             kernel = program.kernel(KERNEL_NAME);
 
-            cornersMem = uploadReals(program, fp32, s.corners);
-            originsMem = uploadInts(program, s.origins);
+            cornersMem = program.uploadReals(fp32, s.corners);
+            originsMem = program.uploadInts(s.origins);
             locMem = uploadLongs(program, s.locCache);
-            flMem = uploadInts(program, s.fluidLevel);
-            ftMem = uploadInts(program, s.fluidTypeId);
+            flMem = program.uploadInts(s.fluidLevel);
+            ftMem = program.uploadInts(s.fluidTypeId);
             idsMem = program.createHostOutputBuffer(idsBytes);   // pinned (ALLOC_HOST_PTR) id buffer
 
             int total = K * FULL_N;
@@ -196,7 +196,7 @@ public final class DecideBench {
             program.setArgInt(kernel, a++, total);
             program.setArgPointer(kernel, a++, idsMem);
 
-            long gws = roundUp(total);
+            long gws = CLProgram.roundUpGlobal(total);
 
             // ---- warm-up (untimed; same dispatch + map/unmap shape as the timed loop).
             for (int w = 0; w < WARMUP; w++) {
@@ -426,25 +426,6 @@ public final class DecideBench {
         return ((x & 0x3FFFFFFL) << 38) | ((z & 0x3FFFFFFL) << 12) | (y & 0xFFFL);
     }
 
-    // ----------------------------------------------------------------------
-    // Buffer / resource helpers (mirror GpuBatchDispatcher / GpuFusedInterpolator).
-    // ----------------------------------------------------------------------
-
-    private static long uploadInts(CLProgram program, int[] data) {
-        int len = Math.max(1, data.length);
-        IntBuffer buf = MemoryUtil.memAllocInt(len);
-        try {
-            if (data.length == 0) {
-                buf.put(0);
-            } else {
-                buf.put(data);
-            }
-            buf.flip();
-            return program.createInputBuffer(buf);
-        } finally {
-            MemoryUtil.memFree(buf);
-        }
-    }
 
     private static long uploadLongs(CLProgram program, long[] data) {
         int len = Math.max(1, data.length);
@@ -462,41 +443,6 @@ public final class DecideBench {
         }
     }
 
-    private static long uploadReals(CLProgram program, boolean fp32, double[] data) {
-        int len = Math.max(1, data.length);
-        if (fp32) {
-            FloatBuffer buf = MemoryUtil.memAllocFloat(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0f);
-                } else {
-                    for (double v : data) buf.put((float) v);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        } else {
-            DoubleBuffer buf = MemoryUtil.memAllocDouble(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0);
-                } else {
-                    buf.put(data);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        }
-    }
-
-    private static long roundUp(long n) {
-        return ((n + 63) / 64) * 64;
-    }
-
     private static String fmt(double ms) {
         return String.format("%.3f", ms);
     }
@@ -508,10 +454,10 @@ public final class DecideBench {
      * (aq_decide) + decide_bench.cl. Returns null on failure (logged).
      */
     private static String loadSources() {
-        String rng = loadResource(RNG_CL);
-        String noise = loadResource(NOISE_CL);
-        String aq = loadResource(AQUIFER_CL);
-        String decide = loadResource(DECIDE_CL);
+        String rng = CLProgram.loadKernelSource(RNG_CL);
+        String noise = CLProgram.loadKernelSource(NOISE_CL);
+        String aq = CLProgram.loadKernelSource(AQUIFER_CL);
+        String decide = CLProgram.loadKernelSource(DECIDE_CL);
         if (rng == null || noise == null || aq == null || decide == null) {
             LOGGER.warn("[SuperChunk-GPU] [decide-bench] could not load kernel resources — bench disabled.");
             return null;
@@ -523,17 +469,5 @@ public final class DecideBench {
             LOGGER.info("[SuperChunk-GPU] === decide-bench kernel (synthetic decide, diagnostic only) ===\n{}", decide);
         }
         return src;
-    }
-
-    private static String loadResource(String path) {
-        try (InputStream in = DecideBench.class.getResourceAsStream(path)) {
-            if (in == null) {
-                return null;
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOGGER.error("[SuperChunk-GPU] [decide-bench] failed reading {}", path, e);
-            return null;
-        }
     }
 }

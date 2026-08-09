@@ -35,3 +35,6 @@ dist/mods/*.jar
 hs_err_*.log
 replay_*.log
 .superchunk-bootstrap/
+
+# compiled microbench (tools/noisebench.c)
+tools/noisebench

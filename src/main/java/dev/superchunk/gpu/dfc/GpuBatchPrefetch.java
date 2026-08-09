@@ -149,7 +149,14 @@ public final class GpuBatchPrefetch {
                 future.whenComplete((grids, err) -> {
                     resolved.set(true);
                     try {
-                        if (err == null && grids != null && grids.length == expectLen) {
+                        // The batcher's DEAD-GRID SENTINEL: the chunk takes the compact-consume
+                        // fast path, so its corner grids were never copied out of pinned staging
+                        // (nothing reads them). Its IDS still must be deposited, so this is a
+                        // normal store, not a failure. If such an entry is ever asked for grids
+                        // anyway, ChunkGridCache.consumeBatchedGrid rejects it on its existing
+                        // length check and takes the per-chunk path.
+                        final boolean deadGrids = GpuChunkBatcher.isDeadGrids(grids);
+                        if (err == null && grids != null && (grids.length == expectLen || deadGrids)) {
                             // ON-DEVICE INTERP PREFETCH POOL: produce the two full fields NOW (on
                             // THIS — the batcher — thread, off the worker's fill critical path) into
                             // a REUSED pooled holder, so the fill serves them READY with no GPU
@@ -158,7 +165,7 @@ public final class GpuBatchPrefetch {
                             // store a null holder and the consumer falls back to the per-chunk
                             // provideFullFieldFromHostCorners path (correctness unaffected).
                             OnDeviceFieldPool.Holder holder = null;
-                            if (OnDeviceInterp.ENABLED) {
+                            if (OnDeviceInterp.ENABLED && !deadGrids) {
                                 int total = ffused.fullFieldTotalOrNeg(ext.dimX, ext.dimY, ext.dimZ,
                                         ext.sx, ext.sy, ext.sz);
                                 if (total > 0) {

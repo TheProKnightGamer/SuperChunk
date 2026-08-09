@@ -850,11 +850,25 @@ public final class CompactIds {
                 // point is skipping it). All aq-null paths return sched=0 (matches every
                 // vanilla null return).
                 .append("        if (!(density > REAL_C(0.0))) {\n")
+                // HIGH-AIR FAST PATH. `id` here is unconditionally AQ_AIR, and bit7 (sched)
+                // on an AIR byte is DEAD on every consumer:
+                //   - CompactConsume.marksFromIds gates on m.nonAir[b] && m.fluid[b]; AIR is
+                //     id 1 with nonAir[1]=false, and its SWAR pre-filter matches only
+                //     {0x82,0x83} (water/lava), so 0x81 never even reaches the per-byte replay.
+                //   - the hybrid path checks `state != AIR` before looking at sched.
+                //   - the VERIFY leg compares the EFFECTIVE mark (raw&0x80 && nonAir && fluid),
+                //     not the raw bit, so it does not see this either.
+                //   - vanilla doFill itself `continue`s on AIR before consulting
+                //     shouldScheduleFluidUpdate.
+                // So the aq_airpath_similarity call below produced a value nothing could read,
+                // at the cost of a 12-iteration locCache gather + BlockPos unpack + an fp64
+                // divide, on ~60% of all blocks (airSkipY ~ 68 of 384 Y-layers in the
+                // overworld). Emit the constant instead. Terrain is bit-identical; only the
+                // raw id BYTE for air changes (0x81 -> 0x01 where a mark bit was set), so any
+                // future raw-byte checksum over ids must be written bit7-tolerant on air.
                 .append("            if (y >= aux[17]) {\n")
-                .append("                double dsim = aq_airpath_similarity(x, y, z, locCache + c * cellN,\n")
-                .append("                        aux[1], aux[2], aux[3], aux[4], aux[5]);\n")
                 .append("                id = AQ_AIR;\n")
-                .append("                sched = (dsim <= 0.0) ? ((dsim >= flowingUpdateSimilarity) ? 1 : 0) : 1;\n")
+                .append("                sched = 0;\n")
                 .append("            } else {\n")
                 .append("                double barrier = (double) ").append(emitted.barrierFn())
                 .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
@@ -975,6 +989,16 @@ public final class CompactIds {
     private static final LongAdder decideSkipVeinless = new LongAdder();
     private static final LongAdder decideKernelNanos = new LongAdder(); // profiled kernel time
     private static final LongAdder decideWallNanos = new LongAdder();   // completer-side ids slice wall
+    // Full in-batch device timeline (profiling queues only) — see
+    // GpuBatchDispatcher.InFlight#deviceTimeline. Before these existed the corner
+    // NDRange and both DMAs carried no event, so ~40% of in-batch GPU time could not be
+    // attributed at all and every proposal against it was a model rather than a number.
+    private static final LongAdder tlBatches = new LongAdder();
+    private static final LongAdder tlCornerNanos = new LongAdder();
+    private static final LongAdder tlDecideNanos = new LongAdder();
+    private static final LongAdder tlIdsReadNanos = new LongAdder();
+    private static final LongAdder tlCornerReadNanos = new LongAdder();
+    private static final LongAdder tlSpanNanos = new LongAdder();
     private static final LongAdder decideFaults = new LongAdder();
     private static volatile String planFailReason = null;
 
@@ -1006,6 +1030,46 @@ public final class CompactIds {
         if (wallNanos > 0) {
             decideWallNanos.add(wallNanos);
         }
+    }
+
+    /**
+     * One batch's device timeline from {@code InFlight#deviceTimeline()}:
+     * {@code {corner, decide, idsRead, cornerRead, span}} ns. No-op on null (profiling off),
+     * so the production path stays free.
+     */
+    public static void recordTimeline(long[] tl) {
+        if (tl == null) {
+            return;
+        }
+        tlBatches.increment();
+        if (tl[0] > 0) tlCornerNanos.add(tl[0]);
+        if (tl[1] > 0) tlDecideNanos.add(tl[1]);
+        if (tl[2] > 0) tlIdsReadNanos.add(tl[2]);
+        if (tl[3] > 0) tlCornerReadNanos.add(tl[3]);
+        if (tl[4] > 0) tlSpanNanos.add(tl[4]);
+    }
+
+    /** The [gpu-timeline] line; empty string when no batch was profiled. */
+    private static String timelineLine() {
+        long b = tlBatches.sum();
+        if (b == 0) {
+            return "";
+        }
+        double corner = tlCornerNanos.sum() / 1.0e6 / b;
+        double decide = tlDecideNanos.sum() / 1.0e6 / b;
+        double idsRd = tlIdsReadNanos.sum() / 1.0e6 / b;
+        double cornRd = tlCornerReadNanos.sum() / 1.0e6 / b;
+        double span = tlSpanNanos.sum() / 1.0e6 / b;
+        double busy = corner + decide + idsRd + cornRd;
+        // In-order queue: whatever the span is not accounted for by command busy time IS the
+        // in-batch GPU idle, so it is derived rather than accumulated per batch.
+        double gap = Math.max(0.0, span - busy);
+        return String.format(
+                " | [gpu-timeline] over %d profiled batches, per batch: corner=%.3fms decide=%.3fms "
+                        + "idsRead=%.3fms cornerRead=%.3fms | busy=%.3fms gap=%.3fms span=%.3fms "
+                        + "(device duty inside batch %.1f%%)",
+                b, corner, decide, idsRd, cornRd, busy, gap, span,
+                span > 0 ? 100.0 * busy / span : 0.0);
     }
 
     /** One batched chunk deposited into the store: did its ids arrive? */
@@ -1066,7 +1130,7 @@ public final class CompactIds {
                 auxCaptured.sum(), auxFailNoAquifer.sum(), auxFailBlending.sum(),
                 auxFailNoRoute.sum(), auxFailVeinSeed.sum(), auxFailFluidType.sum(), auxFailOther.sum(),
                 decideFaults.sum(),
-                planFailReason == null ? "" : " | plan: " + planFailReason);
+                (planFailReason == null ? "" : " | plan: " + planFailReason) + timelineLine());
     }
 
     /** Drops per-world state (routes reference a torn-down world's GPU forms). Counters persist. */

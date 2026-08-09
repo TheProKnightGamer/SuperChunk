@@ -29,7 +29,7 @@ nested third-party mod jars; everything is one mod id (`superchunk`).
    (redundant but harmless if left behind).
 4. **Copy `config/lithium.properties` into the server's `config/` folder BEFORE first start.**
    This disables the Lithium features that overlap C2ME's chunk-system rewrite
-   (`gen.cached_generator_settings`, `chunk.serialization`, `chunk.no_locking`,
+   (`gen.cached_generator_settings`, `chunk.serialization`,
    `world.tick_scheduler`, `world.chunk_access`) so C2ME owns those paths. (SuperChunk also
    rewrites this file from `config/superchunk.properties` on every boot, so after the first
    start it maintains itself.)

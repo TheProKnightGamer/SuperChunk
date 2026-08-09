@@ -5,19 +5,48 @@ performance mod for NeoForge 1.21.1. It merges C2ME, ScalableLux, Lithium,
 Noisium, and VMP into a single jar, adds ~20 original worldgen optimizations,
 and offloads terrain generation to the GPU via OpenCL.
 
-## 10× vanilla
+## 11× vanilla
 
-Chunky pregen, radius 2048 (66,049 chunks), fresh worlds, RTX 3070 + i7-14700K:
+Chunky pregen, radius 2048 (66,049 chunks), fresh worlds, RTX 3070 + i7-14700K, quiet box.
+Four configurations, each at its own best settings, run **interleaved** over two rounds
+(2026-08-08):
 
 | Configuration | chunks/sec | Wall time | vs vanilla |
 |---|---|---|---|
-| Vanilla NeoForge 1.21.1 | 111.9 | 9 m 50 s | 1.0× |
-| Stock mods together, unedited | 660.5 | 1 m 40 s | 5.9× |
-| SuperChunk, CPU only | 815.4 | 1 m 21 s | 7.3× |
-| **SuperChunk + GPU offload** | **1,119.5** | **59 s** | **10.0×** |
+| Vanilla NeoForge 1.21.1 | 114.9 | 9 m 35 s | 1.0× |
+| The same upstream mods, separately | 626.0 | 1 m 45 s | 5.4× |
+| SuperChunk, CPU only | 836.1 | 1 m 19 s | 7.3× |
+| **SuperChunk + GPU offload** | **1,258.2** | **52 s** | **11.0×** |
+
+Reproducibility across the two rounds: vanilla 114.1/115.7, upstream 623.1/629.0, CPU-only
+836.1/836.1, GPU 1246.2/1270.2. Measuring the steady state instead of the whole wall (excluding
+Chunky's ramp-up and tail) gives 120 / 644 / 852 / **1,341** cps.
+
+Every configuration got the same 16 GB heap, the same Generational ZGC, 22 C2ME workers where
+applicable, and the same raised Chunky in-flight chunk limit — so this compares the mods, not who
+remembered the flags. The upstream row is **C2ME 0.4.0-alpha.0.115 + Lithium 0.15.4 + ScalableLux
+0.3.0-alpha.0.6 + Noisium 2.3.0**, each with its own default config; VMP is not in it because it
+has no NeoForge build, and its SuperChunk port is player-watching work that does nothing in a
+pregen with no players.
+
+So: merging the upstream mods and tuning them is worth **+34%** over running them separately, and
+the GPU offload is worth a further **+50%** on top of that.
 
 No faults, crashes, or OOMs in any run. **The generated terrain is identical to
 vanilla's** — verified bit-exact over hundreds of millions of blocks.
+
+Round 10 (2026-08-07) adds **+12.6%** on top of that, measured head-to-head at radius 3072
+(148,225 chunks) with each build at its own best settings — 1,090 → 1,228 chunks/sec steady-state,
+two interleaved pairs, the new build winning both. It comes from four changes that are individually
+provable rather than tuned:
+
+- fewer fp64 operations in the OpenCL noise chain, by exact IEEE identities (bit-identical output,
+  verified by hash in fp32 *and* fp64, and by the boot parity gate on every build);
+- raising Chunky's in-flight chunk limit, which is worth nothing on its own and only pays *because*
+  the kernel got faster (see the note under Install);
+- a memo of the per-block biome lookup that was 10.5% of all worldgen CPU, verified against the
+  code it replaces over 359 million lookups with zero mismatches;
+- the same `wrap` identity applied to the CPU noise path.
 
 ## Install
 
@@ -35,6 +64,16 @@ vanilla's** — verified bit-exact over hundreds of millions of blocks.
    -Dc2me.base.config.override.globalExecutorParallelism=22
    -Xmx16G
    ```
+
+   **Pregenerating with Chunky?** You no longer need `-Dchunky.maxWorkingCount`.
+   Chunky caps in-flight chunks with a semaphore whose size defaults to **50** —
+   sized for vanilla's synchronous chunk pipeline, so it hard-caps throughput at
+   `50 / per-chunk latency` no matter how fast generation is. SuperChunk now sets
+   it from `pregen.chunkyWorkingCount` (default `auto` = 192 per GB of heap,
+   clamped 256–3072). An explicit `-D` still wins; `default` opts out. It is
+   worth nothing on its own and everything in combination: raising it alone is
+   −0.5%, the round-10 kernel work alone is −1.4% (a faster kernel drains the GPU
+   batcher and shrinks its batches), and together they are **+6.3%**.
 
 **Do not also install standalone C2ME, ScalableLux, Noisium, or VMP** — they're
 inside this jar. Standalone **Lithium is fine**: if one is present, SuperChunk's

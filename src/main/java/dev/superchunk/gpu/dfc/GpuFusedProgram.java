@@ -100,8 +100,8 @@ final class GpuFusedProgram implements AutoCloseable {
             return null;
         }
 
-        String noiseSrc = loadResource(NOISE_CL);
-        String supportSrc = loadResource(SUPPORT_CL);
+        String noiseSrc = CLProgram.loadKernelSource(NOISE_CL);
+        String supportSrc = CLProgram.loadKernelSource(SUPPORT_CL);
         if (noiseSrc == null || supportSrc == null) {
             LOGGER.warn("[SuperChunk-GPU] [fused-emit] could not load kernel resources.");
             return null;
@@ -120,14 +120,14 @@ final class GpuFusedProgram implements AutoCloseable {
         long descMem = NULL, factorsMem = NULL, permMem = NULL, activeMem = NULL,
                 xoMem = NULL, yoMem = NULL, zoMem = NULL, ampMem = NULL, kernel = NULL;
         try {
-            descMem = uploadInts(program, registry.descArray());
-            factorsMem = uploadReals(program, fp32, registry.factorArray());
-            permMem = uploadInts(program, registry.permArray());
-            activeMem = uploadInts(program, registry.activeArray());
-            xoMem = uploadReals(program, fp32, registry.xoArray());
-            yoMem = uploadReals(program, fp32, registry.yoArray());
-            zoMem = uploadReals(program, fp32, registry.zoArray());
-            ampMem = uploadReals(program, fp32, registry.ampArray());
+            descMem = program.uploadInts(registry.descArray());
+            factorsMem = program.uploadReals(fp32, registry.factorArray());
+            permMem = program.uploadPerm(registry.permArray());
+            activeMem = program.uploadInts(registry.activeArray());
+            xoMem = program.uploadReals(fp32, registry.xoArray());
+            yoMem = program.uploadReals(fp32, registry.yoArray());
+            zoMem = program.uploadReals(fp32, registry.zoArray());
+            ampMem = program.uploadReals(fp32, registry.ampArray());
             kernel = program.kernel(KERNEL_NAME);
             return new GpuFusedProgram(program, fp32, multi.rootCount(), kernel,
                     descMem, factorsMem, permMem, activeMem, xoMem, yoMem, zoMem, ampMem);
@@ -191,7 +191,7 @@ final class GpuFusedProgram implements AutoCloseable {
 
             // Global work size is the per-grid n (each work-item writes all M roots),
             // rounded up to a multiple of 64 (extra threads early-return on gid>=n).
-            program.enqueue1D(kernel, roundUp(n));
+            program.enqueue1D(kernel, CLProgram.roundUpGlobal(n));
 
             int totalInt = (int) total;
             if (fp32) {
@@ -232,71 +232,5 @@ final class GpuFusedProgram implements AutoCloseable {
         CLProgram.releaseMem(nZoMem);
         CLProgram.releaseMem(nAmpMem);
         program.close();
-    }
-
-    // ----------------------------------------------------------------------
-    // Buffer / resource helpers (mirror GpuDensityFunction).
-    // ----------------------------------------------------------------------
-
-    private static long uploadInts(CLProgram program, int[] data) {
-        int len = Math.max(1, data.length);
-        IntBuffer buf = MemoryUtil.memAllocInt(len);
-        try {
-            if (data.length == 0) {
-                buf.put(0).flip();
-            } else {
-                buf.put(data).flip();
-            }
-            return program.createInputBuffer(buf);
-        } finally {
-            MemoryUtil.memFree(buf);
-        }
-    }
-
-    private static long uploadReals(CLProgram program, boolean fp32, double[] data) {
-        int len = Math.max(1, data.length);
-        if (fp32) {
-            FloatBuffer buf = MemoryUtil.memAllocFloat(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0f);
-                } else {
-                    for (double v : data) buf.put((float) v);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        } else {
-            DoubleBuffer buf = MemoryUtil.memAllocDouble(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0);
-                } else {
-                    buf.put(data);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        }
-    }
-
-    private static long roundUp(int n) {
-        return ((n + 63) / 64) * 64L;
-    }
-
-    private static String loadResource(String path) {
-        try (InputStream in = GpuFusedProgram.class.getResourceAsStream(path)) {
-            if (in == null) {
-                return null;
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOGGER.error("[SuperChunk-GPU] [fused-emit] failed reading {}", path, e);
-            return null;
-        }
     }
 }

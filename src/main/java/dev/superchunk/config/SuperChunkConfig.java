@@ -54,16 +54,26 @@ public final class SuperChunkConfig {
     private static final String DEFAULT_PLACEHOLDER = "default";
 
     /**
-     * The five Lithium rule keys (the part AFTER the {@code lithium.} prefix) that overlap
+     * The Lithium rule keys (the part AFTER the {@code lithium.} prefix) that overlap
      * C2ME's chunk-system / serializer rewrites and are documented to crash/corrupt on
      * double-application. They are HARD-PINNED to false everywhere they flow (legacy migration
      * + write-through to {@code lithium.properties}), overriding any user/migrated {@code true}
      * by design — a safety pin, not a preference. See {@link #pinLithium}.
+     *
+     * <p><b>{@code chunk.no_locking} was removed from this set (2026-08-05).</b> Round 9
+     * (2026-07-16) flipped its default to true for a measured win, but leaving the key here meant
+     * {@link #pinLithium} silently rewrote it back to false on the way into
+     * {@code lithium.properties} — so the shipped build still paid vanilla's
+     * {@code ThreadingDetector} ReentrantLock+Semaphore on every {@code PalettedContainer}
+     * get/set. A fresh CPU-only r2048 JFR profile put that at ~3% of all worldgen samples
+     * (82.6% of the time inside {@code PalettedContainer.getAndSet}). It does NOT overlap C2ME:
+     * nothing outside {@code lithium.mixin.chunk.no_locking} touches {@code acquire()},
+     * {@code release()} or {@code threadingDetector}, and the other {@code PalettedContainer}
+     * mixins in the tree target only {@code read}/{@code count}/{@code getAll}/serialization.
      */
     private static final java.util.Set<String> LITHIUM_FORCE_DISABLED = java.util.Set.of(
             "gen.cached_generator_settings",
             "chunk.serialization",
-            "chunk.no_locking",
             "world.tick_scheduler",
             "world.chunk_access");
 
@@ -169,9 +179,11 @@ public final class SuperChunkConfig {
         def("client.maxRenderDistance", "64");
 
         section("lithium.gen.cached_generator_settings",
-                "Lithium game-logic opts. These five overlap C2ME's chunk-system/serializer rewrites\n"
-                        + "# and MUST stay disabled (double-application corrupts/crashes). Written to\n"
-                        + "# config/lithium.properties as mixin.<key>. Other lithium.<key>=true/false also pass through.");
+                "Lithium game-logic opts. The =false ones below overlap C2ME's chunk-system/serializer\n"
+                        + "# rewrites and MUST stay disabled (double-application corrupts/crashes) — they are\n"
+                        + "# hard-pinned regardless of what you set here. chunk.no_locking does NOT overlap and is\n"
+                        + "# a live toggle. Written to config/lithium.properties as mixin.<key>. Other\n"
+                        + "# lithium.<key>=true/false also pass through.");
         def("lithium.gen.cached_generator_settings", "false");
         def("lithium.chunk.serialization", "false");
         // TRUE since round 9 (2026-07-16): removes vanilla's ThreadingDetector
@@ -180,6 +192,14 @@ public final class SuperChunkConfig {
         // (Lithium-standard, shipped to production for years); no mixin conflict with
         // the C2ME chunk system (verified: nothing else touches acquire/release), and
         // zero ThreadingDetector trips ever observed across all pregen legs.
+        // 2026-08-05: this default was INERT until now — the key was still listed in
+        // LITHIUM_FORCE_DISABLED, so pinLithium rewrote it to false on write-through and
+        // config/lithium.properties shipped mixin.chunk.no_locking=false. See that field.
+        // Re-measured after removing the pin (28-core box, 20 workers, ZGC, CPU-only r2048):
+        // ThreadingDetector 3.04% of worldgen JFR samples -> 0%, PalettedContainer.getAndSet
+        // 3.68% -> 1.45%. Wall clock was NEUTRAL there (4 interleaved A/B rounds, 97.25 s mean
+        // both legs) — that box is not bound by the freed CPU, so treat the round-9 "+2.3% cps"
+        // as hardware-specific. 5 clean r2048 pregens, zero ThreadingDetector trips.
         def("lithium.chunk.no_locking", "true");
         def("lithium.world.tick_scheduler", "false");
         def("lithium.world.chunk_access", "false");
@@ -188,6 +208,19 @@ public final class SuperChunkConfig {
                 "ScalableLux lighting. Note: lighting is externally managed by C2ME, so this is\n"
                         + "# effectively inert today (-1 = auto). Kept for completeness.");
         def("lighting.parallelism", "-1");
+
+        section("pregen.chunkyWorkingCount",
+                "Chunky pregen: how many chunks Chunky keeps IN FLIGHT (its own default is 50).\n"
+                        + "# Chunky's generation loop is a semaphore of this many permits, so it is a hard cap\n"
+                        + "# on the whole pipeline: throughput can never exceed workingCount / per-chunk\n"
+                        + "# latency, and SuperChunk's async chunk system runs a much deeper pipeline than\n"
+                        + "# Chunky's default was sized for. Written to the -Dchunky.maxWorkingCount system\n"
+                        + "# property at startup, and NEVER over an explicit -D you passed yourself.\n"
+                        + "# 'auto' scales with the heap (192 per GB, clamped to 256..3072) because every\n"
+                        + "# in-flight chunk is retained; 'default' leaves Chunky's own value alone; a plain\n"
+                        + "# number is used as-is. Measured on a 16 GB heap: 3072 was the best value, 768 was\n"
+                        + "# ~6% slower, and 6144 was slower again.");
+        def("pregen.chunkyWorkingCount", "auto");
 
         section("player.fullSpeedLoading",
                 "Full-throttle chunk loading (\"no radius shrink\"). false = vanilla behavior.\n"
@@ -251,6 +284,21 @@ public final class SuperChunkConfig {
         def("player.predictiveGen.recomputeIntervalTicks", "10");
         def("player.predictiveGen.hitWindowSeconds", "10");
         def("player.predictiveGen.logMetrics", "true");
+    }
+
+    static {
+        // A key that is BOTH force-disabled and defaulted true is a silent contradiction: the
+        // default advertises a behaviour pinLithium then rewrites away on the path to
+        // lithium.properties. That is exactly how chunk.no_locking's round-9 win stayed inert
+        // behind a warning nobody read. Make it unrepresentable instead of merely warned about.
+        for (String suffix : LITHIUM_FORCE_DISABLED) {
+            String v = DEFAULTS.get(LITHIUM_PREFIX + suffix);
+            if (v != null && !"false".equalsIgnoreCase(v)) {
+                throw new IllegalStateException("SuperChunkConfig: lithium." + suffix
+                        + " is in LITHIUM_FORCE_DISABLED but defaults to '" + v
+                        + "' — the pin would silently override the default. Fix one of the two.");
+            }
+        }
     }
 
     private static void def(String k, String v) {
@@ -438,6 +486,7 @@ public final class SuperChunkConfig {
         Properties p = get();
         try {
             applyC2me(p);
+            applyChunky(p);
             writeLithium(p);
             writeLighting(p);
             // Mod-compat C2ME overrides layered AFTER applyC2me so an explicit user value wins.
@@ -457,6 +506,58 @@ public final class SuperChunkConfig {
      * documented source of truth — showed 'default'. Keys absent from the unified file
      * remain toml-governed as before.
      */
+    /**
+     * {@code pregen.chunkyWorkingCount} &rarr; the {@code chunky.maxWorkingCount} system property.
+     *
+     * <p>Chunky's {@code GenerationTask} reads that property in a static initialiser and uses it as
+     * the permit count of the semaphore its generation loop acquires per chunk — so it is a hard
+     * cap on in-flight chunks, and therefore on throughput (in-flight = throughput &times;
+     * per-chunk latency). Its default is <b>50</b>, which is sized for vanilla's synchronous chunk
+     * pipeline, not for the much deeper async one this mod runs; every benchmark in the README was
+     * taken with the property raised by hand.
+     *
+     * <p>Three rules make this safe to set on a user's behalf: an explicit {@code -D} always wins
+     * (same contract as {@link #applyC2me}), {@code default} leaves Chunky entirely alone, and the
+     * {@code auto} default scales with the heap rather than hard-coding the value that happened to
+     * win on a 16 GB benchmark box — every in-flight chunk is retained, so a number sized for 16 GB
+     * is a way to run a 4 GB server out of memory. The class is only touched if Chunky is installed
+     * at all; writing a system property no one reads is inert.
+     */
+    private static void applyChunky(Properties p) {
+        String val = p.getProperty("pregen.chunkyWorkingCount");
+        if (val == null || val.isBlank() || val.equalsIgnoreCase(DEFAULT_PLACEHOLDER)) {
+            return;
+        }
+        final String prop = "chunky.maxWorkingCount";
+        if (System.getProperty(prop) != null) {
+            LOGGER.info("[SuperChunk-Config] {} already set on the command line — leaving it alone.", prop);
+            return;
+        }
+        int n;
+        String how;
+        if ("auto".equalsIgnoreCase(val.trim())) {
+            double heapGb = Runtime.getRuntime().maxMemory() / (1024.0 * 1024.0 * 1024.0);
+            n = (int) Math.max(256, Math.min(3072, heapGb * 192.0));
+            how = String.format("auto from a %.1f GB max heap", heapGb);
+        } else {
+            try {
+                n = Integer.parseInt(val.trim());
+            } catch (NumberFormatException e) {
+                LOGGER.warn("[SuperChunk-Config] pregen.chunkyWorkingCount='{}' is not a number, "
+                        + "'auto' or 'default' — ignored.", val);
+                return;
+            }
+            if (n <= 0) {
+                return;
+            }
+            how = "configured";
+        }
+        System.setProperty(prop, Integer.toString(n));
+        LOGGER.info("[SuperChunk-Config] Chunky in-flight chunk limit -> {} ({}, -D{}). Chunky's own "
+                + "default is 50, which caps pregen throughput far below this pipeline's capability.",
+                n, how, prop);
+    }
+
     private static void applyC2me(Properties p) {
         int n = 0;
         for (String name : p.stringPropertyNames()) {
@@ -485,7 +586,7 @@ public final class SuperChunkConfig {
 
     /**
      * Returns the value to use for a Lithium rule whose {@code suffix} is its key without the
-     * {@code lithium.} prefix, HARD-PINNING the five C2ME-overlap rules
+     * {@code lithium.} prefix, HARD-PINNING the C2ME-overlap rules
      * ({@link #LITHIUM_FORCE_DISABLED}) to false and logging a warning when an incoming
      * {@code true} is overridden. Other rules pass through unchanged. {@code origin} names the
      * flow for the log (e.g. "write-through", "legacy migration").
@@ -520,7 +621,7 @@ public final class SuperChunkConfig {
                 out.store(o, "Generated by SuperChunk from config/superchunk.properties (lithium.*). Edit superchunk.properties instead.");
             }
             LOGGER.info("[SuperChunk-Config] Wrote {} Lithium rule(s) to {} from the unified config.", out.size(), file);
-            // Make the C2ME-overlap safety pins auditable in the boot log. These five are ALWAYS
+            // Make the C2ME-overlap safety pins auditable in the boot log. These are ALWAYS
             // forced false (see pinLithium) and apply to whichever Lithium reads this file — the
             // bundled copy OR a standalone Lithium — which is the whole point of writing it early.
             LOGGER.info("[SuperChunk-Config] C2ME-overlap safety pins forced false in {}: mixin.{}",

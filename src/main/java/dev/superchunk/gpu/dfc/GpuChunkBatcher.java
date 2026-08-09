@@ -63,6 +63,40 @@ import java.util.concurrent.atomic.AtomicLong;
  * failure completes the affected futures exceptionally rather than hanging them.
  */
 public final class GpuChunkBatcher implements AutoCloseable {
+
+    /**
+     * Kill switch for the dead-grid skip ({@code -Dsuperchunk.gpu.keepDeadGrids=true}
+     * restores the old always-read-and-copy behaviour). Terrain cannot depend on it —
+     * a chunk that unexpectedly wants grids finds none and takes the existing
+     * per-chunk dispatch fallback — but the switch makes an A/B one flag wide.
+     */
+    private static final boolean SKIP_DEAD_GRIDS = !Boolean.getBoolean("superchunk.gpu.keepDeadGrids");
+    /** Shared sentinel handed to futures whose corner grids are provably unread. */
+    static final double[] EMPTY_GRIDS = new double[0];
+
+    /** True iff {@code grids} is the dead-grid sentinel (identity, not a length heuristic). */
+    static boolean isDeadGrids(double[] grids) {
+        return grids == EMPTY_GRIDS;
+    }
+
+    /**
+     * Nothing can send this chunk down the original per-block loop, so its 78.4 KB corner slice
+     * is provably unread and need not be copied out of pinned staging.
+     *
+     * <p>{@link CompactConsume#willConsume()} is the global half of {@code consumeFill}'s entry
+     * gate (mode, sticky-disable, and the unbindable-foreign-Lithium case); the rest is per
+     * chunk. Deliberately conservative — every uncertain term falls to false and keeps the grids.
+     * Evaluated per chunk on purpose: a sticky-disable landing mid-batch must be seen by the
+     * chunks after it.
+     */
+    private static boolean gridsAreDead(Req r) {
+        return SKIP_DEAD_GRIDS
+                && CompactConsume.willConsume()
+                && r.ids != null
+                && r.aux != null
+                && !r.aux.hasBeard;
+    }
+
     private static final Logger LOGGER = OpenCLBackend.LOGGER;
 
     /** Bounded submit queue capacity (producer backpressure). */
@@ -111,6 +145,24 @@ public final class GpuChunkBatcher implements AutoCloseable {
     private final AtomicLong servedCount = new AtomicLong();    // chunks completed OK
     private final AtomicLong batchSizeSum = new AtomicLong();   // sum of K over all dispatches (for mean)
     private final AtomicLong maxBatchSize = new AtomicLong();   // largest K observed
+    private final AtomicLong deadGridsSkipped = new AtomicLong(); // fast-path chunks whose corner slice nobody reads
+    /**
+     * Cell-corner COLUMN redundancy inside a batch (diagnostic).
+     *
+     * <p>A chunk's corner lattice is {@code dimX x dimZ} columns wide where
+     * {@code (dimX-1)*strx == 16} — i.e. 5x5 columns for a 4-block cell, whose last row and
+     * column sit exactly ON the neighbouring chunk's first. Two adjacent chunks in the same
+     * batch therefore evaluate that shared column's whole {@code dimY}-tall stack of density
+     * functions TWICE. In a fully tiled sweep only 16 of each chunk's 25 columns are new, so
+     * up to 36% of the corner kernel — which is ~73% of all GPU time — is duplicate work.
+     *
+     * <p>Whether that bound is reachable depends entirely on how spatially clustered the
+     * chunks in one batch actually are, which is a property of Chunky's traversal and the
+     * batching window, not of the geometry. So: measure before building anything.
+     */
+    private final AtomicLong colTotal = new AtomicLong();
+    private final AtomicLong colUnique = new AtomicLong();
+    private long[] colScratch = null;   // drainer-thread only
     /** Achieved batch-size histogram: bins 1, 2-4, 5-8, 9-16, 17-32, 33-64, 65+. */
     private final AtomicLong[] batchHistogram = new AtomicLong[]{
             new AtomicLong(), new AtomicLong(), new AtomicLong(), new AtomicLong(),
@@ -408,9 +460,18 @@ public final class GpuChunkBatcher implements AutoCloseable {
         LOGGER.info("[SuperChunk-GPU] [batch] cross-chunk batching '{}' ({}): requests pooled={}, served={}, REJECTED "
                         + "(queue full / not running)={}, batched dispatches={} "
                         + "(batchLimit={}, windowMicros={}); mean batch size={} chunks/dispatch, max={}; "
-                        + "GPU-launch reduction ~{}x vs one-dispatch-per-chunk.",
+                        + "GPU-launch reduction ~{}x vs one-dispatch-per-chunk; dead corner grids skipped={} "
+                        + "(fast-path chunks whose 78.4KB slice nothing reads).",
                 drainer.getName(), when, req, served, rejected, disp, batchLimit, batchWindowMicros(),
-                String.format("%.1f", mean), maxBatchSize.get(), String.format("%.1f", reduction));
+                String.format("%.1f", mean), maxBatchSize.get(), String.format("%.1f", reduction),
+                deadGridsSkipped.get());
+        long ct = colTotal.get(), cu = colUnique.get();
+        if (ct > 0) {
+            LOGGER.info("[SuperChunk-GPU] [batch] corner-column redundancy '{}' ({}): columns evaluated={}, "
+                            + "DISTINCT={} -> {}% of the corner kernel is duplicate work "
+                            + "(shared cell columns between chunks that landed in the same batch).",
+                    drainer.getName(), when, ct, cu, String.format("%.1f", 100.0 * (ct - cu) / ct));
+        }
         LOGGER.info("[SuperChunk-GPU] [batch] achieved batch-size distribution '{}' ({}): "
                         + "[1]={} [2-4]={} [5-8]={} [9-16]={} [17-32]={} [33-64]={} [65+]={} dispatches.",
                 drainer.getName(), when,
@@ -660,6 +721,48 @@ public final class GpuChunkBatcher implements AutoCloseable {
      * collecting the next batch. Blocks only inside {@code enqueueBatch} when every
      * pipeline slot is in flight (GPU a full pipeline behind = correct backpressure).
      */
+    /**
+     * Accumulates this batch's total vs DISTINCT corner columns into {@link #colTotal} /
+     * {@link #colUnique}. Drainer-thread only; a linear-probe set over a power-of-two table
+     * sized 4x the column count, so it is a few microseconds against a batch whose GPU work
+     * is tens of milliseconds. Purely observational.
+     */
+    private void countColumnRedundancy(int[] origins, int K, int strx, int strz, int dimX, int dimZ) {
+        final int cols = K * dimX * dimZ;
+        int cap = Integer.highestOneBit(Math.max(16, cols * 4 - 1)) << 1;
+        if (colScratch == null || colScratch.length < cap) {
+            colScratch = new long[cap];
+        }
+        final long[] tab = colScratch;
+        java.util.Arrays.fill(tab, 0, cap, Long.MIN_VALUE);   // MIN_VALUE = empty
+        final int mask = cap - 1;
+        int distinct = 0;
+        for (int c = 0; c < K; c++) {
+            final int ox = origins[c * 3], oz = origins[c * 3 + 2];
+            for (int ix = 0; ix < dimX; ix++) {
+                final long xs = ((long) (ox + ix * strx)) << 32;
+                for (int iz = 0; iz < dimZ; iz++) {
+                    long key = xs | ((oz + iz * strz) & 0xFFFFFFFFL);
+                    int h = (int) ((key ^ (key >>> 32)) * 0x9E3779B1L) & mask;
+                    while (true) {
+                        long cur = tab[h];
+                        if (cur == Long.MIN_VALUE) {
+                            tab[h] = key;
+                            distinct++;
+                            break;
+                        }
+                        if (cur == key) {
+                            break;
+                        }
+                        h = (h + 1) & mask;
+                    }
+                }
+            }
+        }
+        colTotal.addAndGet(cols);
+        colUnique.addAndGet(distinct);
+    }
+
     private void dispatchBatch(GeometryKey key, ArrayDeque<Req> b) {
         int K = 0;
         while (K < batchLimit && !b.isEmpty()) {
@@ -715,6 +818,7 @@ public final class GpuChunkBatcher implements AutoCloseable {
                 origins[c * 3 + 1] = r.oy;
                 origins[c * 3 + 2] = r.oz;
             }
+            countColumnRedundancy(origins, K, key.strx(), key.strz(), key.dimX(), key.dimZ());
             // COMPACT-IDS: collect the popped requests' auxes (if any) so the dispatcher
             // can chain the decide kernel; per-chunk id slices are read completer-side.
             CompactIds.ChunkAux[] auxes = null;
@@ -811,6 +915,9 @@ public final class GpuChunkBatcher implements AutoCloseable {
                     CompactIds.recordDecide(p.inf.decidePresent(), p.inf.decideKernelNs(),
                             System.nanoTime() - ti);
                 }
+                // Whole in-batch device timeline (no-op unless the slot queue profiles).
+                // MUST run before release() — that frees the events.
+                CompactIds.recordTimeline(p.inf.deviceTimeline());
                 final boolean climOk = p.inf.climateAvailable();
                 final int climLen = p.inf.climateSliceLenLive();
                 for (int c = 0; c < p.k; c++) {
@@ -831,9 +938,21 @@ public final class GpuChunkBatcher implements AutoCloseable {
                             }
                         }
                     }
-                    double[] s = new double[p.sliceLen];
-                    p.inf.readSlice(c, s);
-                    r.future.complete(s); // no-op if the future was cancelled meanwhile
+                    // DEAD-GRID SKIP. On the compact-consume FAST path doFill is cancelled at
+                    // HEAD, so ChunkGridCache.consumeBatchedGrid — the ONLY reader of
+                    // Stored.grids — never runs and this slice is allocated, copied and dropped.
+                    // Measured: 'served from the batched grid store' equals the hybrid count
+                    // EXACTLY (5220/5220, 5222/5222 on two r2048 runs), i.e. 92% of chunks never
+                    // read it — ~4.7 GB of pointless allocation + copy per run, on the completer
+                    // thread, inside the slot-held window.
+                    if (!gridsAreDead(r)) {
+                        double[] s = new double[p.sliceLen];
+                        p.inf.readSlice(c, s);
+                        r.future.complete(s); // no-op if the future was cancelled meanwhile
+                    } else {
+                        deadGridsSkipped.incrementAndGet();
+                        r.future.complete(EMPTY_GRIDS);
+                    }
                 }
                 pipeSliceNanos.addAndGet(System.nanoTime() - ts);
             } else {
