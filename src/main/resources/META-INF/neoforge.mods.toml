@@ -8,7 +8,7 @@ issueTrackerURL = "https://github.com/TheProKnightGamer/SuperChunk/issues"
 
 [[mods]]
 modId = "superchunk"
-version = "0.2.0"
+version = "0.3.0"
 displayName = "SuperChunk"
 authors = "TheProKnightGamer (merge of C2ME, ScalableLux, NoisiumForked, Lithium)"
 description = '''
