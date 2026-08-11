@@ -224,8 +224,8 @@ public final class GpuDensityFunction implements AutoCloseable {
             if (headersLoaded) {
                 return cachedHeaders;
             }
-            String noiseSrc = loadResource(NOISE_CL);
-            String supportSrc = loadResource(SUPPORT_CL);
+            String noiseSrc = CLProgram.loadKernelSource(NOISE_CL);
+            String supportSrc = CLProgram.loadKernelSource(SUPPORT_CL);
             String result;
             if (noiseSrc == null || supportSrc == null) {
                 LOGGER.warn("[SuperChunk-GPU] Could not load kernel resources — CPU fallback.");
@@ -261,14 +261,14 @@ public final class GpuDensityFunction implements AutoCloseable {
         long descMem = NULL, factorsMem = NULL, permMem = NULL, activeMem = NULL,
                 xoMem = NULL, yoMem = NULL, zoMem = NULL, ampMem = NULL;
         try {
-            descMem = uploadInts(program, registry.descArray());
-            factorsMem = uploadReals(program, fp32, registry.factorArray());
-            permMem = uploadInts(program, registry.permArray());
-            activeMem = uploadInts(program, registry.activeArray());
-            xoMem = uploadReals(program, fp32, registry.xoArray());
-            yoMem = uploadReals(program, fp32, registry.yoArray());
-            zoMem = uploadReals(program, fp32, registry.zoArray());
-            ampMem = uploadReals(program, fp32, registry.ampArray());
+            descMem = program.uploadInts(registry.descArray());
+            factorsMem = program.uploadReals(fp32, registry.factorArray());
+            permMem = program.uploadPerm(registry.permArray());
+            activeMem = program.uploadInts(registry.activeArray());
+            xoMem = program.uploadReals(fp32, registry.xoArray());
+            yoMem = program.uploadReals(fp32, registry.yoArray());
+            zoMem = program.uploadReals(fp32, registry.zoArray());
+            ampMem = program.uploadReals(fp32, registry.ampArray());
             return new GpuDensityFunction(program, tag, fp32, ast, descMem, factorsMem, permMem, activeMem,
                     xoMem, yoMem, zoMem, ampMem);
         } catch (Throwable t) {
@@ -424,7 +424,7 @@ public final class GpuDensityFunction implements AutoCloseable {
         long[] ev = profile ? new long[1] : null;
         boolean recorded = false;
         try {
-            program.enqueue1DAsync(rt.queue, kernel, roundUp(n), ev);
+            program.enqueue1DAsync(rt.queue, kernel, CLProgram.roundUpGlobal(n), ev);
 
             long tReadStart = profile ? System.nanoTime() : 0L;
             rt.downloadReals(out, n);   // blocking — this is the single sync point
@@ -470,7 +470,7 @@ public final class GpuDensityFunction implements AutoCloseable {
         long[] ev = profile ? new long[1] : null;
         boolean recorded = false;
         try {
-            program.enqueue1DAsync(rt.queue, kernel, roundUp(n), ev);
+            program.enqueue1DAsync(rt.queue, kernel, CLProgram.roundUpGlobal(n), ev);
             if (legacy) {
                 // Faithful Phase-A baseline: explicit clFinish BEFORE the (also-blocking)
                 // readback, exactly as the original enqueue1D + readBuffer did.
@@ -800,73 +800,6 @@ public final class GpuDensityFunction implements AutoCloseable {
             CLProgram.releaseQueue(queue);
             freeHost();
             sxMem = syMem = szMem = outMem = NULL;
-        }
-    }
-
-    // ----------------------------------------------------------------------
-    // Buffer helpers (mirror GpuNoiseParityTest; off-heap staging, copy-host-ptr).
-    // ----------------------------------------------------------------------
-
-    private static long uploadInts(CLProgram program, int[] data) {
-        // OpenCL buffers must be non-empty; pad a zero-length array to 1.
-        int len = Math.max(1, data.length);
-        IntBuffer buf = MemoryUtil.memAllocInt(len);
-        try {
-            if (data.length == 0) {
-                buf.put(0).flip();
-            } else {
-                buf.put(data).flip();
-            }
-            return program.createInputBuffer(buf);
-        } finally {
-            MemoryUtil.memFree(buf);
-        }
-    }
-
-    private static long uploadReals(CLProgram program, boolean fp32, double[] data) {
-        int len = Math.max(1, data.length);
-        if (fp32) {
-            FloatBuffer buf = MemoryUtil.memAllocFloat(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0f);
-                } else {
-                    for (double v : data) buf.put((float) v);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        } else {
-            DoubleBuffer buf = MemoryUtil.memAllocDouble(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0);
-                } else {
-                    buf.put(data);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        }
-    }
-
-    private static long roundUp(int n) {
-        return ((n + 63) / 64) * 64L;
-    }
-
-    private static String loadResource(String path) {
-        try (InputStream in = GpuDensityFunction.class.getResourceAsStream(path)) {
-            if (in == null) {
-                return null;
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOGGER.error("[SuperChunk-GPU] Failed reading {}", path, e);
-            return null;
         }
     }
 }

@@ -123,8 +123,15 @@ inline double aq_flowing_update_similarity() {
 }
 
 // =====================================================================
-// HIGH-AIR fast path (production sc_decide_multichunk only; the census
-// kernels below keep calling the FULL aq_decide).
+// HIGH-AIR fast path — PROOF ONLY; aq_airpath_similarity below now has NO CALLER.
+//
+// The proof still stands and is why the production kernel can emit a constant, but its
+// CONCLUSION got stronger than this function: the sched bit it computes is bit7 on an AIR
+// byte, and no consumer ever reads that (CompactConsume.marksFromIds gates on
+// nonAir[b] && fluid[b], and AIR is id 1; the SWAR pre-filter matches only {0x82,0x83};
+// vanilla doFill continues on AIR before consulting shouldScheduleFluidUpdate). So
+// CompactIds.kernelEntry emits `id = AQ_AIR; sched = 0;` directly and never calls this.
+// Kept as the derivation of that constant; the CL compiler DCEs it (plain `inline`, no caller).
 //
 // For a density<=0 block with y >= airSkipY, where
 //   airSkipY = max(all candidate cells' fluidLevel, seaLevel) + 5   (host aux[17]),

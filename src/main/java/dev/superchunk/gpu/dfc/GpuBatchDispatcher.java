@@ -73,8 +73,29 @@ public final class GpuBatchDispatcher implements AutoCloseable {
 
     private final CLProgram program;
     private final boolean fp32;
-    // Entry-point kernel this dispatcher clones per slot: KERNEL_NAME normally, the
-    // f32d variant for the fp32 climate dispatcher (compileClimateF32D).
+    /** Slot queues carry CL_QUEUE_PROFILING_ENABLE — gates the per-command event capture. */
+    private final boolean profilingQueues;
+
+    /**
+     * COLUMN DEDUPLICATION ({@code -Dsuperchunk.gpu.colDedup=true}, default OFF until the
+     * measured redundancy justifies it).
+     *
+     * <p>Chunks in one batch share cell columns: a chunk's lattice is {@code dimX x dimZ}
+     * columns with {@code (dimX-1)*strx == 16}, so its last row/column of columns is the
+     * neighbour's first. When on, the corner grid is produced by
+     * {@code df_batch_lattice_uniqcol} over the batch's DISTINCT columns followed by
+     * {@code sc_expand_columns}, which writes the identical {@code out} layout — the same
+     * root functions at the same integer coordinates, so bit-exact by construction. Falls
+     * back to the single-kernel path whenever the tables cannot be built, the kernels are
+     * absent, the batch spans more than one {@code oy}, or there is no redundancy to remove.
+     */
+    private static final boolean COL_DEDUP = Boolean.getBoolean("superchunk.gpu.colDedup");
+    /** {@code df_batch_lattice_uniqcol} / {@code sc_expand_columns} both resolved on this program. */
+    private final boolean colDedupAvailable;
+    private final java.util.concurrent.atomic.AtomicLong colDedupBatches = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong colDedupCols = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong colDedupUnique = new java.util.concurrent.atomic.AtomicLong();
+
     private final String kernelName;
     private final int realBytes;
     private final int rootCount;
@@ -167,6 +188,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                                long nXoMem, long nYoMem, long nZoMem, long nAmpMem) {
         this.program = program;
         this.fp32 = fp32;
+        this.profilingQueues = profilingQueues;
         this.kernelName = kernelName;
         this.realBytes = fp32 ? Float.BYTES : Double.BYTES;
         this.rootCount = rootCount;
@@ -178,6 +200,27 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         this.nYoMem = nYoMem;
         this.nZoMem = nZoMem;
         this.nAmpMem = nAmpMem;
+        // The column-dedup kernels only exist in the standard emitMultiChunk source (the
+        // fp32 climate variant has no use for them), so probe rather than assume.
+        boolean dedupOk = false;
+        if (COL_DEDUP) {
+            long probeA = NULL, probeB = NULL;
+            try {
+                probeA = program.kernel("df_batch_lattice_uniqcol");
+                probeB = program.kernel("sc_expand_columns");
+                dedupOk = probeA != NULL && probeB != NULL;
+            } catch (Throwable t) {
+                dedupOk = false;
+            } finally {
+                CLProgram.releaseKernel(probeA);
+                CLProgram.releaseKernel(probeB);
+            }
+            if (!dedupOk) {
+                LOGGER.warn("[SuperChunk-GPU] [batch] column dedup requested but this program has no "
+                        + "df_batch_lattice_uniqcol/sc_expand_columns — using the single-kernel corner path.");
+            }
+        }
+        this.colDedupAvailable = dedupOk;
         this.slots = new Slot[depth];
         this.freeSlots = new ArrayBlockingQueue<>(depth);
         try {
@@ -295,8 +338,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             return null;
         }
 
-        String noiseSrc = loadResource(NOISE_CL);
-        String supportSrc = loadResource(SUPPORT_CL);
+        String noiseSrc = CLProgram.loadKernelSource(NOISE_CL);
+        String supportSrc = CLProgram.loadKernelSource(SUPPORT_CL);
         if (noiseSrc == null || supportSrc == null) {
             LOGGER.warn("[SuperChunk-GPU] [batch] could not load kernel resources — batched dispatch unavailable.");
             return null;
@@ -316,14 +359,14 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         long descMem = NULL, factorsMem = NULL, permMem = NULL, activeMem = NULL,
                 xoMem = NULL, yoMem = NULL, zoMem = NULL, ampMem = NULL;
         try {
-            descMem = uploadInts(program, registry.descArray());
-            factorsMem = uploadReals(program, floatState, registry.factorArray());
-            permMem = uploadInts(program, registry.permArray());
-            activeMem = uploadInts(program, registry.activeArray());
-            xoMem = uploadReals(program, floatState, registry.xoArray());
-            yoMem = uploadReals(program, floatState, registry.yoArray());
-            zoMem = uploadReals(program, floatState, registry.zoArray());
-            ampMem = uploadReals(program, floatState, registry.ampArray());
+            descMem = program.uploadInts(registry.descArray());
+            factorsMem = program.uploadReals(floatState, registry.factorArray());
+            permMem = program.uploadPerm(registry.permArray());
+            activeMem = program.uploadInts(registry.activeArray());
+            xoMem = program.uploadReals(floatState, registry.xoArray());
+            yoMem = program.uploadReals(floatState, registry.yoArray());
+            zoMem = program.uploadReals(floatState, registry.zoArray());
+            ampMem = program.uploadReals(floatState, registry.ampArray());
             // probe/verify modes: create the slot queues with profiling so the chained
             // decide kernel's device time can be attributed (CLProgram.eventProfile).
             // Production CONSUME runs skip it (per-command driver timestamping on every
@@ -335,6 +378,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                     Math.max(1, configPipelineDepth()),
                     climF32d ? "df_batch_lattice_multichunk_f32d" : KERNEL_NAME,
                     descMem, factorsMem, permMem, activeMem, xoMem, yoMem, zoMem, ampMem);
+            program.logKernelWorkGroupInfo(d.slots[0].kernel, "df_batch_lattice_multichunk (corner)");
             // COMPACT-IDS (Stage 5): chain-build the decide kernel for this fused group.
             // Entirely fail-soft: any failure logs + counts and leaves d's corner path as-is.
             if (CompactIds.PROBE && fused != null) {
@@ -406,6 +450,90 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         return doEnqueue(originsXYZ, K, strx, stry, strz, dimX, dimY, dimZ, n, auxes, withClimate);
     }
 
+    /**
+     * COLUMN-DEDUPLICATED corner production. Evaluates each DISTINCT cell column of the batch
+     * once ({@code df_batch_lattice_uniqcol}) and fans the result out into the normal
+     * {@code out[c*M*n + k*n + cellIdx]} layout ({@code sc_expand_columns}), so every consumer
+     * downstream — the chained decide kernel, the corner readback, the per-chunk grid store —
+     * sees exactly the bytes the single-kernel path would have written.
+     *
+     * <p>Returns false (caller falls back to the one-kernel path, nothing enqueued) when dedup
+     * is off/unavailable, when the batch spans more than one {@code oy} — a column is only
+     * interchangeable between chunks whose vertical origin matches — or when the batch has no
+     * duplicate columns to remove, in which case the extra copy would be pure loss.
+     *
+     * <p>Any throwable leaves the slot's queue with at most some harmless uploads on it and
+     * returns false, so the caller's normal enqueue still produces a correct grid.
+     */
+    private boolean enqueueCornerDeduped(Slot s, int[] originsXYZ, int K,
+                                         int strx, int stry, int strz,
+                                         int dimX, int dimY, int dimZ, int n,
+                                         int total, long[] cornerEvtOut) {
+        if (!colDedupAvailable || s.uniqKernel == NULL || s.expandKernel == NULL) {
+            return false;
+        }
+        final int oy = originsXYZ[1];
+        for (int c = 1; c < K; c++) {
+            if (originsXYZ[c * 3 + 1] != oy) {
+                return false;   // mixed vertical origins: columns are not shared
+            }
+        }
+        try {
+            final int plane = dimX * dimZ;
+            final int cols = K * plane;
+            final int U = s.buildColumnTables(originsXYZ, K, strx, strz, dimX, dimZ);
+            if (U <= 0 || U >= cols) {
+                return false;   // nothing shared — the fan-out copy would be pure overhead
+            }
+            final long uniqElems = (long) rootCount * U * dimY;
+            final long uniqTotal = (long) U * dimY;
+            if (uniqElems > Integer.MAX_VALUE || uniqTotal > Integer.MAX_VALUE) {
+                return false;
+            }
+            s.ensureUniqCapacity(uniqElems);
+            program.writeBufferAsync(s.queue, s.colXZMem, s.hColXZ);
+            program.writeBufferAsync(s.queue, s.colIdxMem, s.hColIdx);
+
+            int a = 8;   // args 0..7 are the immutable noise pointers, bound once per slot
+            program.setArgPointer(s.uniqKernel, a++, s.colXZMem);
+            program.setArgInt(s.uniqKernel, a++, oy);
+            program.setArgInt(s.uniqKernel, a++, stry);
+            program.setArgInt(s.uniqKernel, a++, dimY);
+            program.setArgInt(s.uniqKernel, a++, U);
+            program.setArgInt(s.uniqKernel, a++, (int) uniqTotal);
+            program.setArgPointer(s.uniqKernel, a, s.uniqMem);
+            program.enqueue1DAsync(s.queue, s.uniqKernel, CLProgram.roundUpGlobal(uniqTotal), cornerEvtOut);
+
+            int b = 0;
+            program.setArgPointer(s.expandKernel, b++, s.uniqMem);
+            program.setArgPointer(s.expandKernel, b++, s.colIdxMem);
+            program.setArgInt(s.expandKernel, b++, dimX);
+            program.setArgInt(s.expandKernel, b++, dimZ);
+            program.setArgInt(s.expandKernel, b++, dimY);
+            program.setArgInt(s.expandKernel, b++, U);
+            program.setArgInt(s.expandKernel, b++, n);
+            program.setArgInt(s.expandKernel, b++, rootCount);
+            program.setArgInt(s.expandKernel, b++, total);
+            program.setArgPointer(s.expandKernel, b, s.outMem);
+            program.enqueue1DAsync(s.queue, s.expandKernel, CLProgram.roundUpGlobal(total), null);
+
+            colDedupBatches.incrementAndGet();
+            colDedupCols.addAndGet(cols);
+            colDedupUnique.addAndGet(U);
+            return true;
+        } catch (Throwable t) {
+            // The caller's single-kernel enqueue still writes the whole grid (the slot queue
+            // is in-order, so it lands after anything half-enqueued above). Drop any event
+            // this method already created — the caller is about to overwrite the slot.
+            if (cornerEvtOut != null) {
+                CLProgram.releaseEvent(cornerEvtOut[0]);
+                cornerEvtOut[0] = NULL;
+            }
+            LOGGER.warn("[SuperChunk-GPU] [batch] column-dedup enqueue failed — single-kernel corner path.", t);
+            return false;
+        }
+    }
+
     /** True when the K*n / K*M*n sizes overflow int (batch not dispatchable). */
     private boolean validateSizes(int K, int n) {
         long totalWork = (long) K * n;
@@ -457,10 +585,24 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             program.setArgInt(s.kernel, a++, total);
             program.setArgPointer(s.kernel, a++, s.outMem);
 
-            // One work-item per (chunk, cell); each writes all M roots for its chunk.
-            program.enqueue1DAsync(s.queue, s.kernel, roundUp(total), null);
+            // One work-item per (chunk, cell); each writes all M roots for its chunk —
+            // unless the column-dedup path takes over below and produces the same `out`.
+            long[] cornerEvtOut = profilingQueues ? new long[1] : null;
+            if (!enqueueCornerDeduped(s, originsXYZ, K, strx, stry, strz, dimX, dimY, dimZ, n,
+                    total, cornerEvtOut)) {
+                program.enqueue1DAsync(s.queue, s.kernel, CLProgram.roundUpGlobal(total), cornerEvtOut);
+            }
+
+            // Kick the corner kernel NOW. Everything below (aux staging, 5 uploads, the
+            // decide NDRange, 2 readbacks) is enqueue-side host work; without this flush the
+            // driver may hold the whole batch back until the trailing flush, delaying the
+            // kernel by that staging time. Same reasoning as the trailing flush's comment.
+            program.flush(s.queue);
 
             inf = new InFlight(s, K, rootCount * n, outElems);
+            if (cornerEvtOut != null) {
+                inf.cornerEvt = cornerEvtOut[0];
+            }
 
             // ---- COMPACT-IDS decide chain: aux upload (async) + chained decide
             // NDRange over the SAME device-resident slot corner buffer. Enqueued
@@ -524,7 +666,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                         climProgram.setArgInt(s.climKernel, a3++, climRootCount); // M
                         climProgram.setArgInt(s.climKernel, a3++, climTotal);
                         climProgram.setArgPointer(s.climKernel, a3, s.climOutMem);
-                        climProgram.enqueue1DAsync(s.queue, s.climKernel, roundUp(climTotal), null);
+                        climProgram.enqueue1DAsync(s.queue, s.climKernel, CLProgram.roundUpGlobal(climTotal), null);
                         if (fp32) {
                             s.hClimOutF.clear();
                             s.hClimOutF.limit(climOutElems);
@@ -584,6 +726,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 inf.decideEvt = NULL;
                 CLProgram.releaseEvent(inf.idsReadEvt);
                 inf.idsReadEvt = NULL;
+                CLProgram.releaseEvent(inf.cornerEvt);
+                inf.cornerEvt = NULL;
             }
             return null;
         } finally {
@@ -628,6 +772,11 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         long readEvent = NULL;
         long decideEvt = NULL;
         long idsReadEvt = NULL;
+        // Corner NDRange event. Captured ONLY when the slot queues carry
+        // CL_QUEUE_PROFILING_ENABLE (probe/verify, or -Dsuperchunk.gpu.decideProfile).
+        // Before this existed the corner kernel and both DMAs were enqueued with a null
+        // event, so ~40% of in-batch GPU time was structurally unattributable.
+        long cornerEvt = NULL;
         // 0 = unchecked, 1 = ids DMA verified CL_COMPLETE, -1 = failed (corner-only fallback)
         private int idsState;
         int decidePresent;
@@ -658,16 +807,55 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             return decidePresent;
         }
 
-        /** Decide kernel device-time (ns) when the profiling queue captured it, else -1. */
+        /**
+         * Decide kernel device-time (ns), or -1. Gated on {@link #profilingQueues}: decideEvt is
+         * captured unconditionally, but on a non-profiling queue the driver only answers
+         * CL_PROFILING_INFO_NOT_AVAILABLE — so without this the production path paid three
+         * always-failing driver round trips per batch on the completer thread.
+         */
         public long decideKernelNs() {
-            if (decideEvt == NULL) {
+            if (!profilingQueues || decideEvt == NULL) {
                 return -1L;
             }
+            long[] prof = CLProgram.eventProfile(decideEvt);
+            return prof != null ? prof[1] : -1L;
+        }
+
+        /**
+         * Full in-batch device timeline, or null when the slot queue is not profiling.
+         *
+         * <p>Returns {@code {cornerNs, decideNs, idsReadNs, cornerReadNs, spanNs}}: the four
+         * commands' device busy times and the wall span from the corner kernel's START to the
+         * last command's END, all on the device clock. The commands share ONE in-order queue, so
+         * subtracting timestamps across them is meaningful, and the GPU idle INSIDE the batch is
+         * simply {@code span - sum(busy)} — derived at report time rather than accumulated here.
+         * A missing event makes that component -1 and drops out of both sums.
+         */
+        public long[] deviceTimeline() {
+            if (cornerEvt == NULL) {
+                return null;
+            }
             try {
-                long[] prof = CLProgram.eventProfile(decideEvt);
-                return prof != null ? prof[1] : -1L;
+                // In-order queue order: corner -> decide -> ids read -> corner read.
+                long[][] seq = {CLProgram.eventTimes(cornerEvt), CLProgram.eventTimes(decideEvt),
+                        CLProgram.eventTimes(idsReadEvt), CLProgram.eventTimes(readEvent)};
+                if (seq[0] == null) {
+                    return null;
+                }
+                long[] out = new long[5];
+                long[] last = seq[0];
+                for (int i = 0; i < seq.length; i++) {
+                    if (seq[i] == null) {
+                        out[i] = -1L;
+                        continue;
+                    }
+                    out[i] = seq[i][2] - seq[i][1];
+                    last = seq[i];
+                }
+                out[4] = last[2] - seq[0][1];
+                return out;
             } catch (Throwable t) {
-                return -1L;
+                return null;
             }
         }
 
@@ -788,6 +976,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             decideEvt = NULL;
             CLProgram.releaseEvent(idsReadEvt);
             idsReadEvt = NULL;
+            CLProgram.releaseEvent(cornerEvt);
+            cornerEvt = NULL;
             freeSlots.offer(slot);
         }
     }
@@ -854,6 +1044,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 }
                 CompactIds.recordDecide(inf.decidePresent(), inf.decideKernelNs(), System.nanoTime() - tIds0);
             }
+            CompactIds.recordTimeline(inf.deviceTimeline());
             return true;
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-GPU] [batch] batched fill failed (K={}, M={}).", K, rootCount, t);
@@ -924,14 +1115,14 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             return;
         }
         try {
-            decideNoiseMems[0] = uploadInts(p, plan.registry.descArray());
-            decideNoiseMems[1] = uploadReals(p, decFp32, plan.registry.factorArray());
-            decideNoiseMems[2] = uploadInts(p, plan.registry.permArray());
-            decideNoiseMems[3] = uploadInts(p, plan.registry.activeArray());
-            decideNoiseMems[4] = uploadReals(p, decFp32, plan.registry.xoArray());
-            decideNoiseMems[5] = uploadReals(p, decFp32, plan.registry.yoArray());
-            decideNoiseMems[6] = uploadReals(p, decFp32, plan.registry.zoArray());
-            decideNoiseMems[7] = uploadReals(p, decFp32, plan.registry.ampArray());
+            decideNoiseMems[0] = p.uploadInts(plan.registry.descArray());
+            decideNoiseMems[1] = p.uploadReals(decFp32, plan.registry.factorArray());
+            decideNoiseMems[2] = p.uploadPerm(plan.registry.permArray());
+            decideNoiseMems[3] = p.uploadInts(plan.registry.activeArray());
+            decideNoiseMems[4] = p.uploadReals(decFp32, plan.registry.xoArray());
+            decideNoiseMems[5] = p.uploadReals(decFp32, plan.registry.yoArray());
+            decideNoiseMems[6] = p.uploadReals(decFp32, plan.registry.zoArray());
+            decideNoiseMems[7] = p.uploadReals(decFp32, plan.registry.ampArray());
             for (Slot s : slots) {
                 long k = p.kernel(plan.kernelName);
                 for (int i = 0; i < 8; i++) {
@@ -939,6 +1130,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 }
                 s.decideKernel = k;
             }
+            p.logKernelWorkGroupInfo(slots[0].decideKernel, "sc_decide_multichunk");
             decideProgram = p;
             decidePlan = plan;
             CompactIds.noteDecideFp(decFp32 ? "fp32" : "fp64");
@@ -1004,8 +1196,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 if (closed) {
                     return false;
                 }
-                String noiseSrc = loadResource(NOISE_CL);
-                String supportSrc = loadResource(SUPPORT_CL);
+                String noiseSrc = CLProgram.loadKernelSource(NOISE_CL);
+                String supportSrc = CLProgram.loadKernelSource(SUPPORT_CL);
                 if (noiseSrc == null || supportSrc == null) {
                     climChainFailed = true;
                     return false;
@@ -1044,14 +1236,14 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 }
                 try {
                     boolean floatState = climF32 || fp32;   // registry element type must match `real`
-                    climNoiseMems[0] = uploadInts(p, registry.descArray());
-                    climNoiseMems[1] = uploadReals(p, floatState, registry.factorArray());
-                    climNoiseMems[2] = uploadInts(p, registry.permArray());
-                    climNoiseMems[3] = uploadInts(p, registry.activeArray());
-                    climNoiseMems[4] = uploadReals(p, floatState, registry.xoArray());
-                    climNoiseMems[5] = uploadReals(p, floatState, registry.yoArray());
-                    climNoiseMems[6] = uploadReals(p, floatState, registry.zoArray());
-                    climNoiseMems[7] = uploadReals(p, floatState, registry.ampArray());
+                    climNoiseMems[0] = p.uploadInts(registry.descArray());
+                    climNoiseMems[1] = p.uploadReals(floatState, registry.factorArray());
+                    climNoiseMems[2] = p.uploadPerm(registry.permArray());
+                    climNoiseMems[3] = p.uploadInts(registry.activeArray());
+                    climNoiseMems[4] = p.uploadReals(floatState, registry.xoArray());
+                    climNoiseMems[5] = p.uploadReals(floatState, registry.yoArray());
+                    climNoiseMems[6] = p.uploadReals(floatState, registry.zoArray());
+                    climNoiseMems[7] = p.uploadReals(floatState, registry.ampArray());
                     for (Slot s : slots) {
                         long k = p.kernel(climF32 ? "df_batch_lattice_multichunk_f32d" : KERNEL_NAME);
                         for (int i = 0; i < 8; i++) {
@@ -1225,11 +1417,12 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             s.hAuxInts.put(ib + 17, aq.airSkipY);
             s.hAuxLongs.put(c * 2, a.route.oreSeedLo);
             s.hAuxLongs.put(c * 2 + 1, a.route.oreSeedHi);
-            for (int i = 0; i < cellN; i++) {
-                s.hAuxLoc.put(cb + i, aq.locCache[i]);
-                s.hAuxFl.put(cb + i, aq.fluidLevel[i]);
-                s.hAuxFt.put(cb + i, aq.fluidTypeId[i]);
-            }
+            // Absolute BULK puts (Java 13+): three memcpys instead of 3*cellN = 945
+            // bounds-checked scalar puts per chunk (~30k per K=32 batch), on the drainer
+            // thread that sits directly in front of the next GPU dispatch. Byte-identical.
+            s.hAuxLoc.put(cb, aq.locCache, 0, cellN);
+            s.hAuxFl.put(cb, aq.fluidLevel, 0, cellN);
+            s.hAuxFt.put(cb, aq.fluidTypeId, 0, cellN);
         }
         // Async uploads on the slot's in-order queue (they order after the corner
         // NDRange — harmless — and before the decide NDRange — required). The staging
@@ -1272,7 +1465,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // Z-RUN decomposition: one work-item per sz-block z-cell run (fullZ =
         // (dimZ-1)*strz makes total/strz exact) — the kernel derives totalRuns
         // from the same (total, sz) args.
-        decideProgram.enqueue1DAsync(s.queue, s.decideKernel, roundUp(total / strz), evtOut);
+        decideProgram.enqueue1DAsync(s.queue, s.decideKernel, CLProgram.roundUpGlobal(total / strz), evtOut);
         // Async readback of the K*fullN id bytes into the slot's map-once pinned
         // staging (mirrors the corner readback at the end of doEnqueue). In-order
         // queue: it orders after the decide NDRange above, and the corner readback
@@ -1295,6 +1488,13 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 return;
             }
             closed = true;
+            long db = colDedupBatches.get();
+            if (db > 0) {
+                long cc = colDedupCols.get(), cu = colDedupUnique.get();
+                LOGGER.info("[SuperChunk-GPU] [batch] column dedup: {} batches, columns {} -> {} distinct "
+                                + "({}% of the corner kernel's column-evaluations removed).",
+                        db, cc, cu, String.format("%.1f", 100.0 * (cc - cu) / cc));
+            }
             // Reclaim the ring. Under the documented shutdown ordering (the owning
             // batcher joins its drainer+completer BEFORE closing the dispatcher) every
             // slot is already back in the pool; the bounded poll below only matters on
@@ -1388,6 +1588,22 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         FloatBuffer hClimOutF;
         DoubleBuffer hClimOutD;
 
+        // COLUMN DEDUP (see COL_DEDUP): the distinct-column corner kernel + the fan-out
+        // copy, plus their slot-exclusive tables. Left NULL when dedup is unavailable.
+        long uniqKernel = NULL;
+        long expandKernel = NULL;
+        long colXZMem = NULL;          // 2*U ints (x,z of each distinct column)
+        int colXZCapacityInts = 0;
+        long colIdxMem = NULL;         // K*dimX*dimZ ints (cell column -> distinct index)
+        int colIdxCapacityInts = 0;
+        long uniqMem = NULL;           // M*U*dimY reals
+        long uniqCapacityElems = 0;
+        IntBuffer hColXZ;
+        IntBuffer hColIdx;
+        // Open-addressed (x,z) -> distinct-index map, drainer-thread-only, grow-only.
+        long[] colKeys;
+        int[] colVals;
+
         // Growable per-dispatch buffers (slot-exclusive).
         long originsMem = NULL;        // K*3 ints, re-uploaded each batch
         int originsCapacityInts = 0;
@@ -1457,6 +1673,119 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             }
             this.queue = q;
             this.kernel = k;
+            if (colDedupAvailable) {
+                try {
+                    uniqKernel = program.kernel("df_batch_lattice_uniqcol");
+                    for (int i = 0; i < 8; i++) {
+                        program.setArgPointer(uniqKernel, i, switch (i) {
+                            case 0 -> noiseDescMem; case 1 -> noiseFactorsMem; case 2 -> nPermMem;
+                            case 3 -> nActiveMem;   case 4 -> nXoMem;          case 5 -> nYoMem;
+                            case 6 -> nZoMem;       default -> nAmpMem;
+                        });
+                    }
+                    expandKernel = program.kernel("sc_expand_columns");
+                } catch (Throwable t) {
+                    // Never fatal: the slot simply keeps the single-kernel corner path.
+                    CLProgram.releaseKernel(uniqKernel);
+                    CLProgram.releaseKernel(expandKernel);
+                    uniqKernel = NULL;
+                    expandKernel = NULL;
+                    LOGGER.warn("[SuperChunk-GPU] [batch] could not clone the column-dedup kernels for a slot.", t);
+                }
+            }
+        }
+
+        /**
+         * Fills {@link #hColXZ} / {@link #hColIdx} for this batch and returns the number of
+         * DISTINCT columns, or -1 if the tables could not be built. Drainer-thread only.
+         */
+        int buildColumnTables(int[] origins, int K, int strx, int strz, int dimX, int dimZ) {
+            final int plane = dimX * dimZ;
+            final int cols = K * plane;
+            if (cols <= 0) {
+                return -1;
+            }
+            int cap = Integer.highestOneBit(Math.max(16, cols * 2 - 1)) << 1;   // >= 2x load factor
+            if (colKeys == null || colKeys.length < cap) {
+                colKeys = new long[cap];
+                colVals = new int[cap];
+            }
+            java.util.Arrays.fill(colKeys, 0, cap, Long.MIN_VALUE);
+            ensureColCapacity(cols);
+            final int mask = cap - 1;
+            int u = 0;
+            hColIdx.clear();
+            hColXZ.clear();
+            for (int c = 0; c < K; c++) {
+                final int ox = origins[c * 3], oz = origins[c * 3 + 2];
+                for (int ix = 0; ix < dimX; ix++) {
+                    final int xx = ox + ix * strx;
+                    for (int iz = 0; iz < dimZ; iz++) {
+                        final int zz = oz + iz * strz;
+                        final long key = (((long) xx) << 32) | (zz & 0xFFFFFFFFL);
+                        int h = (int) ((key ^ (key >>> 32)) * 0x9E3779B1L) & mask;
+                        int idx;
+                        while (true) {
+                            long cur = colKeys[h];
+                            if (cur == Long.MIN_VALUE) {
+                                colKeys[h] = key;
+                                idx = colVals[h] = u++;
+                                hColXZ.put(xx).put(zz);
+                                break;
+                            }
+                            if (cur == key) {
+                                idx = colVals[h];
+                                break;
+                            }
+                            h = (h + 1) & mask;
+                        }
+                        hColIdx.put(idx);
+                    }
+                }
+            }
+            hColXZ.flip();
+            hColIdx.flip();
+            return u;
+        }
+
+        /** Grows the column tables (host staging + device buffers) for {@code cols} columns. */
+        void ensureColCapacity(int cols) {
+            if (cols * 2 > colXZCapacityInts) {
+                CLProgram.releaseMem(colXZMem);
+                colXZMem = NULL;
+                colXZCapacityInts = 0;
+                colXZMem = program.createReusableInputBuffer((long) cols * 2 * Integer.BYTES);
+                if (hColXZ != null) {
+                    MemoryUtil.memFree(hColXZ);
+                    hColXZ = null;
+                }
+                hColXZ = MemoryUtil.memAllocInt(cols * 2);
+                colXZCapacityInts = cols * 2;
+            }
+            if (cols > colIdxCapacityInts) {
+                CLProgram.releaseMem(colIdxMem);
+                colIdxMem = NULL;
+                colIdxCapacityInts = 0;
+                colIdxMem = program.createReusableInputBuffer((long) cols * Integer.BYTES);
+                if (hColIdx != null) {
+                    MemoryUtil.memFree(hColIdx);
+                    hColIdx = null;
+                }
+                hColIdx = MemoryUtil.memAllocInt(cols);
+                colIdxCapacityInts = cols;
+            }
+        }
+
+        /** Grows the distinct-column corner buffer to {@code elems} reals. */
+        void ensureUniqCapacity(long elems) {
+            if (elems <= uniqCapacityElems) {
+                return;
+            }
+            CLProgram.releaseMem(uniqMem);
+            uniqMem = NULL;
+            uniqCapacityElems = 0;
+            uniqMem = program.createReadWriteBuffer(elems * realBytes);
+            uniqCapacityElems = elems;
         }
 
         void ensureOriginsCapacity(int K) {
@@ -1490,7 +1819,13 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             CLProgram.releaseMem(outMem);
             outMem = NULL;
             outCapacityElems = 0;
-            outMem = program.createOutputBuffer((long) outElems * realBytes);
+            // READ_WRITE, not createOutputBuffer(CL_MEM_WRITE_ONLY): the chained decide
+            // kernel binds this same buffer as `__global const double* corners` and READS it
+            // (see enqueueDecide's first setArgPointer). Reading a WRITE_ONLY buffer inside a
+            // kernel is undefined behaviour — CLProgram.createOutputBuffer's own javadoc says
+            // so, and GpuFusedInterpolator already switched to READ_WRITE for exactly this
+            // reason. Relaxing the access hint cannot change any value.
+            outMem = program.createReadWriteBuffer((long) outElems * realBytes);
             freeHostOut();
             // Pinned host staging for the readback DMA (see field comment). Kept mapped.
             long bytes = (long) outElems * realBytes;
@@ -1743,74 +2078,30 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             }
             CLProgram.releaseMem(outMem);
             outMem = NULL;
+            // Column dedup (no-ops when it was never armed).
+            CLProgram.releaseMem(colXZMem);
+            colXZMem = NULL;
+            colXZCapacityInts = 0;
+            CLProgram.releaseMem(colIdxMem);
+            colIdxMem = NULL;
+            colIdxCapacityInts = 0;
+            CLProgram.releaseMem(uniqMem);
+            uniqMem = NULL;
+            uniqCapacityElems = 0;
+            if (hColXZ != null) {
+                MemoryUtil.memFree(hColXZ);
+                hColXZ = null;
+            }
+            if (hColIdx != null) {
+                MemoryUtil.memFree(hColIdx);
+                hColIdx = null;
+            }
+            CLProgram.releaseKernel(uniqKernel);
+            uniqKernel = NULL;
+            CLProgram.releaseKernel(expandKernel);
+            expandKernel = NULL;
             CLProgram.releaseKernel(kernel);
             CLProgram.releaseQueue(queue);
-        }
-    }
-
-    // ----------------------------------------------------------------------
-    // Buffer / resource helpers (mirror GpuFusedInterpolator / GpuFusedProgram).
-    // ----------------------------------------------------------------------
-
-    private static long uploadInts(CLProgram program, int[] data) {
-        int len = Math.max(1, data.length);
-        IntBuffer buf = MemoryUtil.memAllocInt(len);
-        try {
-            if (data.length == 0) {
-                buf.put(0).flip();
-            } else {
-                buf.put(data).flip();
-            }
-            return program.createInputBuffer(buf);
-        } finally {
-            MemoryUtil.memFree(buf);
-        }
-    }
-
-    private static long uploadReals(CLProgram program, boolean fp32, double[] data) {
-        int len = Math.max(1, data.length);
-        if (fp32) {
-            FloatBuffer buf = MemoryUtil.memAllocFloat(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0f);
-                } else {
-                    for (double v : data) buf.put((float) v);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        } else {
-            DoubleBuffer buf = MemoryUtil.memAllocDouble(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0);
-                } else {
-                    buf.put(data);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        }
-    }
-
-    private static long roundUp(long n) {
-        return ((n + 63) / 64) * 64;
-    }
-
-    private static String loadResource(String path) {
-        try (InputStream in = GpuBatchDispatcher.class.getResourceAsStream(path)) {
-            if (in == null) {
-                return null;
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOGGER.error("[SuperChunk-GPU] [batch] failed reading {}", path, e);
-            return null;
         }
     }
 }

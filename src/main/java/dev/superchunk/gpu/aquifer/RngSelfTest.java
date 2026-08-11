@@ -55,7 +55,7 @@ public final class RngSelfTest {
             return false;
         }
         OpenCLDevice dev = OpenCLBackend.device();
-        String source = loadResource();
+        String source = CLProgram.loadKernelSource(KERNEL_RESOURCE);
         if (source == null) {
             LOGGER.error("[aquifer-rng] self-test FAIL — could not load {}", KERNEL_RESOURCE);
             return false;
@@ -290,12 +290,4 @@ public final class RngSelfTest {
         if (b != null) MemoryUtil.memFree(b);
     }
 
-    private static String loadResource() {
-        try (InputStream in = RngSelfTest.class.getResourceAsStream(KERNEL_RESOURCE)) {
-            if (in == null) return null;
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
 }

@@ -45,7 +45,7 @@ SC_INLINE real df_noise_value(
         int id,
         __global const int*  noiseDesc,
         __global const real* noiseFactors,
-        __global const int*  nPerm,
+        perm_ptr nPerm,
         __global const int*  nActive,
         __global const real* nXo,
         __global const real* nYo,
@@ -221,7 +221,7 @@ inline float spline_sample_outside(float point, __constant const float* location
 SC_INLINE real df_blended_noise(
         __global const int*  noiseDesc,     // unused (uniform threading)
         __global const real* noiseFactors,  // unused (uniform threading)
-        __global const int*  nPerm,
+        perm_ptr nPerm,
         __global const int*  nActive,
         __global const real* nXo,
         __global const real* nYo,
@@ -247,7 +247,7 @@ SC_INLINE real df_blended_noise(
         int slot = 2 * nLimit + (nMain - 1 - i);
         int o = octBase + slot;
         if (nActive[o] != 0) {
-            __global const int* p = nPerm + (permBase + slot * 256);
+            perm_ptr p = nPerm + (permBase + slot * 256);
             d10 += improved_noise(p, nXo[o], nYo[o], nZo[o],
                                   perlin_wrap(d3 * d11),
                                   perlin_wrap(d4 * d11),
@@ -270,7 +270,7 @@ SC_INLINE real df_blended_noise(
         if (!flag1) {
             int o = octBase + slot;
             if (nActive[o] != 0) {
-                __global const int* p = nPerm + (permBase + slot * 256);
+                perm_ptr p = nPerm + (permBase + slot * 256);
                 d8 += improved_noise(p, nXo[o], nYo[o], nZo[o],
                                      d12, d13, d14, d15, d1 * d11) / d11;
             }
@@ -278,7 +278,7 @@ SC_INLINE real df_blended_noise(
         if (!flag2) {
             int o = octBase + nLimit + slot;
             if (nActive[o] != 0) {
-                __global const int* p = nPerm + (permBase + (nLimit + slot) * 256);
+                perm_ptr p = nPerm + (permBase + (nLimit + slot) * 256);
                 d9 += improved_noise(p, nXo[o], nYo[o], nZo[o],
                                      d12, d13, d14, d15, d1 * d11) / d11;
             }

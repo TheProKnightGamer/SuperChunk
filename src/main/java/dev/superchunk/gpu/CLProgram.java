@@ -10,7 +10,9 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 
+import dev.superchunk.gpu.dfc.PermFormat;
 import org.lwjgl.opencl.CL10;
+import org.lwjgl.opencl.CL11;
 
 import static org.lwjgl.opencl.CL10.*;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -89,6 +91,33 @@ public final class CLProgram implements AutoCloseable {
     private static final boolean OPT_DISABLE = Boolean.getBoolean("superchunk.gpu.clOptDisable");
 
     /**
+     * Diagnostic (default OFF, {@code -Dsuperchunk.gpu.nvVerbose=true}): makes ptxas print
+     * "Used N registers, M bytes cumulative stack size, X bytes spill stores/loads" per kernel
+     * into the build log — the occupancy/spill numbers this tree had never observed. Build-log
+     * only (no codegen change, so parity-neutral), but it changes the cache key, forcing one
+     * cold recompile of every program, and a program served from the disk binary cache produces
+     * no build log at all. Hence opt-in: turn it on for one run when you want the numbers.
+     */
+    private static final String NV_VERBOSE_FLAG = "-cl-nv-verbose";
+    private static final boolean NV_VERBOSE = Boolean.getBoolean("superchunk.gpu.nvVerbose");
+
+    /**
+     * Occupancy lever (default unset, {@code -Dsuperchunk.gpu.maxRegCount=N}): caps ptxas
+     * register allocation at N per thread.
+     *
+     * <p>ptxas reports 84-92 registers for the generated corner kernels on sm_86. With 65536
+     * registers and 1536 resident threads per SM that is ~46-51% occupancy, and these kernels
+     * are permutation-gather LATENCY-bound — the one thing occupancy directly buys. Capping to
+     * 64 gives 67%, to 40 gives 100%, at the cost of spills to local memory past some point;
+     * where the crossover sits is an empirical question, hence a knob rather than a default.
+     *
+     * <p><b>Parity-neutral.</b> Register allocation and spilling cannot change IEEE results —
+     * it is the same instruction stream with different storage. The boot parity self-test still
+     * gates it. Folded into the options string, so the program caches key on it.
+     */
+    private static final String MAX_REG_COUNT = System.getProperty("superchunk.gpu.maxRegCount", "").trim();
+
+    /**
      * (round-4 driver-regression fix, {@code -Dsuperchunk.gpu.noinlineHelpers}, default ON
      * since round 8 — disable with {@code =false}.)
      * Build every kernel with {@code -DSC_NOINLINE}, which flips the heavy {@code noise.cl} /
@@ -97,9 +126,21 @@ public final class CLProgram implements AutoCloseable {
      * {@code df_blended_noise}) from {@code inline} to real non-inlined functions. That keeps each
      * generated finalDensity kernel small, so the CUDA-13.2 optimizer (super-linear on the large
      * inlined kernels) compiles quickly — WITH optimization on, so fp64 parity is preserved
-     * (bit-exact validated). Costs some kernel runtime (call overhead), but the GPU kernels are
-     * noise-gather latency-bound, and cold first-boot compiles drop from ~1 h to ~5 min on
+     * (bit-exact validated). Cold first-boot compiles drop from ~1 h to ~5 min on
      * nvidia-driver-595. Default-on so a fresh install never hits the pathological compile.
+     *
+     * <p>Round 10 measured the runtime cost that was previously only assumed: in the noise
+     * microbench ({@code tools/noisebench.c}) the INLINED build is 1.3% <b>slower</b>, not faster.
+     * So noinline is not a throughput sacrifice here at all. (The old note that the kernels are
+     * "noise-gather latency-bound" is also refuted — see {@link dev.superchunk.gpu.dfc.PermFormat}:
+     * they are fp64-throughput bound.)
+     *
+     * <p>RE-CONFIRMED 2026-08-06: an attempt to measure the inlined build's RUNTIME (the number
+     * this tree has never had) was aborted — with {@code =false} the cold compile reached 56 of
+     * the ~70 programs and then sat on a single fused corner program for over an hour without
+     * finishing. So the ~1 h figure is not stale, and the runtime question stays open: the
+     * measurement costs a multi-hour cold build per driver update. Note the per-program disk
+     * binary cache means a retry resumes from what already built, so this is restartable.
      */
     private static final String NOINLINE_FLAG = "-DSC_NOINLINE";
     private static final boolean NOINLINE_HELPERS =
@@ -119,28 +160,34 @@ public final class CLProgram implements AutoCloseable {
      */
     public static String effectiveOptions(String options) {
         StringBuilder sb = new StringBuilder(options == null ? "" : options);
-        if (OpenCLBackend.crDivideApplied() && sb.indexOf(CR_DIVIDE_FLAG) < 0) {
-            if (sb.length() > 0) sb.append(' ');
-            sb.append(CR_DIVIDE_FLAG);
-        }
-        if (OPT_DISABLE && sb.indexOf(OPT_DISABLE_FLAG) < 0) {
-            if (sb.length() > 0) sb.append(' ');
-            sb.append(OPT_DISABLE_FLAG);
-        }
-        // Per-program noinline opt-out: a caller passing FORCE_INLINE_MARKER keeps its
-        // helpers inlined even when the global noinlineHelpers flag is on. The marker
-        // stays in the options string (a harmless -D define), so the mem/disk cache key
-        // differs from the noinline build's — no stale-binary collisions. Used by the
-        // DECIDE program (one moderate kernel — compiles fine inlined, and it IS on the
-        // GPU critical path where noinline's call/spill overhead costs runtime); the
-        // large fused CORNER programs stay noinline (their inlined cold compile is the
-        // pathological ~1 h case the global flag exists for).
-        boolean forceInline = sb.indexOf(FORCE_INLINE_MARKER) >= 0;
-        if (NOINLINE_HELPERS && !forceInline && sb.indexOf(NOINLINE_FLAG) < 0) {
-            if (sb.length() > 0) sb.append(' ');
-            sb.append(NOINLINE_FLAG);
-        }
+        addFlag(sb, OpenCLBackend.crDivideApplied(), CR_DIVIDE_FLAG);
+        addFlag(sb, OPT_DISABLE, OPT_DISABLE_FLAG);
+        // Per-program noinline opt-out: a caller passing FORCE_INLINE_MARKER keeps its helpers
+        // inlined even when the global noinlineHelpers flag is on. The marker stays in the
+        // options string (a harmless -D define), so the mem/disk cache key differs from the
+        // noinline build's — no stale-binary collisions. Used by the DECIDE program (one
+        // moderate kernel — compiles fine inlined, and it IS on the GPU critical path where
+        // noinline's call/spill overhead costs runtime); the large fused CORNER programs stay
+        // noinline (their inlined cold compile is the pathological ~1 h case the flag exists for).
+        addFlag(sb, NOINLINE_HELPERS && sb.indexOf(FORCE_INLINE_MARKER) < 0, NOINLINE_FLAG);
+        addFlag(sb, NV_VERBOSE, NV_VERBOSE_FLAG);
+        addFlag(sb, !MAX_REG_COUNT.isEmpty(), "-cl-nv-maxrregcount=" + MAX_REG_COUNT);
+        // Permutation-table encoding. Must be in the options string (not just implied by the
+        // uploaded bytes) so both program caches key on it — a binary built for `int` would
+        // read PAIR bytes as ints and silently produce garbage terrain otherwise.
+        addFlag(sb, !PermFormat.active().buildFlag().isEmpty(), PermFormat.active().buildFlag());
         return sb.toString();
+    }
+
+    /** Appends {@code flag} (space-separated) iff {@code on} and it is not already present. */
+    private static void addFlag(StringBuilder sb, boolean on, String flag) {
+        if (!on || sb.indexOf(flag) >= 0) {
+            return;
+        }
+        if (sb.length() > 0) {
+            sb.append(' ');
+        }
+        sb.append(flag);
     }
 
     /** See {@link #effectiveOptions}: opts this one program out of noinlineHelpers. */
@@ -234,6 +281,12 @@ public final class CLProgram implements AutoCloseable {
                 return null;
             }
             built = true;
+            if (NV_VERBOSE) {
+                // Success path normally discards the build log; -cl-nv-verbose puts the
+                // ptxas register/spill report in it, so surface it when asked.
+                LOGGER.info("[SuperChunk-GPU] [nv-verbose] build log for a {}-char program (opts: {}):\n{}",
+                        source.length(), opts, fetchBuildLog(program, device));
+            }
             return new CLProgram(context, queue, device, program);
         } catch (Throwable t) {
             LOGGER.error("[SuperChunk-GPU] CLProgram.build threw", t);
@@ -307,6 +360,19 @@ public final class CLProgram implements AutoCloseable {
      * (CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR).
      */
     public long createInputBuffer(IntBuffer data) {
+        try (MemoryStack stack = stackPush()) {
+            IntBuffer err = stack.mallocInt(1);
+            long mem = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, data, err);
+            checkCL(err.get(0));
+            return mem;
+        }
+    }
+
+    /**
+     * Creates a read-only device buffer initialized from {@code data}
+     * (CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR).
+     */
+    public long createInputBuffer(ByteBuffer data) {
         try (MemoryStack stack = stackPush()) {
             IntBuffer err = stack.mallocInt(1);
             long mem = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, data, err);
@@ -625,6 +691,18 @@ public final class CLProgram implements AutoCloseable {
 
     /** Reads the [QUEUED->START, START->END] nanosecond deltas of a profiling event. */
     public static long[] eventProfile(long event) {
+        long[] t = eventTimes(event);
+        return t == null ? null : new long[]{t[1] - t[0], t[2] - t[1]};
+    }
+
+    /**
+     * ABSOLUTE device timestamps {@code {queued, start, end}} (ns) of a profiling event,
+     * or null if unavailable. Unlike {@link #eventProfile} (which returns deltas) these
+     * are on the device's own timeline, so events from the SAME in-order queue can be
+     * subtracted across commands to expose the inter-command gaps — i.e. the GPU idle
+     * INSIDE a batch, which deltas alone cannot show.
+     */
+    public static long[] eventTimes(long event) {
         if (event == NULL) {
             return null;
         }
@@ -632,16 +710,153 @@ public final class CLProgram implements AutoCloseable {
             LongBuffer queued = stack.mallocLong(1);
             LongBuffer start = stack.mallocLong(1);
             LongBuffer end = stack.mallocLong(1);
-            int r1 = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_QUEUED, queued, null);
-            int r3 = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, start, null);
-            int r4 = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, end, null);
-            if (r1 != CL_SUCCESS || r3 != CL_SUCCESS || r4 != CL_SUCCESS) {
+            if (clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_QUEUED, queued, null) != CL_SUCCESS
+                    || clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, start, null) != CL_SUCCESS
+                    || clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, end, null) != CL_SUCCESS) {
                 return null;
             }
-            long queueLatency = start.get(0) - queued.get(0);
-            long compute = end.get(0) - start.get(0);
-            return new long[]{queueLatency, compute};
+            return new long[]{queued.get(0), start.get(0), end.get(0)};
         } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Logs this kernel's driver-reported resource facts once, or nothing on error.
+     *
+     * <p>On GA104 these are what decide occupancy: 65536 registers/SM over 1536 resident
+     * threads is 40 registers/thread for 100% occupancy, and a non-zero
+     * {@code CL_KERNEL_PRIVATE_MEM_SIZE} is the register-spill signal (spills go to device
+     * memory, so a spilling kernel is an IO problem wearing an ALU costume). Nothing in the
+     * tree queried any of this before.
+     */
+    public void logKernelWorkGroupInfo(long kernel, String label) {
+        if (kernel == NULL) {
+            return;
+        }
+        try (MemoryStack stack = stackPush()) {
+            PointerBuffer p = stack.mallocPointer(1);
+            LongBuffer l = stack.mallocLong(1);
+            if (CL10.clGetKernelWorkGroupInfo(kernel, device, CL10.CL_KERNEL_WORK_GROUP_SIZE, p, null) != CL_SUCCESS) {
+                return;
+            }
+            long maxWg = p.get(0);
+            long preferred = CL10.clGetKernelWorkGroupInfo(kernel, device,
+                    CL11.CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, p, null) == CL_SUCCESS ? p.get(0) : -1L;
+            long localMem = CL10.clGetKernelWorkGroupInfo(kernel, device, CL10.CL_KERNEL_LOCAL_MEM_SIZE, l, null) == CL_SUCCESS ? l.get(0) : -1L;
+            long privMem = CL10.clGetKernelWorkGroupInfo(kernel, device, CL11.CL_KERNEL_PRIVATE_MEM_SIZE, l, null) == CL_SUCCESS ? l.get(0) : -1L;
+            LOGGER.info("[SuperChunk-GPU] [kernel-info] {}: maxWorkGroupSize={} preferredMultiple={} "
+                            + "localMem={}B privateMem={}B{}",
+                    label, maxWg, preferred, localMem, privMem,
+                    privMem > 0 ? "  <-- NON-ZERO privateMem = register spill to device memory" : "");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Shared kernel-setup helpers. These four were copy-pasted, byte-identical, into six
+    // classes each (GpuFusedInterpolator, GpuFusedProgram, GpuDensityFunction,
+    // GpuBatchDispatcher, DecideBench, GpuNoiseParityTest, RngSelfTest). One copy here.
+    // ------------------------------------------------------------------
+
+    /**
+     * Uploads {@code data} as a read-only device buffer. OpenCL buffers must be non-empty,
+     * so a zero-length array is padded to a single zero.
+     */
+    public long uploadInts(int[] data) {
+        IntBuffer buf = org.lwjgl.system.MemoryUtil.memAllocInt(Math.max(1, data.length));
+        try {
+            if (data.length == 0) {
+                buf.put(0).flip();
+            } else {
+                buf.put(data).flip();
+            }
+            return createInputBuffer(buf);
+        } finally {
+            org.lwjgl.system.MemoryUtil.memFree(buf);
+        }
+    }
+
+    /**
+     * Uploads a Perlin permutation table in the encoding {@link PermFormat#active()} selects.
+     * The device-side element type comes from noise.cl's {@code perm_ptr} typedef, which the
+     * matching {@code -D} (folded in by {@link #effectiveOptions}) switches — so host bytes
+     * and kernel type can never disagree, and the program cache keys on the flag.
+     *
+     * @param perm 0..255 values, 256 per octave (exactly vanilla's {@code p[i] & 0xFF})
+     */
+    public long uploadPerm(int[] perm) {
+        byte[] bytes = PermFormat.active().encode(perm);
+        ByteBuffer buf = org.lwjgl.system.MemoryUtil.memAlloc(Math.max(1, bytes.length));
+        try {
+            if (bytes.length == 0) {
+                buf.put((byte) 0);
+            } else {
+                buf.put(bytes);
+            }
+            buf.flip();
+            return createInputBuffer(buf);
+        } finally {
+            org.lwjgl.system.MemoryUtil.memFree(buf);
+        }
+    }
+
+    /** {@link #uploadInts} for reals, narrowing to float when the program is built fp32. */
+    public long uploadReals(boolean fp32, double[] data) {
+        int len = Math.max(1, data.length);
+        if (fp32) {
+            FloatBuffer buf = org.lwjgl.system.MemoryUtil.memAllocFloat(len);
+            try {
+                if (data.length == 0) {
+                    buf.put(0.0f);
+                } else {
+                    for (double v : data) {
+                        buf.put((float) v);
+                    }
+                }
+                buf.flip();
+                return createInputBuffer(buf);
+            } finally {
+                org.lwjgl.system.MemoryUtil.memFree(buf);
+            }
+        }
+        DoubleBuffer buf = org.lwjgl.system.MemoryUtil.memAllocDouble(len);
+        try {
+            if (data.length == 0) {
+                buf.put(0.0);
+            } else {
+                buf.put(data);
+            }
+            buf.flip();
+            return createInputBuffer(buf);
+        } finally {
+            org.lwjgl.system.MemoryUtil.memFree(buf);
+        }
+    }
+
+    /**
+     * Rounds a 1-D global work size up to a multiple of 64. Every kernel in this tree guards
+     * {@code if (gid >= total) return;}, so over-rounding costs only idle lanes. All launch
+     * sites pass {@code local_work_size = NULL}, and OpenCL 1.2 uniform-work-group rules make
+     * the driver's chosen local size divide the global size — so this value caps the group
+     * size the driver may pick. Raising it to 256 was measured NEUTRAL on GA104 (both hot
+     * kernels report {@code CL_KERNEL_PRIVATE_MEM_SIZE = 0}, i.e. occupancy is not
+     * register-bound there), so 64 stands.
+     */
+    public static long roundUpGlobal(long n) {
+        return ((n + 63) / 64) * 64L;
+    }
+
+    /** Reads a kernel source resource (absolute classpath path), or null if missing/unreadable. */
+    public static String loadKernelSource(String path) {
+        try (java.io.InputStream in = CLProgram.class.getResourceAsStream(path)) {
+            if (in == null) {
+                LOGGER.error("[SuperChunk-GPU] kernel resource not found: {}", path);
+                return null;
+            }
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            LOGGER.error("[SuperChunk-GPU] failed reading kernel resource {}", path, e);
             return null;
         }
     }

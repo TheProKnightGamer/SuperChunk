@@ -22,6 +22,7 @@ SUMMARY
     PASS out of the box ............... 16
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0
+  Found later, outside this run ....... 1  (ModernFix, singleplayer only — see FIXED)
   Client-only (N/A on a server) ....... 33
 
 =============================================================
@@ -32,7 +33,7 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
   distanthorizons ....... Distant Horizons (LOD) .................. PASS
   krypton-fnp ........... Krypton Reno (network opt) .............. PASS
   ksyxis ................ Ksyxis (skip spawn-chunk load) .......... PASS
-  modernfix ............. ModernFix (memory/startup) .............. PASS
+  modernfix ............. ModernFix (memory/startup) .............. PASS  [singleplayer: see FIXED]
   packet-fixer .......... Packet Fixer ............................ PASS
   saturn ................ Saturn (GC/alloc opt) ................... PASS
   servercore ............ ServerCore (server perf) ................ PASS
@@ -55,6 +56,22 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  modernfix ............. ModernFix (singleplayer only) ........... PASS (after fix)
+
+    Reported 2026-08-05: with ModernFix's mixin.perf.suspend_integrated_server_during_load (ON by
+    default) chunks around spawn stayed permanently invisible in singleplayer. Dedicated-server
+    boot testing never covered this — the option only exists for an integrated server.
+
+    Root cause was SuperChunk-side, in the VMP player-watching port: it no-ops vanilla's
+    ChunkMap.applyChunkTrackingView but did NOT port upstream VMP's matching redirect of the
+    setChunkTrackingView(EMPTY) reset in updatePlayerStatus, so a joining player was left on
+    ChunkTrackingView.EMPTY and every chunk that completed before the first ChunkMap.tick() was
+    dropped by onChunkReadyToSend and never re-offered. ModernFix stretches that sub-tick window
+    across the whole world load.
+
+    FIX: ported the missing upstream redirect into MixinTACSCancelSending. Full mechanism and
+    proof are in that method's javadoc (redirectChunkTrackingViewSet).
+
   radium ................ Radium (a Lithium fork) ................. PASS (after fix)
 
     Radium IS Lithium (it ships Lithium's mixins under the legacy me.jellysquid.mods.lithium
@@ -65,7 +82,7 @@ FIXED  (was incompatible; SuperChunk changed to support it)
          fork) as a standalone Lithium and stands its own bundled Lithium down, so the external copy
          is authoritative — the same mechanism already used for a standalone Lithium. Detection now
          scans the mod list by mod-id (LoadingModList.getMods()) plus a legacy me.jellysquid
-         class-presence probe. Radium reads config/lithium.properties, so SuperChunk's five
+         class-presence probe. Radium reads config/lithium.properties, so SuperChunk's four
          C2ME-overlap safety pins still apply to it.
       2. NoSuchFieldError on RandomSpreadStructurePlacement (SUPERCHUNK$ENABLED): SuperChunk's
          MixinPlainWorldgenRandomSites carried a @Unique static-final flag across a 3-class

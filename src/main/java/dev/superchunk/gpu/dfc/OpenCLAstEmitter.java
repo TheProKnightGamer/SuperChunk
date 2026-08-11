@@ -67,7 +67,10 @@ public final class OpenCLAstEmitter {
     /** The OpenCL parameter list bundling all noise-state buffers, by name. */
     public static final String NOISE_PARAMS =
             "__global const int* noiseDesc, __global const real* noiseFactors, "
-                    + "__global const int* nPerm, __global const int* nActive, "
+                    // perm_ptr: the permutation-table encoding (int / uchar / uchar2) is
+                    // chosen by PermFormat and typedef'd in noise.cl, which is always
+                    // prepended ahead of this signature.
+                    + "perm_ptr nPerm, __global const int* nActive, "
                     + "__global const real* nXo, __global const real* nYo, "
                     + "__global const real* nZo, __global const real* nAmp";
     /** The matching argument list to forward those buffers in a call. */
@@ -225,7 +228,7 @@ public final class OpenCLAstEmitter {
                 .append("typedef struct {\n")
                 .append("    __global const int* noiseDesc;\n")
                 .append("    __global const real* noiseFactors;\n")
-                .append("    __global const int* nPerm;\n")
+                .append("    perm_ptr nPerm;\n")
                 .append("    __global const int* nActive;\n")
                 .append("    __global const real* nXo;\n")
                 .append("    __global const real* nYo;\n")
@@ -460,7 +463,93 @@ public final class OpenCLAstEmitter {
                     .append(rootFns.get(k)).append("(xx, yy, zz, ").append(e.treeArgs).append(");\n");
         }
         src.append("}\n");
+        // Only emitted when the dedup path is armed: two extra entry points make ptxas do
+        // measurably more work on a ~3 MB program whose cold compile is already ~60 s, and
+        // gating here also makes the program-cache key follow the flag automatically.
+        if (COL_DEDUP) {
+            appendUniqueColumnKernels(src, e, rootFns);
+        }
         return new MultiResult(src.toString(), rootFns.size());
+    }
+
+    /** Mirrors {@code GpuBatchDispatcher.COL_DEDUP} — the host and the kernel must agree. */
+    private static final boolean COL_DEDUP = Boolean.getBoolean("superchunk.gpu.colDedup");
+
+    /**
+     * COLUMN-DEDUPLICATED corner evaluation: a second pair of kernels that computes the
+     * same output as {@code df_batch_lattice_multichunk} while evaluating each distinct
+     * cell column only ONCE.
+     *
+     * <p>A chunk's corner lattice is {@code dimX x dimZ} columns wide with
+     * {@code (dimX-1)*strx == 16}, so its last row and column of columns sit exactly on the
+     * neighbouring chunk's first — 25 columns per chunk of which only 16 are new in a tiled
+     * sweep. Chunks that land in the same batch therefore re-evaluate every shared column's
+     * whole {@code dimY}-tall stack of density functions, and the corner kernel is ~73% of
+     * all GPU time.
+     *
+     * <p>Two kernels, on the same in-order queue:
+     * <ol>
+     *   <li>{@code df_batch_lattice_uniqcol} — one work-item per (distinct column, iy),
+     *       writing {@code uniq[k*U*dimY + iy*U + u]}. Column-inner so a warp's consecutive
+     *       work-items write consecutive addresses.</li>
+     *   <li>{@code sc_expand_columns} — a pure copy that fans the distinct columns back out
+     *       into the EXACT {@code out[c*M*n + k*n + cellIdx]} layout the rest of the
+     *       pipeline (the chained decide kernel, the corner readback, the per-chunk grid
+     *       store) already expects, so nothing downstream changes.</li>
+     * </ol>
+     *
+     * <p><b>Bit-exact by construction:</b> stage 1 evaluates the same root functions at the
+     * same integer {@code (xx, yy, zz)} as the one-kernel path, and stage 2 only moves those
+     * bits. It requires every chunk in the batch to share {@code oy} (the host checks) —
+     * otherwise a column is not interchangeable between them.
+     */
+    private static void appendUniqueColumnKernels(StringBuilder src, OpenCLAstEmitter e, List<String> rootFns) {
+        src.append("__kernel void df_batch_lattice_uniqcol(\n")
+                .append("        ").append(NOISE_PARAMS).append(",\n")
+                .append("        __global const int* colXZ,\n")   // 2*U: x,z of each distinct column
+                .append("        const int oy, const int stry,\n")
+                .append("        const int dimY, const int U,\n")
+                .append("        const int total,\n")             // U*dimY
+                .append("        __global real* uniq) {\n")
+                .append("    int gid = get_global_id(0);\n")
+                .append("    if (gid >= total) return;\n")
+                .append("    int iy = gid / U;\n")
+                .append("    int u = gid - iy * U;\n")
+                .append("    int xx = colXZ[u * 2];\n")
+                .append("    int zz = colXZ[u * 2 + 1];\n")
+                .append("    int yy = oy + iy * stry;\n")
+                .append("    int base = iy * U + u;\n")
+                .append("    int stride = U * dimY;\n")
+                .append(e.packNsLine());
+        for (int k = 0; k < rootFns.size(); k++) {
+            src.append("    uniq[base + ").append(k).append(" * stride] = ")
+                    .append(rootFns.get(k)).append("(xx, yy, zz, ").append(e.treeArgs).append(");\n");
+        }
+        src.append("}\n");
+
+        // Fan-out copy. No density-function code at all, so it costs nothing to compile and
+        // its runtime is pure bandwidth (~3 MB per batch against a ~20 ms corner kernel).
+        src.append("__kernel void sc_expand_columns(\n")
+                .append("        __global const real* uniq,\n")
+                .append("        __global const int* colIdx,\n")   // K*dimX*dimZ -> distinct column index
+                .append("        const int dimX, const int dimZ, const int dimY,\n")
+                .append("        const int U, const int n, const int M, const int total,\n")
+                .append("        __global real* out) {\n")
+                .append("    int gid = get_global_id(0);\n")
+                .append("    if (gid >= total) return;\n")
+                .append("    int chunkIdx = gid / n;\n")
+                .append("    int cellIdx = gid - chunkIdx * n;\n")
+                .append("    int plane = dimX * dimZ;\n")
+                .append("    int iy = cellIdx / plane;\n")
+                .append("    int rem = cellIdx - iy * plane;\n")
+                .append("    int u = colIdx[chunkIdx * plane + rem];\n")
+                .append("    int srcIdx = iy * U + u;\n")
+                .append("    int ustride = U * dimY;\n")
+                .append("    int dst = chunkIdx * M * n + cellIdx;\n")
+                .append("    for (int k = 0; k < M; ++k) {\n")
+                .append("        out[dst + k * n] = uniq[srcIdx + k * ustride];\n")
+                .append("    }\n")
+                .append("}\n");
     }
 
     /**

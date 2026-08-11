@@ -135,7 +135,7 @@ one place the "single mojmap source tree" ideal bends, because the alternative i
 - **Dedup caution:** superchunk already contains FlowSched (`com.ishland.flowsched`) + RxJava; C2ME's jar
   shadow-bundles both → exclude one copy to avoid duplicate-class load errors.
 - **Conflict caution:** when C2ME loads, disable Lithium's overlapping features via `config/lithium.properties`:
-  `mixin.gen.cached_generator_settings`, `mixin.chunk.serialization`, `mixin.chunk.no_locking`,
+  `mixin.gen.cached_generator_settings`, `mixin.chunk.serialization`,
   `mixin.world.tick_scheduler`, + any ServerChunkCache/ChunkHolder overlaps — let C2ME's chunk system win.
   ScalableLux lighting + C2ME already coexist upstream (C2ME ships Starlight-aware code).
 
@@ -148,6 +148,19 @@ one place the "single mojmap source tree" ideal bends, because the alternative i
 ## Per-mod deep analysis
 See `analysis/c2me.md`, `analysis/scalablelux.md`, `analysis/noisium.md`
 (+ `analysis/lithium.md` when done).
+
+## Dropped upstream mixin — Noisium GenerationShapeConfigMixin (2026-08-05)
+Deliberately removed (not an accidental omission — recording the rationale here so the
+2026-07-02 lesson below does not repeat). It cached `NoiseSettings.getCellWidth()` /
+`getCellHeight()` behind `@Inject(HEAD, cancellable = true)` + two `@Unique` int fields.
+Vanilla's getters are `QuartPos.toBlock(field)`, i.e. a single `<<2` on a record component,
+so the "cache" replaced one shift with a CallbackInfoReturnable allocation, an Integer box
+and an isCancelled check. A JFR profile of an r2048 CPU-only pregen (44,811 execution
+samples) recorded **zero** samples in either getter: vanilla calls them ~7 times per chunk
+(3 in the NoiseChunk ctor, which immediately caches both into fields; 2 in doFill; 3 in
+iterateNoiseColumn) and never inside a loop. So the mixin was strictly more work than
+vanilla for no measurable benefit, plus two fields on every NoiseSettings and mixin surface
+on a class other mods touch. The other three Noisium mixins are unaffected.
 
 ## Restored dropped upstream mixin (2026-07-02)
 `MixinSplineImplementation` (c2me-opts-dfc) was in upstream's mixin json + our

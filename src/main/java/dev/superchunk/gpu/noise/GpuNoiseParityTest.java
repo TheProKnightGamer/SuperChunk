@@ -154,10 +154,10 @@ public final class GpuNoiseParityTest {
         long permMem = NULL, sxMem = NULL, syMem = NULL, szMem = NULL, outMem = NULL, kernel = NULL;
         double[] gpu;
         try {
-            permMem = uploadInts(program, perm);
-            sxMem = uploadReals(program, fp32, sx);
-            syMem = uploadReals(program, fp32, sy);
-            szMem = uploadReals(program, fp32, sz);
+            permMem = program.uploadPerm(perm);
+            sxMem = program.uploadReals(fp32, sx);
+            syMem = program.uploadReals(fp32, sy);
+            szMem = program.uploadReals(fp32, sz);
             outMem = program.createOutputBuffer((long) N * realBytes(fp32));
 
             kernel = program.kernel("improved_noise_batch");
@@ -174,7 +174,7 @@ public final class GpuNoiseParityTest {
             program.setArgPointer(kernel, a++, outMem);
             program.setArgInt(kernel, a++, N);
 
-            program.enqueue1D(kernel, roundUp(N));
+            program.enqueue1D(kernel, CLProgram.roundUpGlobal(N));
             gpu = downloadReals(program, fp32, outMem, N);
         } finally {
             CLProgram.releaseMem(permMem);
@@ -208,15 +208,15 @@ public final class GpuNoiseParityTest {
                 ampMem = NULL, sxMem = NULL, syMem = NULL, szMem = NULL, outMem = NULL, kernel = NULL;
         double[] gpu;
         try {
-            permMem = uploadInts(program, ps.perm);
-            actMem = uploadInts(program, ps.active);
-            xoMem = uploadReals(program, fp32, ps.xo);
-            yoMem = uploadReals(program, fp32, ps.yo);
-            zoMem = uploadReals(program, fp32, ps.zo);
-            ampMem = uploadReals(program, fp32, ps.amplitudes);
-            sxMem = uploadReals(program, fp32, sx);
-            syMem = uploadReals(program, fp32, sy);
-            szMem = uploadReals(program, fp32, sz);
+            permMem = program.uploadPerm(ps.perm);
+            actMem = program.uploadInts(ps.active);
+            xoMem = program.uploadReals(fp32, ps.xo);
+            yoMem = program.uploadReals(fp32, ps.yo);
+            zoMem = program.uploadReals(fp32, ps.zo);
+            ampMem = program.uploadReals(fp32, ps.amplitudes);
+            sxMem = program.uploadReals(fp32, sx);
+            syMem = program.uploadReals(fp32, sy);
+            szMem = program.uploadReals(fp32, sz);
             outMem = program.createOutputBuffer((long) N * realBytes(fp32));
 
             kernel = program.kernel("perlin_noise_batch");
@@ -236,7 +236,7 @@ public final class GpuNoiseParityTest {
             program.setArgPointer(kernel, a++, outMem);
             program.setArgInt(kernel, a++, N);
 
-            program.enqueue1D(kernel, roundUp(N));
+            program.enqueue1D(kernel, CLProgram.roundUpGlobal(N));
             gpu = downloadReals(program, fp32, outMem, N);
         } finally {
             CLProgram.releaseMem(permMem);
@@ -296,15 +296,15 @@ public final class GpuNoiseParityTest {
                 ampMem = NULL, sxMem = NULL, syMem = NULL, szMem = NULL, outMem = NULL, kernel = NULL;
         double[] gpu;
         try {
-            permMem = uploadInts(program, perm);
-            actMem = uploadInts(program, active);
-            xoMem = uploadReals(program, fp32, xo);
-            yoMem = uploadReals(program, fp32, yo);
-            zoMem = uploadReals(program, fp32, zo);
-            ampMem = uploadReals(program, fp32, amp);
-            sxMem = uploadReals(program, fp32, sx);
-            syMem = uploadReals(program, fp32, sy);
-            szMem = uploadReals(program, fp32, sz);
+            permMem = program.uploadPerm(perm);
+            actMem = program.uploadInts(active);
+            xoMem = program.uploadReals(fp32, xo);
+            yoMem = program.uploadReals(fp32, yo);
+            zoMem = program.uploadReals(fp32, zo);
+            ampMem = program.uploadReals(fp32, amp);
+            sxMem = program.uploadReals(fp32, sx);
+            syMem = program.uploadReals(fp32, sy);
+            szMem = program.uploadReals(fp32, sz);
             outMem = program.createOutputBuffer((long) N * realBytes(fp32));
 
             kernel = program.kernel("normal_noise_batch");
@@ -326,7 +326,7 @@ public final class GpuNoiseParityTest {
             program.setArgPointer(kernel, a++, outMem);
             program.setArgInt(kernel, a++, N);
 
-            program.enqueue1D(kernel, roundUp(N));
+            program.enqueue1D(kernel, CLProgram.roundUpGlobal(N));
             gpu = downloadReals(program, fp32, outMem, N);
         } finally {
             CLProgram.releaseMem(permMem);
@@ -455,41 +455,6 @@ public final class GpuNoiseParityTest {
         return fp32 ? Float.BYTES : Double.BYTES;
     }
 
-    // NOTE: sample arrays are thousands of elements (tens of KB), well past the
-    // ~64 KB MemoryStack limit, so host staging buffers are allocated off-heap via
-    // MemoryUtil and freed immediately — the device buffer is created with
-    // CL_MEM_COPY_HOST_PTR, which copies the data at creation time.
-    private static long uploadInts(CLProgram program, int[] data) {
-        IntBuffer buf = MemoryUtil.memAllocInt(data.length);
-        try {
-            buf.put(data).flip();
-            return program.createInputBuffer(buf);
-        } finally {
-            MemoryUtil.memFree(buf);
-        }
-    }
-
-    private static long uploadReals(CLProgram program, boolean fp32, double[] data) {
-        if (fp32) {
-            FloatBuffer buf = MemoryUtil.memAllocFloat(data.length);
-            try {
-                for (double v : data) buf.put((float) v);
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        } else {
-            DoubleBuffer buf = MemoryUtil.memAllocDouble(data.length);
-            try {
-                buf.put(data).flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        }
-    }
-
     private static double[] downloadReals(CLProgram program, boolean fp32, long mem, int n) {
         // LWJGL's clEnqueueReadBuffer requires DIRECT (off-heap) NIO buffers.
         double[] out = new double[n];
@@ -548,12 +513,6 @@ public final class GpuNoiseParityTest {
             sy[i] = y;
             sz[i] = z;
         }
-    }
-
-    private static long roundUp(int n) {
-        // Global work size; the kernel guards gid >= n, so any >= n is fine. Keep
-        // it a multiple of 64 for friendly local sizing.
-        return ((n + 63) / 64) * 64L;
     }
 
     private static int[] concat(int[] a, int[] b) {

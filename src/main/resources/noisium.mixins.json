@@ -6,7 +6,6 @@
   "mixins": [
     "ChainedBlockSourceMixin",
     "ChunkSectionMixin",
-    "GenerationShapeConfigMixin",
     "NoiseChunkGeneratorMixin"
   ],
   "client": [

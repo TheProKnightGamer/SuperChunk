@@ -139,6 +139,16 @@ public final class CompactConsume {
 
     private static volatile boolean disabled = false;
 
+    /**
+     * Whether {@link #consumeFill} will even attempt a chunk — the three global terms of its
+     * entry gate, in one place. {@link GpuChunkBatcher} reads this to decide whether a chunk's
+     * corner grids are still needed: whenever consume declines, the ORIGINAL per-block loop runs
+     * and every chunk needs its grids back.
+     */
+    public static boolean willConsume() {
+        return CompactIds.CONSUME && !disabled && !LithiumBlockTracking.directWritesUnsafe();
+    }
+
     private static final LongAdder chunksFast = new LongAdder();
     private static final LongAdder chunksHybrid = new LongAdder();
     private static final LongAdder hybridCellsCpu = new LongAdder();

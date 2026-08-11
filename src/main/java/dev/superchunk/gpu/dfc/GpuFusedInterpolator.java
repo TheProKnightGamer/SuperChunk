@@ -225,8 +225,8 @@ public final class GpuFusedInterpolator implements AutoCloseable {
             return null;
         }
 
-        String noiseSrc = loadResource(NOISE_CL);
-        String supportSrc = loadResource(SUPPORT_CL);
+        String noiseSrc = CLProgram.loadKernelSource(NOISE_CL);
+        String supportSrc = CLProgram.loadKernelSource(SUPPORT_CL);
         if (noiseSrc == null || supportSrc == null) {
             LOGGER.warn("[SuperChunk-GPU] [fusion] could not load kernel resources — fusion disabled.");
             return null;
@@ -247,14 +247,14 @@ public final class GpuFusedInterpolator implements AutoCloseable {
         long descMem = NULL, factorsMem = NULL, permMem = NULL, activeMem = NULL,
                 xoMem = NULL, yoMem = NULL, zoMem = NULL, ampMem = NULL;
         try {
-            descMem = uploadInts(program, registry.descArray());
-            factorsMem = uploadReals(program, fp32, registry.factorArray());
-            permMem = uploadInts(program, registry.permArray());
-            activeMem = uploadInts(program, registry.activeArray());
-            xoMem = uploadReals(program, fp32, registry.xoArray());
-            yoMem = uploadReals(program, fp32, registry.yoArray());
-            zoMem = uploadReals(program, fp32, registry.zoArray());
-            ampMem = uploadReals(program, fp32, registry.ampArray());
+            descMem = program.uploadInts(registry.descArray());
+            factorsMem = program.uploadReals(fp32, registry.factorArray());
+            permMem = program.uploadPerm(registry.permArray());
+            activeMem = program.uploadInts(registry.activeArray());
+            xoMem = program.uploadReals(fp32, registry.xoArray());
+            yoMem = program.uploadReals(fp32, registry.yoArray());
+            zoMem = program.uploadReals(fp32, registry.zoArray());
+            ampMem = program.uploadReals(fp32, registry.ampArray());
             // STAGE 1/2: build the full-field interp program (shared/refcounted via
             // CLProgramCache) when EITHER the bench (discards) or on-device interp (keeps) is
             // on. A build failure NEVER fails the interpolator — benchProgram stays null and
@@ -356,7 +356,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                 program.setArgInt(kernel, a++, n);
 
                 // One work-item per grid point; each writes all M roots (out[k*n + gid]).
-                program.enqueue1DAsync(rt.queue, kernel, roundUp(n), null);
+                program.enqueue1DAsync(rt.queue, kernel, CLProgram.roundUpGlobal(n), null);
 
                 // Single sync point: blocking readback, then split into per-root slices.
                 rt.download(outPerRoot, n, rootCount);
@@ -457,7 +457,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                 // Enqueue the kernel, then either a NON-blocking MAP (zero-copy) or a NON-blocking
                 // read of its output into the per-thread pending host buffer. In-order queue: the
                 // map/read waits for the kernel. That event is the single deferred sync point.
-                program.enqueue1DAsync(rt.queue, kernel, roundUp(n), null);
+                program.enqueue1DAsync(rt.queue, kernel, CLProgram.roundUpGlobal(n), null);
                 long[] evOut = new long[1];
                 if (zeroCopyMap) {
                     // ZERO-COPY: NON-blocking map of the already-host-resident corner buffer
@@ -944,7 +944,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
             // The "fill the GPU" dispatch: one work-item per output block per grid.
             long[] ev = new long[1];
             try {
-                program.enqueue1DAsync(rt.benchQueue, kernel, roundUp(total), ev);
+                program.enqueue1DAsync(rt.benchQueue, kernel, CLProgram.roundUpGlobal(total), ev);
                 // Finish so the profiling event holds the kernel's pure GPU compute time AND
                 // so the readback wall-time below measures the transfer in isolation.
                 program.finish(rt.benchQueue);
@@ -1039,7 +1039,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
 
             // Enqueue the value-path kernel + a NON-blocking read on the corner queue (in-order:
             // the read waits for the kernel, the kernel waits for the corner producer above it).
-            program.enqueue1DAsync(rt.queue, kernel, roundUp(total), null);
+            program.enqueue1DAsync(rt.queue, kernel, CLProgram.roundUpGlobal(total), null);
             long[] evV = new long[1];
             rt.enqueueFfRead(total, evV);   // async device->pinned-host read of the Y->X->Z field
             evValue = evV[0];
@@ -1067,7 +1067,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                 program.setArgInt(k3, b++, fullN);
                 program.setArgInt(k3, b++, total);
                 program.setArgPointer(k3, b++, rt.ffLerp3OutMem);   // separate lerp3 field buffer (KEPT)
-                program.enqueue1DAsync(rt.queue, k3, roundUp(total), null);
+                program.enqueue1DAsync(rt.queue, k3, CLProgram.roundUpGlobal(total), null);
                 long[] evL = new long[1];
                 rt.enqueueFfLerp3Read(total, evL);   // async device->pinned-host read of the X->Y->Z field
                 evLerp3 = evL[0];
@@ -1676,7 +1676,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                     program.setArgInt(k3, b++, fullN);
                     program.setArgInt(k3, b++, total);
                     program.setArgPointer(k3, b++, ffLerp3OutMem);
-                    program.enqueue1DAsync(queue, k3, roundUp(total), null);
+                    program.enqueue1DAsync(queue, k3, CLProgram.roundUpGlobal(total), null);
                     if (!OnDeviceInterp.SKIP_READBACK) {
                         long[] evL = new long[1];
                         enqueueFfLerp3Read(total, evL);
@@ -1699,7 +1699,7 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                 program.setArgInt(kernel, a++, fullN);
                 program.setArgInt(kernel, a++, total);
                 program.setArgPointer(kernel, a++, ffOutMem);
-                program.enqueue1DAsync(queue, kernel, roundUp(total), null);
+                program.enqueue1DAsync(queue, kernel, CLProgram.roundUpGlobal(total), null);
                 if (!OnDeviceInterp.SKIP_READBACK) {
                     long[] evV = new long[1];
                     enqueueFfRead(total, evV);
@@ -2158,60 +2158,6 @@ public final class GpuFusedInterpolator implements AutoCloseable {
         }
     }
 
-    // ----------------------------------------------------------------------
-    // Buffer helpers (mirror GpuDensityFunction).
-    // ----------------------------------------------------------------------
-
-    private static long uploadInts(CLProgram program, int[] data) {
-        int len = Math.max(1, data.length);
-        IntBuffer buf = MemoryUtil.memAllocInt(len);
-        try {
-            if (data.length == 0) {
-                buf.put(0).flip();
-            } else {
-                buf.put(data).flip();
-            }
-            return program.createInputBuffer(buf);
-        } finally {
-            MemoryUtil.memFree(buf);
-        }
-    }
-
-    private static long uploadReals(CLProgram program, boolean fp32, double[] data) {
-        int len = Math.max(1, data.length);
-        if (fp32) {
-            FloatBuffer buf = MemoryUtil.memAllocFloat(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0f);
-                } else {
-                    for (double v : data) buf.put((float) v);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        } else {
-            DoubleBuffer buf = MemoryUtil.memAllocDouble(len);
-            try {
-                if (data.length == 0) {
-                    buf.put(0.0);
-                } else {
-                    buf.put(data);
-                }
-                buf.flip();
-                return program.createInputBuffer(buf);
-            } finally {
-                MemoryUtil.memFree(buf);
-            }
-        }
-    }
-
-    private static long roundUp(int n) {
-        return ((n + 63) / 64) * 64L;
-    }
-
     /**
      * Builds the STAGE-1 {@code df_full_field_interp} program (noise.cl prepended for
      * {@code real}/REAL_C + {@code mc_lerp} + {@code FP_CONTRACT OFF}), shared/refcounted
@@ -2220,8 +2166,8 @@ public final class GpuFusedInterpolator implements AutoCloseable {
      */
     private static CLProgram buildBenchProgram(boolean fp32) {
         try {
-            String noiseSrc = loadResource(NOISE_CL);
-            String ffSrc = loadResource(FULLFIELD_CL);
+            String noiseSrc = CLProgram.loadKernelSource(NOISE_CL);
+            String ffSrc = CLProgram.loadKernelSource(FULLFIELD_CL);
             if (noiseSrc == null || ffSrc == null) {
                 LOGGER.warn("[SuperChunk-GPU] [fullfield-bench] could not load kernel resources — bench disabled.");
                 return null;
@@ -2233,18 +2179,6 @@ public final class GpuFusedInterpolator implements AutoCloseable {
             return CLProgramCache.getOrBuild(fullSource, fp32 ? "-DUSE_FP32" : "");
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-GPU] [fullfield-bench] building interp program threw — bench disabled.", t);
-            return null;
-        }
-    }
-
-    private static String loadResource(String path) {
-        try (InputStream in = GpuFusedInterpolator.class.getResourceAsStream(path)) {
-            if (in == null) {
-                return null;
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOGGER.error("[SuperChunk-GPU] [fusion] failed reading {}", path, e);
             return null;
         }
     }

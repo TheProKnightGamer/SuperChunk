@@ -18,7 +18,7 @@ nested third-party mod jars; everything is one mod id (`superchunk`).
 
 ## Install — ONE jar, client and server alike
 1. NeoForge **1.21.1** (neoforge `21.1.x`, Java **21**), client or dedicated server.
-2. Copy **`superchunk-0.2.0.jar`** into `mods/`. That single jar is the complete build for
+2. Copy **`superchunk-0.3.0.jar`** into `mods/`. That single jar is the complete build for
    BOTH sides: it is a thin bootstrap shell that loads the real mod from inside itself and,
    *only on a dedicated server*, also supplies the LWJGL core module (`org.lwjgl`) the
    bundled GPU/OpenCL backend needs (a headless server ships no LWJGL of its own; a client
@@ -29,7 +29,7 @@ nested third-party mod jars; everything is one mod id (`superchunk`).
    (redundant but harmless if left behind).
 4. **Copy `config/lithium.properties` into the server's `config/` folder BEFORE first start.**
    This disables the Lithium features that overlap C2ME's chunk-system rewrite
-   (`gen.cached_generator_settings`, `chunk.serialization`, `chunk.no_locking`,
+   (`gen.cached_generator_settings`, `chunk.serialization`,
    `world.tick_scheduler`, `world.chunk_access`) so C2ME owns those paths. (SuperChunk also
    rewrites this file from `config/superchunk.properties` on every boot, so after the first
    start it maintains itself.)
