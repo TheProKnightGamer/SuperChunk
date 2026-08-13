@@ -120,6 +120,39 @@ type = "optional"
 ordering = "BEFORE"
 side = "BOTH"
 
+# ---------------------------------------------------------------------------------------------
+# HARD INCOMPATIBILITIES
+#
+# A mod cannot disable another mod at runtime — NeoForge has no such API, and the mod list is
+# resolved long before we get control. What it DOES support is refusing to launch: type =
+# "incompatible" stops mod loading with an error screen naming both mods and the reason below.
+# That is the right trade here, because the alternative is not "it works a bit worse" — it is a
+# confusing NPE mid-worldgen whose stack names SuperChunk classes.
+#
+# Bar for adding an entry: a REPRODUCED failure with a known mechanism, written up in
+# compatibility.txt. Do not list mods on suspicion — an entry here bricks the launch for anyone
+# who has that mod, so a false positive is worse than the bug. Where the conflict is ours to
+# yield instead, stand our own feature down (see compat/StructureLayoutOptimizerCompat,
+# compat/ByePregenCompat, the bundled-Lithium stand-down) rather than blocking the other mod.
+# ---------------------------------------------------------------------------------------------
+
+# Better Chunk Loading calls ChunkHolder.addSaveDependency from a whenComplete hook on the chunk
+# future. C2ME's chunk-system rewrite deliberately nulls vanilla's ChunkHolder futures (saveSync
+# et al) in chunksystem.mixin.MixinChunkHolder#failFastIncompatibility — a tripwire so that mods
+# reaching for vanilla chunk-holder state fail loudly instead of operating on state the rewritten
+# chunk system no longer honours. Result: NPE at MinecraftServer.setInitialSpawn, so a new world
+# dies before it exists and an existing one dies on the next chunk load. Not fixable from our
+# side — the two are competing implementations of the same subsystem, and the NPE is C2ME's
+# intended failure mode. Inherited verbatim from upstream C2ME, so plain C2ME fails the same way.
+# Full write-up: compatibility.txt, INCOMPATIBLE section.
+[[dependencies.superchunk]]
+modId = "betterchunkloading"
+type = "incompatible"
+versionRange = "*"
+reason = "Better Chunk Loading and SuperChunk are competing chunk-loading systems. SuperChunk's chunk system (from C2ME) replaces vanilla's chunk pipeline and intentionally invalidates the vanilla ChunkHolder state that Better Chunk Loading reads, so the combination crashes with a NullPointerException while generating the world's initial spawn - new worlds never finish creating, and existing worlds fail on the next chunk load. Remove Better Chunk Loading: SuperChunk already does prioritised, multithreaded chunk loading."
+ordering = "NONE"
+side = "BOTH"
+
 [[dependencies.superchunk]]
 modId = "neoforge"
 type = "required"

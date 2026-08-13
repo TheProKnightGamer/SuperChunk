@@ -21,8 +21,10 @@ SUMMARY
   Server-relevant mods tested ......... 17
     PASS out of the box ............... 16
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
-    Unfixable incompatibilities ....... 0
-  Found later, outside this run ....... 1  (ModernFix, singleplayer only — see FIXED)
+    Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for one
+                                          found later outside it)
+  Found later, outside this run ....... 2  (ModernFix, singleplayer only — FIXED;
+                                          Better Chunk Loading — INCOMPATIBLE, by design)
   Client-only (N/A on a server) ....... 33
 
 =============================================================
@@ -95,9 +97,103 @@ FIXED  (was incompatible; SuperChunk changed to support it)
     crashes, but installing it adds nothing — SuperChunk's Lithium simply steps aside for it.
 
 =============================================================
+INVESTIGATED AND CLEARED  (suspected, proven not to be the cause)
+=============================================================
+  bettercaves ........... YUNG's Better Caves ..................... PASS
+
+    Prime suspect for the Endventure world-generation failure for two rounds, and NOT the cause —
+    see betterchunkloading under INCOMPATIBLE for what actually broke. Recorded here because the
+    surface genuinely looks fatal and will attract suspicion again:
+
+    Better Caves' aquiferfix.AquiferMixin hangs a cancellable @Inject on
+    Aquifer$NoiseBasedAquifer.computeSubstance RETURN; SuperChunk @Overwrites that same method
+    (MixinAquiferSamplerImpl). An @Overwrite of a method another mod injects into is decided by
+    mixin apply order, which reads like a coin flip. It is survivable in practice:
+      - Upstream C2ME @Overwrites the same method and four more of that class (apply /
+        getWaterLevel / getFluidBlockY / calculateDensity / getFluidBlockState — see upstream/
+        C2ME-neoforge/.../mixin/aquifer/MixinAquiferSamplerImpl.java:159), a strict superset of ours.
+      - Harness legs 2026-08-11: up to 16641 chunks at r1024 in 47s with SuperChunk + Better Caves +
+        YUNG's API + Streams Reflowing + Distant Horizons, never stalling. -Dmixin.debug.export +
+        javap on the merged class confirms Better Caves applies LAST there, so its
+        handler$bbf000$bettercaves$fixAquiferLiquids sits inside our overwritten body — the
+        theirs-last case, the dangerous one — and nothing stalls.
+      - The pack repro (2026-08-13) crashed in the chunk pipeline with Better Caves installed and
+        the aquifer entirely uninvolved.
+
+    A diagnostic probe is kept, DEFAULT OFF: -Dsuperchunk.compat.betterCaves=true stands our whole
+    mixin.aquifer.* package down (dev.superchunk.compat.BetterCavesCompat, gated in
+    opts.worldgen.vanilla.MixinPlugin). Enabling it costs the aquifer optimisation and drops the GPU
+    compact-ids decide chain to corner-only, so it exists only to answer "is the aquifer surface
+    implicated?" in one launch.
+
+    Also cleared: "AquiferContext is null in AquiferMixin" warnings are not ours. They appear at the
+    same rate with our aquifer mixin applied (22) and stood down (24) — they track Streams
+    Reflowing's own streamsreflowing-sampler thread building aquifers off the NoiseChunk.<init> path
+    Better Caves @WrapOperations to install that context.
+
+=============================================================
 INCOMPATIBLE  (unfixable)
 =============================================================
-  (none — every server-relevant mod in the top 50 works with SuperChunk)
+  betterchunkloading .... Better Chunk Loading .................... FAIL (hard, by design)
+
+    Reported 2026-08-09: "no crash, the game just stalls and I have to kill it with task manager.
+    It won't generate new worlds or already created worlds", in Create Chronicles: The Endventure.
+    REPRODUCED 2026-08-13 by installing SuperChunk 0.3.0 + Better Caves + Streams Reflowing +
+    Distant Horizons into that pack (321 mods, NeoForge 21.1.229, MC 1.21.1) and creating a new
+    world. Here it surfaces as a CRASH rather than a silent stall:
+
+      Description: Exception initializing level
+      java.lang.NullPointerException: Cannot invoke "java.util.concurrent.CompletableFuture.isDone()"
+          because "this.saveSync" is null
+        at ChunkHolder.addSaveDependency(ChunkHolder.java:131)
+        at ServerChunkCache.mdead87f$betterchunkloading$lambda$prioWaiting$1$0(...:1142)
+        ... -> PlayerRespawnLogic.getOverworldRespawnPos -> MinecraftServer.setInitialSpawn
+            -> createLevels -> loadLevel -> IntegratedServer.initServer
+
+    MECHANISM. C2ME's chunk-system rewrite replaces the vanilla chunk pipeline, so vanilla's
+    ChunkHolder future fields no longer mean anything under it. C2ME therefore deliberately
+    BOOBY-TRAPS them: rewrites/chunksystem/mixin/MixinChunkHolder#failFastIncompatibility injects at
+    ChunkHolder.<init> RETURN and nulls fullChunkFuture, tickingChunkFuture,
+    entityTickingChunkFuture, pendingFullStateConfirmation and saveSync on every holder that is a
+    NewChunkHolderVanillaInterface — i.e. on EVERY live holder, since that class extends ChunkHolder.
+    The method name says the intent: a mod that reaches for vanilla chunk-holder state should fail
+    loudly rather than quietly operate on state the chunk system no longer honours.
+
+    Better Chunk Loading trips exactly that wire. Its ServerChunkCacheMixin hangs a whenComplete
+    callback ("prioWaiting") on the chunk future and calls ChunkHolder.addSaveDependency from it;
+    addSaveDependency reads this.saveSync.isDone() -> NPE. SuperChunk's FlowSched
+    (ItemHolder.setStatus) is merely what completes the future, so it appears in the stack without
+    being the defect. Because the trap fires at setInitialSpawn, a NEW world dies before it exists;
+    an existing world hits the same call on any subsequent chunk load.
+
+    NOT SUPERCHUNK-SPECIFIC. The tripwire is inherited VERBATIM from upstream C2ME
+    (upstream/C2ME-neoforge/.../chunksystem/mixin/MixinChunkHolder.java:36-43; Yarn savingFuture ==
+    Mojmap saveSync). Any C2ME build with c2me-rewrites-chunk-system active should fail identically.
+    The reporter's "this doesn't happen with c2me and lithium installed" is therefore UNEXPLAINED —
+    most likely that run had the chunk-system module disabled, or Better Chunk Loading absent.
+    Worth confirming before anyone concludes SuperChunk is the differentiator.
+
+    RESOLUTION: remove Better Chunk Loading. There is no SuperChunk-side fix — the two are competing
+    implementations of the same subsystem, and the NPE is C2ME's intended failure mode, not an
+    accident to patch. Nothing is lost: prioritised/faster chunk loading is what SuperChunk's chunk
+    system already does.
+
+    ENFORCED SINCE 0.3.0: neoforge.mods.toml declares betterchunkloading as
+    type = "incompatible", so the loader now refuses to start and shows an error screen naming both
+    mods plus a reason, instead of the mid-worldgen NPE whose stack names SuperChunk classes (which
+    read as a SuperChunk bug and cost this investigation several rounds). NeoForge has no API for one
+    mod to DISABLE another — refusing to launch is the strongest supported action, and the honest one
+    here, since the combination cannot work at all.
+
+    Bar for adding another entry to that list: a REPRODUCED failure with a known mechanism, written
+    up here. Never list a mod on suspicion — an entry bricks the launch for everyone who has it, so a
+    false positive is worse than the bug it guards against. Where the conflict is OURS to yield, stand
+    our own feature down instead (StructureLayoutOptimizerCompat, ByePregenCompat, the bundled-Lithium
+    stand-down); that option does not exist here, because the chunk system IS SuperChunk.
+
+    SAME-RISK, UNTESTED, ALSO IN THAT PACK: chunksending (its own ChunkHolderMixin), smoothchunk,
+    cupboard and sable all mix into ServerChunkCache/ChunkHolder. None got the chance to fail before
+    Better Chunk Loading did — removing betterchunkloading may simply surface the next one.
 
 =============================================================
 ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per request)

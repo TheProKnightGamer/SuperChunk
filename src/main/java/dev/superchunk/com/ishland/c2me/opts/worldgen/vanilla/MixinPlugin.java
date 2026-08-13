@@ -26,8 +26,15 @@ public class MixinPlugin extends ModuleMixinPlugin {
             return true;
         }
 
+        // DIAGNOSTIC PROBE, DEFAULT OFF (-Dsuperchunk.compat.betterCaves=true): stands our aquifer
+        // mixin down when YUNG's Better Caves is installed. Better Caves @Injects (cancellable) at
+        // Aquifer$NoiseBasedAquifer.computeSubstance RETURN and we @Overwrite that method — which
+        // looks fatal and measurably is not (upstream C2ME overwrites the same method and four more
+        // of that class, and works with Better Caves). It has to be a LOAD-time gate because the
+        // runtime -D kill switches cannot un-apply an @Overwrite. See
+        // dev.superchunk.compat.BetterCavesCompat for the evidence.
         if (mixinClassName.startsWith("dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.aquifer."))
-            return Config.optimizeAquifer;
+            return Config.optimizeAquifer && dev.superchunk.compat.BetterCavesCompat.applyOwnAquiferMixin();
 
         if (mixinClassName.startsWith("dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.the_end_biome_cache."))
             return Config.useEndBiomeCache;
