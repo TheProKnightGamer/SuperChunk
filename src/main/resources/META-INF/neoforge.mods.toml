@@ -149,7 +149,7 @@ side = "BOTH"
 modId = "betterchunkloading"
 type = "incompatible"
 versionRange = "*"
-reason = "Better Chunk Loading and SuperChunk are competing chunk-loading systems. SuperChunk's chunk system (from C2ME) replaces vanilla's chunk pipeline and intentionally invalidates the vanilla ChunkHolder state that Better Chunk Loading reads, so the combination crashes with a NullPointerException while generating the world's initial spawn - new worlds never finish creating, and existing worlds fail on the next chunk load. Remove Better Chunk Loading: SuperChunk already does prioritised, multithreaded chunk loading."
+reason = "betterchunkloading breaks superchunks optimized chunk loading."
 ordering = "NONE"
 side = "BOTH"
 
