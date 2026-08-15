@@ -32,7 +32,7 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
   ai-improvements ....... AI Improvements (mob AI opt) ............ PASS
   alternate-current ..... Alternate Current (redstone perf) ....... PASS
-  distanthorizons ....... Distant Horizons (LOD) .................. PASS
+  distanthorizons ....... Distant Horizons (LOD) .................. PASS  [0.3.0: now INTEGRATED — see below]
   krypton-fnp ........... Krypton Reno (network opt) .............. PASS
   ksyxis ................ Ksyxis (skip spawn-chunk load) .......... PASS
   modernfix ............. ModernFix (memory/startup) .............. PASS  [singleplayer: see FIXED]
@@ -132,6 +132,142 @@ INVESTIGATED AND CLEARED  (suspected, proven not to be the cause)
     Better Caves @WrapOperations to install that context.
 
 =============================================================
+INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
+=============================================================
+  distanthorizons ....... Distant Horizons (LOD) .................. PASS + integrated (0.3.0)
+
+    Added 2026-08-14. DH booted cleanly alongside SuperChunk from the start (see COMPATIBLE), but
+    "boots" is not "uses": DH GENERATES WORLD CHUNKS of its own, and how much of SuperChunk it got
+    depended entirely on which of its two generation routes it took.
+
+    ROUTE 1 — distantGeneratorMode = INTERNAL_SERVER (DH's client-side default). DH asks the live
+    server for each chunk: it adds its dh_server_gen_ticket at level 33 on the server thread, runs
+    the distance-manager updates, then calls ChunkHolder.scheduleChunkGenerationTask(FULL, chunkMap).
+    C2ME's chunk-system rewrite implements exactly that entry point
+    (NewChunkHolderVanillaInterface.scheduleChunkGenerationTask -> getOrCreateFuture, raising the
+    FlowSched target status), so these requests were ALREADY served by the whole SuperChunk pipeline,
+    GPU offload included. Nothing to fix in the generation itself.
+      What WAS wrong was DH's self-report. InternalServerGenerator.runValidation() looks up its own
+    IC2meAccessor binding, which DH's loader creates only for a mod whose id is literally "c2me";
+    SuperChunk is a C2ME merge under one id, so the lookup missed and DH printed — to the log AND to
+    the player's chat — "C2ME missing, low CPU usage and slow world gen speeds expected". Exactly
+    backwards. FIX: dev.superchunk.compat.DhC2meAccessor binds a reflective stand-in accessor
+    (a java.lang.reflect.Proxy over DH's own interface — SuperChunk compiles against no DH type) into
+    DH's ModAccessorInjector at server start, before DH's generator classes initialize. It reports
+    "superchunk (bundled C2ME)" rather than impersonating c2me; nothing keys on that string. This
+    changes no code path — DH's C2ME binding is a reporting flag — it only removes a false warning.
+
+    ROUTE 2 — SURFACE / FEATURES modes (DH's own batch generator; FEATURES is the DEDICATED-SERVER
+    default). Here DH never touches the server chunk system: BatchGenerationEnvironment drives the
+    vanilla generation steps itself, on DH's own thread pool, one STEP at a time over a GROUP of
+    chunks (StepBiomes.generateGroup -> createBiomes per chunk, StepNoise.generateGroup ->
+    fillFromNoise per chunk). SuperChunk's CPU optimisations and its PER-CHUNK GPU density path do
+    engage there (they hang off NoiseChunk, not off any scheduler), but the two CROSS-CHUNK GPU paths
+    did NOT: both are wired into the chunk system's status delegate (VanillaWorldGenerationDelegate),
+    which DH bypasses. The cost was not merely one dispatch per chunk instead of one per ~32 — the
+    batched submit is also the ONLY carrier of the chained decide-kernel block ids (compact ids), so
+    every DH chunk re-ran the whole CPU decide loop that server-generated chunks skip, and every DH
+    chunk paid a funneled single-chunk climate dispatch at its biome stage.
+
+    FIX: dev.superchunk.compat.DhWorldGenBridge + mixin.compat.MixinDhWorldGenStep
+    (superchunk-dh.mixins.json, "required": false, gated by DhMixinPlugin on the DH mod id). The hook
+    sits on AbstractWorldGenStep.getChunkWrappersToGenerate RETURN — one call per group, immediately
+    before the loop, handing us DH's OWN filtered chunk list — and submits the whole group through
+    the same submit/deposit code the chunk-system seam uses (GpuBatchPrefetch.submitForChunk /
+    GpuClimatePrefetch.submitForChunk), then waits for the deposits. DH's per-chunk calls then consume
+    them from GpuBatchStore/GpuClimateStore with no per-chunk dispatch — byte-identical consume path
+    to a server-generated chunk. Blocking is correct here (unlike the chunk-system seam, which frees
+    its worker): the waiting thread is DH's own, DH requires each step to finish synchronously
+    (confirmFutureWasRunSynchronously), and one bounded wait covers the whole group.
+
+    MEASURED (2026-08-14, this box, RTX 3070, headless NeoForge 21.1.216 + DH 3.2.0-b).
+    "/dh pregen start minecraft:overworld 100000 100000 64" = 16,641 chunks; DH's LOD database (and,
+    for INTERNAL_SERVER, the world) wiped between legs so every leg regenerates the SAME area.
+    generatorMode=FEATURES, 24 DH threads unless stated:
+
+      DH alone, no SuperChunk ....................... 44 s / 373 cps
+      + SuperChunk, GPU on, seam OFF ................ 42 s / 388 cps   42 s / 392 cps
+      + SuperChunk, CPU only (gpu.enabled=false) .... 34 s / 483 cps   34 s / 496 cps
+      + SuperChunk, GPU on, seam ON (default) ....... 34 s / 489 cps   32 s / 500 cps
+
+    At DH's 14-thread setting the same ordering holds, wider: seam OFF 282/291, CPU-only 402,
+    seam ON 373/394 (interleaved off/on/off/on).
+
+    READ THIS BEFORE QUOTING A NUMBER. The GPU offload does NOT make DH's own generator faster — DH
+    is not bottlenecked on density noise, and CPU-only is level with GPU+seam (490 vs 495). What the
+    GPU did was COST DH ~20% (490 -> 390): its chunks paid per-chunk blocking dispatches and never
+    received the batched block ids. The seam's honest value is removing that tax, worth +26% at 24
+    threads (390 -> 495) and +34% at 14 (286 -> 383) against the shipped GPU-on default. SuperChunk's
+    total win for DH is +33% over no-SuperChunk, and essentially ALL of it is the CPU-side merge.
+    Do not expect the GPU to lift DH the way it lifts a Chunky pregen (+50%).
+
+    Seam-ON counters (14-thread leg): 16,274 chunks prefetched, 0 misses, 0 prefetch failures, 0
+    group-wait timeouts, store residual 0/evicted 0; 15,988 of 16,274 chunks (98%) served by the
+    compact-ids fast path DH could not reach at all before; climate 16,400/16,400 served from the
+    batched store (was 16,400 funneled per-chunk). Seam-OFF legs show the pre-change behaviour
+    exactly (0 prefetched, 16,274 density misses, 16,400 climate misses), so the delta is attributable.
+
+    WHY DH IS ~500 cps WHERE A CHUNKY PREGEN IS ~900-1250. Different engine, different shape:
+      - DH's batcher fill is starved. Its generation groups are ~4 chunks and each DH thread BLOCKS
+        on its own group, so the cross-chunk batcher achieves 4.4 chunks/dispatch (78% of dispatches
+        <= 4 chunks) against 22.4 for a Chunky pregen ([17-32]=1967 of 2962 dispatches there). GPU
+        time per chunk roughly doubles as a result. Raising gpu.batchWindowMicros to 3000 does NOT
+        help (37 s / 466 cps) — it only adds latency to threads that are already blocked.
+      - DH pays per-chunk work a pregen never does: createDhHeightMaps, DhLightingEngine
+        .bakeChunkBlockLighting, LOD extraction + compression + SQLite writes, and neighbour access
+        through DhLitWorldGenRegion's ReentrantLock.
+      - Thread count. DH sizes its own pool (numberOfThreads); the chunk system runs 22 C2ME workers
+        fed by Chunky's 3072 in-flight chunks. 14 -> 24 DH threads is +22% CPU-only / +28% GPU.
+      - DH's steps run over a shrinking CUTOUT of each group (GetCutoutFrom /
+        WORLD_GEN_CHUNK_BORDER_NEEDED_BY_GEN_STEP), so a group carries border chunks the later steps
+        discard.
+    None of this is fixable from SuperChunk's side without rewriting DH's generator; the density
+    path it can accelerate is already fully served (0 misses).
+
+    CAN THE BATCHES BE FORCED LARGER? Measured: no, not from either side.
+      - gpu.batchWindowMicros 500 -> 3000: 37 s / 466 cps, WORSE than 500 (32-34 s / 489-500). DH's
+        threads are BLOCKED while their group's dispatch is in flight, so window latency throttles
+        the very arrival rate that would fill the batch. Batch size here is a symptom of blocked-
+        thread concurrency, not a knob.
+      - DH's group size is hardcoded, not configurable: core.generation.BatchGenerator returns a
+        constant 0 from BOTH getSmallestDataDetailLevel() and getLargestDataDetailLevel(), and
+        WorldGenerationQueue.canGenerateDetailLevel clamps every request to that range — DH always
+        asks its own generator for the smallest region (~4 chunks/group). Confirmed empirically with
+        enableNSizedGeneration=true: 4,076 noise groups for the same ~16.3k chunks (unchanged ~4
+        chunks/group), 36 s / 454 cps.
+      - The only real lever is DH's official override API
+        (DhApiWorldGeneratorOverrideRegister.registerWorldGeneratorOverride): our own
+        IDhApiWorldGenerator could advertise getLargestDataDetailLevel() > 0 and be handed large
+        regions, returning EDhApiWorldGeneratorReturnType.VANILLA_CHUNKS. NOT PURSUED, and batch size
+        is the wrong reason to pursue it: CPU-only already equals GPU+seam (490 vs 495), so cheaper
+        GPU dispatches cannot be worth much. Such an override would have to beat DH's whole per-chunk
+        pipeline, and note INTERNAL_SERVER — effectively that idea one chunk at a time — measured
+        SLOWER (400 cps). Anyone attempting it should budget for reimplementing the generation
+        orchestration (region wrapper, dummy light engine, structure manager, chunk cache) that
+        BatchGenerationEnvironment provides today.
+
+    GENERATOR MODE, MEASURED (24 threads, fresh world per leg): INTERNAL_SERVER 40 s / 400 cps vs
+    FEATURES 32 s / 500 cps. INTERNAL_SERVER is slower DESPITE running through SuperChunk's chunk
+    system, because it takes every chunk to FULL status (lighting, block entities, disk save) and
+    adds/removes a ticket plus a distanceManager.runAllUpdates hop on the SERVER THREAD per chunk.
+    It remains the more compatible mode (correct structures, chunks persisted) — this is a tradeoff
+    to state, not a recommendation to flip.
+
+    NOT VERIFIED: client-side DH (LOD rendering, distant generation while actually playing). The
+    measurements drive DH's own generator headlessly via /dh pregen, which is the same
+    BatchGenerationEnvironment code path a client uses in SURFACE/FEATURES mode, but no client run
+    was made.
+
+    FLAGS (all default on): -Dsuperchunk.compat.distantHorizons=false disables the whole DH interop;
+    -Dsuperchunk.dh.batchPrefetch=false keeps DH on the per-chunk path; -Dsuperchunk.dh.c2meAccessor=false
+    leaves DH's "C2ME missing" warning; -Dsuperchunk.dh.waitMillis=N (default 2000) caps a group wait.
+
+    EXPECTED BOOT NOISE: three mixin WARNs naming
+    "loaderCommon.neoforge...AbstractWorldGenStep was not found". That is the DH 2.x class name; the
+    mixin lists both DH layouts (2.x package-prefixed, 3.x class-suffixed) and only the installed
+    one resolves. Harmless; the other target applies.
+
+=============================================================
 INCOMPATIBLE  (unfixable)
 =============================================================
   betterchunkloading .... Better Chunk Loading .................... FAIL (hard, by design)
@@ -211,6 +347,10 @@ ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per requ
   Bye?Pregen! (byepregen) ....... Compatible. SuperChunk defers fluid post-processing to it.
   Structure Layout Optimizer .... Compatible. SuperChunk stands its jigsaw octree down so SLO owns
                                   jigsaw placement.
+  Distant Horizons .............. Compatible AND integrated: DH's own batch generator feeds
+                                  SuperChunk's cross-chunk GPU batcher (removes the ~20% tax the
+                                  GPU path was costing DH), and SuperChunk registers as DH's C2ME
+                                  accessor. See INTEGRATED.
 
 =============================================================
 CLIENT-ONLY (Modrinth server_side = unsupported) — N/A on a dedicated server

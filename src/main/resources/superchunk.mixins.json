@@ -8,6 +8,7 @@
     "IHeightmapAccess",
     "IHeightmapPlacementAccess",
     "IHeightRangePlacementAccess",
+    "IChunkAccessLevelHeight",
     "IPalettedContainerUnpackAccess",
     "IPlacementFilterAccess",
     "IRandomOffsetPlacementAccess",

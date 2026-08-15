@@ -47,6 +47,13 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Flag-gated: callers only invoke this when {@link ChunkGridCache#isBatchEnabled()}
  * (config {@code batchChunks}) is on. Flag OFF = this class is never reached.
+ *
+ * <p><b>Two callers, one submit.</b> The submit + deposit itself lives in
+ * {@link #submitForChunk} and returns a {@link GpuPrefetchHandle}; {@link #wrapNoise} only
+ * adapts that handle to the chunk system's RxJava step. The Distant Horizons batch generator
+ * ({@link dev.superchunk.compat.DhWorldGenBridge}) submits its whole generation group through
+ * the SAME method and blocks its own DH thread on the handles, so DH-generated chunks get
+ * identical batched dispatches (and compact ids) rather than the per-chunk path.
  */
 public final class GpuBatchPrefetch {
     private static final Logger LOGGER = OpenCLBackend.LOGGER;
@@ -60,11 +67,45 @@ public final class GpuBatchPrefetch {
      * chunk (so the behavior is identical to the per-chunk path). Never throws.
      */
     public static Completable wrapNoise(ChunkAccess chunk, Completable step) {
+        final GpuPrefetchHandle handle = submitForChunk(chunk);
+        if (handle == null) {
+            return step;
+        }
+        Completable prefetch = Completable.create(emitter -> {
+            handle.done().whenComplete((v, err) -> {
+                // ALWAYS complete — never error into the scheduler, never hang.
+                try {
+                    emitter.onComplete();
+                } catch (Throwable ignored) {
+                }
+            });
+            // Disposal: on NORMAL completion (resolved) leave the stored grid for the
+            // fill to consume. Only a genuine gen cancellation BEFORE the batch
+            // resolved cancels the future (the batcher drops cancelled requests) and
+            // evicts any entry — so nothing leaks and the worker isn't waited on.
+            emitter.setCancellable(handle::cancelIfUnresolved);
+        });
+        // Resume on a C2ME worker (NOT the single batcher thread), then run the
+        // real noise step there. This is what frees the worker during the wait.
+        return prefetch
+                .observeOn(ChunkSystemExecutors.backgroundScheduler)
+                .andThen(step);
+    }
+
+    /**
+     * Submits {@code chunk}'s fused-group density request to the live cross-chunk batcher and
+     * arranges for the batched result to be deposited in {@link GpuBatchStore} when it lands.
+     * Returns {@code null} — with nothing submitted — whenever batching can't apply to this
+     * chunk (backend not ready, no cached sampler, bad extent, another dimension's geometry,
+     * already prefetched, submit rejected), so the caller simply runs the unmodified step and
+     * the chunk takes the per-chunk {@link ChunkGridCache} path. Never throws.
+     */
+    public static GpuPrefetchHandle submitForChunk(ChunkAccess chunk) {
         try {
             GpuChunkBatcher batcher = ChunkGridCache.liveBatcher();
             GpuFusedInterpolator fused = ChunkGridCache.batcherFused();
             if (batcher == null || fused == null || chunk == null) {
-                return step;
+                return null;
             }
 
             // Peek the NoiseChunk created at the biomes stage (no create). Null when
@@ -74,17 +115,17 @@ public final class GpuBatchPrefetch {
                 nc = ((IChunkAccessNoiseChunk) chunk).superchunk$getNoiseChunk();
             } catch (Throwable t) {
                 GpuFillStats.recordBatchPrefetchSkipped();
-                return step;
+                return null;
             }
             if (nc == null) {
                 GpuFillStats.recordBatchPrefetchSkipped();
-                return step;
+                return null;
             }
 
             GpuBatchStore.Extent ext = GpuBatchStore.Extent.derive(nc);
             if (ext == null) {
                 GpuFillStats.recordBatchPrefetchSkipped();
-                return step;
+                return null;
             }
             // CROSS-DIMENSION GUARD (2026-07-02): only submit chunks whose lattice geometry
             // belongs to the batcher's fused group. The batcher is compiled over ONE
@@ -95,12 +136,12 @@ public final class GpuBatchPrefetch {
             if (!ChunkGridCache.geometryMatchesBatcher(ext.oy, ext.sx, ext.sy, ext.sz,
                     ext.dimX, ext.dimY, ext.dimZ)) {
                 GpuFillStats.recordBatchCrossDimSkip();
-                return step;
+                return null;
             }
             final ChunkPos pos = chunk.getPos();
             if (pos == null) {
                 GpuFillStats.recordBatchPrefetchSkipped();
-                return step;
+                return null;
             }
             // Dimension-qualified store key: ChunkPos + this chunk's per-dimension noise-lattice
             // geometry, so a concurrently-generating other dimension at the same (x,z) can never
@@ -112,7 +153,7 @@ public final class GpuBatchPrefetch {
             // climate-chain combined submit already carried this chunk's density
             // request — its deposit lands with that batch) — don't double-submit.
             if (GpuBatchStore.contains(key) || GpuBatchStore.isPending(key)) {
-                return step;
+                return null;
             }
 
             final int expectLen = fused.rootCount() * ext.gridLen;
@@ -131,115 +172,99 @@ public final class GpuBatchPrefetch {
                 future = handle == null ? null : handle.future();
             } catch (Throwable t) {
                 GpuFillStats.recordBatchPrefetchSkipped();
-                return step;
+                return null;
             }
             if (future == null) {
                 GpuFillStats.recordBatchPrefetchSkipped();
-                return step;
+                return null;
             }
 
             final GpuFusedInterpolator ffused = fused;
             // Tracks whether the future resolved (so the entry was stored for the fill).
             // RxJava fires the emitter's cancellable on NORMAL completion too (andThen
             // disposes this source before subscribing the next) — so we must NOT evict
-            // the freshly-stored grid then. Only a cancellation BEFORE resolution evicts.
+            // the freshly-stored grid then. Only a cancellation BEFORE resolution evicts
+            // (GpuPrefetchHandle.cancelIfUnresolved).
             final java.util.concurrent.atomic.AtomicBoolean resolved =
                     new java.util.concurrent.atomic.AtomicBoolean(false);
-            Completable prefetch = Completable.create(emitter -> {
-                future.whenComplete((grids, err) -> {
-                    resolved.set(true);
-                    try {
-                        // The batcher's DEAD-GRID SENTINEL: the chunk takes the compact-consume
-                        // fast path, so its corner grids were never copied out of pinned staging
-                        // (nothing reads them). Its IDS still must be deposited, so this is a
-                        // normal store, not a failure. If such an entry is ever asked for grids
-                        // anyway, ChunkGridCache.consumeBatchedGrid rejects it on its existing
-                        // length check and takes the per-chunk path.
-                        final boolean deadGrids = GpuChunkBatcher.isDeadGrids(grids);
-                        if (err == null && grids != null && (grids.length == expectLen || deadGrids)) {
-                            // ON-DEVICE INTERP PREFETCH POOL: produce the two full fields NOW (on
-                            // THIS — the batcher — thread, off the worker's fill critical path) into
-                            // a REUSED pooled holder, so the fill serves them READY with no GPU
-                            // round-trip and ZERO per-chunk field allocation. If the pool is
-                            // exhausted, or production fails, or this isn't the full-chunk extent, we
-                            // store a null holder and the consumer falls back to the per-chunk
-                            // provideFullFieldFromHostCorners path (correctness unaffected).
-                            OnDeviceFieldPool.Holder holder = null;
-                            if (OnDeviceInterp.ENABLED && !deadGrids) {
-                                int total = ffused.fullFieldTotalOrNeg(ext.dimX, ext.dimY, ext.dimZ,
-                                        ext.sx, ext.sy, ext.sz);
-                                if (total > 0) {
-                                    holder = OnDeviceFieldPool.acquire(total, ffused);
-                                    if (holder != null) {
-                                        boolean ok;
-                                        try {
-                                            ok = ffused.produceFullFieldToArrays(grids,
-                                                    ext.dimX, ext.dimY, ext.dimZ,
-                                                    ext.sx, ext.sy, ext.sz, holder);
-                                        } catch (Throwable t) {
-                                            ok = false;
-                                        }
-                                        if (!ok) {
-                                            OnDeviceFieldPool.release(holder);
-                                            holder = null;
-                                            // Silent-degrade visibility: production failed ->
-                                            // the consumer pays the per-chunk field fallback.
-                                            OnDeviceInterp.recordFieldProductionFailed();
-                                        }
+            // Completes (always normally) once the deposit attempt has run, so a waiter —
+            // the chunk system's step, or a blocked DH worldgen thread — is always released.
+            final CompletableFuture<Void> done = new CompletableFuture<>();
+            future.whenComplete((grids, err) -> {
+                resolved.set(true);
+                try {
+                    // The batcher's DEAD-GRID SENTINEL: the chunk takes the compact-consume
+                    // fast path, so its corner grids were never copied out of pinned staging
+                    // (nothing reads them). Its IDS still must be deposited, so this is a
+                    // normal store, not a failure. If such an entry is ever asked for grids
+                    // anyway, ChunkGridCache.consumeBatchedGrid rejects it on its existing
+                    // length check and takes the per-chunk path.
+                    final boolean deadGrids = GpuChunkBatcher.isDeadGrids(grids);
+                    if (err == null && grids != null && (grids.length == expectLen || deadGrids)) {
+                        // ON-DEVICE INTERP PREFETCH POOL: produce the two full fields NOW (on
+                        // THIS — the batcher — thread, off the worker's fill critical path) into
+                        // a REUSED pooled holder, so the fill serves them READY with no GPU
+                        // round-trip and ZERO per-chunk field allocation. If the pool is
+                        // exhausted, or production fails, or this isn't the full-chunk extent, we
+                        // store a null holder and the consumer falls back to the per-chunk
+                        // provideFullFieldFromHostCorners path (correctness unaffected).
+                        OnDeviceFieldPool.Holder holder = null;
+                        if (OnDeviceInterp.ENABLED && !deadGrids) {
+                            int total = ffused.fullFieldTotalOrNeg(ext.dimX, ext.dimY, ext.dimZ,
+                                    ext.sx, ext.sy, ext.sz);
+                            if (total > 0) {
+                                holder = OnDeviceFieldPool.acquire(total, ffused);
+                                if (holder != null) {
+                                    boolean ok;
+                                    try {
+                                        ok = ffused.produceFullFieldToArrays(grids,
+                                                ext.dimX, ext.dimY, ext.dimZ,
+                                                ext.sx, ext.sy, ext.sz, holder);
+                                    } catch (Throwable t) {
+                                        ok = false;
+                                    }
+                                    if (!ok) {
+                                        OnDeviceFieldPool.release(holder);
+                                        holder = null;
+                                        // Silent-degrade visibility: production failed ->
+                                        // the consumer pays the per-chunk field fallback.
+                                        OnDeviceInterp.recordFieldProductionFailed();
                                     }
                                 }
                             }
-                            // COMPACT-IDS: the chunk's 1-byte/block ids ride the store next to
-                            // the grids (PROBE: the consumer ignores them — counters prove
-                            // arrival). Written drainer-side before the future completed.
-                            byte[] ids = CompactIds.PROBE && handle != null ? handle.ids() : null;
-                            GpuBatchStore.put(key, new GpuBatchStore.Stored(ffused, ext, grids, holder, ids));
-                            if (CompactIds.PROBE) {
-                                CompactIds.recordDeposit(ids);
-                            }
-                            GpuFillStats.recordBatchPrefetch();
-                        } else {
-                            // On any failure/timeout/cancel/short-grids we DON'T store: the
-                            // fill transparently falls back to the per-chunk dispatch path.
-                            // Count it — a silently-dying pipeline must show as failures,
-                            // not as a shrinking prefetched count.
-                            GpuFillStats.recordBatchPrefetchFailed();
                         }
-                    } catch (Throwable ignored) {
-                        // never propagate
-                    }
-                    // ALWAYS complete — never error into the scheduler, never hang.
-                    try {
-                        emitter.onComplete();
-                    } catch (Throwable ignored) {
-                    }
-                });
-                // Disposal: on NORMAL completion (resolved) leave the stored grid for the
-                // fill to consume. Only a genuine gen cancellation BEFORE the batch
-                // resolved cancels the future (the batcher drops cancelled requests) and
-                // evicts any entry — so nothing leaks and the worker isn't waited on.
-                emitter.setCancellable(() -> {
-                    if (!resolved.get()) {
-                        try {
-                            future.cancel(false);
-                        } catch (Throwable ignored) {
+                        // COMPACT-IDS: the chunk's 1-byte/block ids ride the store next to
+                        // the grids (PROBE: the consumer ignores them — counters prove
+                        // arrival). Written drainer-side before the future completed.
+                        byte[] ids = CompactIds.PROBE && handle != null ? handle.ids() : null;
+                        GpuBatchStore.put(key, new GpuBatchStore.Stored(ffused, ext, grids, holder, ids));
+                        if (CompactIds.PROBE) {
+                            CompactIds.recordDeposit(ids);
                         }
-                        GpuBatchStore.remove(key);
+                        GpuFillStats.recordBatchPrefetch();
+                    } else {
+                        // On any failure/timeout/cancel/short-grids we DON'T store: the
+                        // fill transparently falls back to the per-chunk dispatch path.
+                        // Count it — a silently-dying pipeline must show as failures,
+                        // not as a shrinking prefetched count.
+                        GpuFillStats.recordBatchPrefetchFailed();
                     }
-                });
+                } catch (Throwable ignored) {
+                    // never propagate
+                }
+                // ALWAYS complete — never error into the scheduler, never hang.
+                try {
+                    done.complete(null);
+                } catch (Throwable ignored) {
+                }
             });
-
-            // Resume on a C2ME worker (NOT the single batcher thread), then run the
-            // real noise step there. This is what frees the worker during the wait.
-            return prefetch
-                    .observeOn(ChunkSystemExecutors.backgroundScheduler)
-                    .andThen(step);
+            return new GpuPrefetchHandle(done, future, resolved, () -> GpuBatchStore.remove(key));
         } catch (Throwable t) {
             // Defensive: the batch path must never break gen.
             if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("[SuperChunk-GPU] [batch] prefetch wrap threw — per-chunk path for this chunk.", t);
+                LOGGER.debug("[SuperChunk-GPU] [batch] prefetch submit threw — per-chunk path for this chunk.", t);
             }
-            return step;
+            return null;
         }
     }
 }

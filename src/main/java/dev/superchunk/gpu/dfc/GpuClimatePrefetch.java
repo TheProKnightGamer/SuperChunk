@@ -4,6 +4,7 @@ import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.structs.Chunk
 import dev.superchunk.gpu.OpenCLBackend;
 import io.reactivex.rxjava3.core.Completable;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.chunk.status.WorldGenContext;
 import net.minecraft.world.level.levelgen.NoiseRouter;
 import net.minecraft.world.level.levelgen.RandomState;
@@ -126,39 +127,12 @@ public final class GpuClimatePrefetch {
                 }
             }
 
-            final CompletableFuture<double[]> future;
-            try {
-                future = plan.batcher().submitTo(plan.disp(),
-                        plan.ox(), plan.oy(), plan.oz(),
-                        4, 4, 4,
-                        plan.dimX(), plan.dimY(), plan.dimZ());
-            } catch (Throwable t) {
+            final GpuPrefetchHandle handle = submitSplit(plan);
+            if (handle == null) {
                 return step;
             }
-            if (future == null) {
-                return step;
-            }
-
-            // Tracks whether the future resolved (so the entry was stored for the fill).
-            // RxJava fires the emitter's cancellable on NORMAL completion too (andThen
-            // disposes this source before subscribing the next) — so we must NOT evict
-            // the freshly-stored grid then. Only a cancellation BEFORE resolution evicts.
-            final java.util.concurrent.atomic.AtomicBoolean resolved =
-                    new java.util.concurrent.atomic.AtomicBoolean(false);
             Completable prefetch = Completable.create(emitter -> {
-                future.whenComplete((grids, err) -> {
-                    resolved.set(true);
-                    try {
-                        if (err == null && grids != null && grids.length == plan.expectLen()) {
-                            GpuClimateStore.put(plan.key(),
-                                    new GpuClimateStore.Stored(plan.key().fused(), grids));
-                            GpuFillStats.recordClimatePrefetch();
-                        }
-                        // On any failure we DON'T store: beginChunk counts the miss and
-                        // FUNNELS a single-chunk request through the same drainer thread.
-                    } catch (Throwable ignored) {
-                        // never propagate
-                    }
+                handle.done().whenComplete((v, err) -> {
                     // ALWAYS complete — never error into the scheduler, never hang.
                     try {
                         emitter.onComplete();
@@ -169,15 +143,7 @@ public final class GpuClimatePrefetch {
                 // fill to consume. Only a genuine gen cancellation BEFORE the batch
                 // resolved cancels the future (the batcher drops cancelled requests) and
                 // evicts any entry — so nothing leaks and no worker is waited on.
-                emitter.setCancellable(() -> {
-                    if (!resolved.get()) {
-                        try {
-                            future.cancel(false);
-                        } catch (Throwable ignored) {
-                        }
-                        GpuClimateStore.remove(plan.key());
-                    }
-                });
+                emitter.setCancellable(handle::cancelIfUnresolved);
             });
 
             // Resume on a C2ME worker (NOT the single climate drainer thread), then run
@@ -192,6 +158,95 @@ public final class GpuClimatePrefetch {
             }
             return step;
         }
+    }
+
+    /**
+     * Submits {@code chunk}'s climate quart-grid request on the DEDICATED climate batcher and
+     * arranges the deposit into {@link GpuClimateStore} — the split (non-chained) path, exposed
+     * for the Distant Horizons batch-generator seam
+     * ({@link dev.superchunk.compat.DhWorldGenBridge}), which prefetches a whole DH generation
+     * GROUP at its BIOMES step and then blocks its own DH thread on the handles.
+     *
+     * <p>Returns {@code null} — nothing submitted — whenever climate batching can't apply
+     * (off, no batcher, group not registered, non-sampling biome source, already prefetched,
+     * submit rejected); the chunk then takes the funneled per-chunk climate path exactly as
+     * before. The chain path is deliberately NOT used here: it would deposit the density grids
+     * one step early under the assumption that the same chunk's noise step follows on the chunk
+     * system, whereas DH runs its own noise group and prefetches it separately. Never throws.
+     */
+    public static GpuPrefetchHandle submitForChunk(ChunkAccess chunk, ChunkGenerator generator,
+                                                   NoiseRouter router) {
+        try {
+            if (chunk == null || router == null) {
+                return null;
+            }
+            try {
+                if (generator != null && BiomeClimateCache.neverSamplesClimate(generator.getBiomeSource())) {
+                    return null;
+                }
+            } catch (Throwable ignored) {
+                // fall through — the beginChunk-side gate still protects the arm/funnel path
+            }
+            final BiomeClimateCache.ClimatePlan plan = BiomeClimateCache.planBatch(chunk, router);
+            if (plan == null || GpuClimateStore.contains(plan.key())) {
+                return null;
+            }
+            return submitSplit(plan);
+        } catch (Throwable t) {
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("[SuperChunk-GPU] [biome-batch] climate submit threw — per-chunk path for this chunk.", t);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * The SPLIT climate submit: one request on the dedicated climate batcher, deposited into
+     * {@link GpuClimateStore} when it lands. Returns {@code null} when the submit could not be
+     * made. Never throws.
+     */
+    private static GpuPrefetchHandle submitSplit(BiomeClimateCache.ClimatePlan plan) {
+        final CompletableFuture<double[]> future;
+        try {
+            future = plan.batcher().submitTo(plan.disp(),
+                    plan.ox(), plan.oy(), plan.oz(),
+                    4, 4, 4,
+                    plan.dimX(), plan.dimY(), plan.dimZ());
+        } catch (Throwable t) {
+            return null;
+        }
+        if (future == null) {
+            return null;
+        }
+        // Tracks whether the future resolved (so the entry was stored for the fill).
+        // RxJava fires the emitter's cancellable on NORMAL completion too (andThen
+        // disposes this source before subscribing the next) — so we must NOT evict
+        // the freshly-stored grid then. Only a cancellation BEFORE resolution evicts
+        // (GpuPrefetchHandle.cancelIfUnresolved).
+        final java.util.concurrent.atomic.AtomicBoolean resolved =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        // Completes (always normally) once the deposit attempt has run, so a waiter — the
+        // chunk system's step, or a blocked DH worldgen thread — is always released.
+        final CompletableFuture<Void> done = new CompletableFuture<>();
+        future.whenComplete((grids, err) -> {
+            resolved.set(true);
+            try {
+                if (err == null && grids != null && grids.length == plan.expectLen()) {
+                    GpuClimateStore.put(plan.key(),
+                            new GpuClimateStore.Stored(plan.key().fused(), grids));
+                    GpuFillStats.recordClimatePrefetch();
+                }
+                // On any failure we DON'T store: beginChunk counts the miss and
+                // FUNNELS a single-chunk request through the same drainer thread.
+            } catch (Throwable ignored) {
+                // never propagate
+            }
+            try {
+                done.complete(null);
+            } catch (Throwable ignored) {
+            }
+        });
+        return new GpuPrefetchHandle(done, future, resolved, () -> GpuClimateStore.remove(plan.key()));
     }
 
     /**
