@@ -100,6 +100,38 @@ changes (warm boot is ~11–13 s).
 
 Main files live in `src/main/java/dev/superchunk/gpu/dfc/`.
 
+## Distant Horizons
+
+DH's distant generation is wired into the same GPU batcher the server uses. In
+DH's `INTERNAL_SERVER` mode its chunk requests already ran through SuperChunk's
+chunk system, and SuperChunk now also registers itself as DH's C2ME accessor so
+DH stops reporting "C2ME missing, slow world gen expected". In DH's own batch
+generator (`SURFACE`/`FEATURES`, the dedicated-server default) each generation
+group is prefetched through the cross-chunk batcher, which also gets those
+chunks the GPU-computed block ids they previously could not reach.
+
+What that is worth, measured over the same 16,641-chunk area (`/dh pregen`,
+24 DH threads, RTX 3070, 2026-08-14):
+
+| DH configuration | chunks/sec |
+|---|---|
+| DH alone, no SuperChunk | 373 |
+| + SuperChunk, GPU on, seam off | 390 |
+| + SuperChunk, CPU only | 490 |
+| + SuperChunk, GPU on, seam on | 495 |
+
+Read that carefully: the GPU offload does **not** speed DH's own generator up —
+DH is not bottlenecked on density noise. What it did was *cost* DH ~20% (490 →
+390), because DH's chunks paid per-chunk GPU dispatches and never received the
+batched block ids. The seam removes that tax. DH's overall +33% over vanilla is
+the CPU-side merge (C2ME/Lithium/Noisium), not the GPU.
+
+DH's own thread count is the largest remaining lever: 14 → 24 threads took the
+same run from 402 to 490 cps.
+
+Kill switch: `-Dsuperchunk.compat.distantHorizons=false`. Details and counters
+in `compatibility.txt`.
+
 ## Parity
 
 The corner and interpolation math runs in fp64 and is bit-exact to vanilla, with

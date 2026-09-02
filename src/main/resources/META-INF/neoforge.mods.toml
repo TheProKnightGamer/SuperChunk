@@ -26,6 +26,12 @@ config = "superchunk.mixins.json"
 [[mixins]]
 config = "scalablelux.mixins.json"
 
+# Optional-mod interop hooks (Distant Horizons' own batch generator). "required": false inside the
+# config: its targets are DH classes, so with DH absent — or with a DH version that renamed them —
+# nothing resolves and nothing applies. DhMixinPlugin additionally gates on the DH mod id.
+[[mixins]]
+config = "superchunk-dh.mixins.json"
+
 # Renamed from lithium.mixins.json / lithium-neoforge.mixins.json to avoid a fatal
 # "Decoration with key fabric-modId already exists" clash with a STANDALONE Lithium install
 # (which ships configs under those exact original names). The mixin package / class lists,

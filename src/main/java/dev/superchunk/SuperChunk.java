@@ -80,6 +80,19 @@ public final class SuperChunk {
             LOGGER.warn("[SuperChunk] failed to register GPU init hook.", t);
         }
 
+        // --- Distant Horizons interop ---
+        // One boot line describing what engaged, and the C2ME-accessor registration that stops DH
+        // reporting "C2ME missing, slow world gen expected" for chunk requests SuperChunk's own
+        // C2ME chunk system is serving. Registered per world start (DH tears its levels down on
+        // exit-to-title just like the GPU backend) and one-shot internally. No-op without DH.
+        dev.superchunk.compat.DistantHorizonsCompat.logBootLine();
+        try {
+            NeoForge.EVENT_BUS.addListener((ServerAboutToStartEvent e) ->
+                    dev.superchunk.compat.DhC2meAccessor.bindIfPresent());
+        } catch (Throwable t) {
+            LOGGER.warn("[SuperChunk] failed to register the Distant Horizons compat hook.", t);
+        }
+
         // Release all OpenCL resources (per-thread queues/kernels/buffers + context)
         // and log the final live-integration density-fill summary on server stop.
         // Registered unconditionally — the handler is a cheap no-op when GPU is off.
@@ -140,6 +153,12 @@ public final class SuperChunk {
                 }
                 try {
                     dev.superchunk.gpu.CLProgramCache.logStats("server stopping");
+                } catch (Throwable ignored) {
+                }
+                try {
+                    // Distant Horizons batch-generation prefetch tally (no-op unless DH's own
+                    // generator actually ran groups through the seam this session).
+                    dev.superchunk.compat.DhWorldGenBridge.logSummary("server stopping");
                 } catch (Throwable ignored) {
                 }
                 // Reset the cache enable flags BEFORE releasing the context. These

@@ -240,28 +240,36 @@ public class C2MEStorageThread extends Thread {
                 future.complete(null);
             } else if (cached.left().isPresent()) {
                 if (scanner != null) {
-                    GlobalExecutors.prioritizedScheduler.schedule(() -> {
-                        try {
-                            cached.left().get().acceptAsRoot(scanner);
-                            future.complete(null);
-                        } catch (Throwable t) {
-                            future.completeExceptionally(t);
-                        }
-                    }, 16);
+                    // SCAN PATH — runs HERE, on this storage thread, NOT on prioritizedScheduler.
+                    // See the note on scheduleChunkRead: a scan future is the one future in this
+                    // class that a worldgen worker BLOCKS on, and prioritizedScheduler IS the
+                    // worldgen worker pool, so scheduling it there deadlocks the pool against
+                    // itself. Scanners are field-selective and cheap, and vanilla's own IOWorker
+                    // likewise parses scans on its IO thread.
+                    try {
+                        cached.left().get().acceptAsRoot(scanner);
+                        future.complete(null);
+                    } catch (Throwable t) {
+                        future.completeExceptionally(t);
+                    }
                 } else {
                     future.complete(cached.left().get());
+                }
+            } else if (scanner != null) {
+                // SCAN PATH — inline, same reasoning as above.
+                try {
+                    NbtIo.parse(new DataInputStream(new ByteArrayInputStream(cached.right().get())),
+                            scanner, NbtAccounter.unlimitedHeap());
+                    future.complete(null);
+                } catch (Throwable t) {
+                    future.completeExceptionally(t);
                 }
             } else {
                 CompletableFuture.supplyAsync(() -> {
                             try {
                                 final DataInputStream input = new DataInputStream(new ByteArrayInputStream(cached.right().get()));
-                                if (scanner != null) {
-                                    NbtIo.parse(input, scanner, NbtAccounter.unlimitedHeap());
-                                    return null;
-                                } else {
-                                    final CompoundTag compound = NbtIo.read(input);
-                                    return compound;
-                                }
+                                final CompoundTag compound = NbtIo.read(input);
+                                return compound;
                             } catch (IOException e) {
                                 SneakyThrow.sneaky(e);
                                 return null; // unreachable
@@ -307,6 +315,32 @@ public class C2MEStorageThread extends Thread {
         }
     }
 
+    /**
+     * Reads a chunk off disk.
+     *
+     * <p><b>A scan ({@code scanner != null}) is parsed INLINE on this storage thread and must never
+     * be handed to {@code prioritizedScheduler} — that is a deadlock, not a preference.</b> The
+     * scan future is the only future this class produces that a caller BLOCKS on: vanilla's
+     * {@code Blender.of()} -> {@code ChunkStorage.isOldChunkAround} -> {@code IOWorker
+     * .isOldChunkAround} joins it, and that join runs on a worldgen worker. When lighting is
+     * externally managed, {@code GlobalExecutors.prioritizedScheduler} IS that same worldgen worker
+     * pool (see GlobalExecutors: the field is null and its sole dereference is @Overwrite-routed to
+     * C2ME's scheduler). So scheduling the parse there makes the pool wait on work only the pool
+     * can run: once enough chunks blend at once, every worker blocks in isOldChunkAround and
+     * nothing ever completes.
+     *
+     * <p>Diagnosed 2026-08-15 on the Forge 1.20.1 port running a 110-mod client: 170/170 workers
+     * blocked in isOldChunkAround, all storage threads idle (they had already dispatched the
+     * parse), server thread parked in ServerChunkCache.getChunk, one tick growing 40s -> 201s.
+     * Triggered by a mod force-loading chunks synchronously from a tick event, which needs an
+     * existing world with old chunks to blend — which is why a fresh-world pregen never reproduces
+     * it, and why this sat latent in both trees.
+     *
+     * <p>Inline is the right home for it: the disk read on the line above already happens on this
+     * thread, scans are field-selective and cheap ({@code CollectFields} short-circuits), and
+     * vanilla's own {@code IOWorker} likewise parses scans on its IO thread. Non-scan reads keep
+     * the prioritized scheduler, since nothing blocks on those.
+     */
     private void scheduleChunkRead(long pos, CompletableFuture<CompoundTag> future, StreamTagVisitor scanner) {
         try {
             final ChunkPos pos1 = new ChunkPos(pos);
@@ -316,15 +350,19 @@ public class C2MEStorageThread extends Thread {
                 future.complete(null);
                 return;
             }
+            if (scanner != null) {
+                try (DataInputStream inputStream = chunkInputStream) {
+                    NbtIo.parse(inputStream, scanner, NbtAccounter.unlimitedHeap());
+                    future.complete(null);
+                } catch (Throwable t) {
+                    future.completeExceptionally(t);
+                }
+                return;
+            }
             CompletableFuture.supplyAsync(() -> {
                 try {
                     try (DataInputStream inputStream = chunkInputStream) {
-                        if (scanner != null) {
-                            NbtIo.parse(inputStream, scanner, NbtAccounter.unlimitedHeap());
-                            return null;
-                        } else {
-                            return NbtIo.read(inputStream);
-                        }
+                        return NbtIo.read(inputStream);
                     }
                 } catch (Throwable t) {
                     SneakyThrow.sneaky(t);
