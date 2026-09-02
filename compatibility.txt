@@ -23,7 +23,8 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for one
                                           found later outside it)
-  Found later, outside this run ....... 2  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 3  (ModernFix, singleplayer only — FIXED;
+                                          Twilight Forest — FIXED;
                                           Better Chunk Loading — INCOMPATIBLE, by design)
   Client-only (N/A on a server) ....... 33
 
@@ -73,6 +74,81 @@ FIXED  (was incompatible; SuperChunk changed to support it)
 
     FIX: ported the missing upstream redirect into MixinTACSCancelSending. Full mechanism and
     proof are in that method's javadoc (redirectChunkTrackingViewSet).
+
+  twilightforest ........ Twilight Forest (4.8.3345) .............. PASS (after fix)
+
+    Reported 2026-08-18: "Exception generating new chunk /
+    java.lang.IllegalStateException: Requested chunk unavailable during world generation" as a chunk
+    IO error report, on an IO-Worker thread, in a large pack containing Twilight Forest 4.8.3345.
+    Requested chunk -2,-1 while generating -2,-2 (distance 1); generating status minecraft:full,
+    dependencies [minecraft:spawn]; maximum allowed status null.
+
+    Root cause was SuperChunk-side, in an upstream C2ME feature SuperChunk turns on by default. The
+    MC-276863 workaround (chunkSystem.suppressGhostMushrooms) walks the post-processing list at
+    CHUNK_SENDING and calls
+    BlockState.canSurvive on every vanilla brown/red mushroom, deleting the ones that fail, using a
+    WorldGenRegion built on ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL). That step's
+    directDependencies() has a single entry, so the region's legal read radius is ZERO and
+    WorldGenRegion.getChunk throws for anything outside the centre chunk. Upstream C2ME ships the
+    option OFF; SuperChunk defaults it ON (it is the companion to player.sendAtChunkSending, which
+    exposes the outer no-tick ring before post-processing), so this surface is ours.
+
+    Vanilla MushroomBlock.canSurvive only reads pos.below(), always inside that radius — which is
+    why the scan has never tripped before. Twilight Forest ASM-hooks that method
+    (twilightforest.asmhooks.BlockHooks#modifySoilDecisionForMushroomBlockSurvivability). Read from
+    the shipped 4.8.3345 bytecode, the hook is:
+
+        if (!soilDecision.isDefault()) return soilDecision;
+        for (int x = -1; x <= 1; x++)
+          for (int z = -1; z <= 1; z++)
+            if (!(x == 0 && z == 0))
+              if (level.getBlockState(pos.offset(x, -1, z)).is(TFBlocks.TWILIGHT_PORTAL))
+                return TriState.TRUE;
+
+    Eight horizontal neighbour reads at y-1. For a mushroom on a chunk-border column that reaches
+    exactly one chunk out — matching "Requested distance: 1" in the report. The throw escaped
+    upgradeToThis and TheChunkSystem.handleTransactionException turned it into
+    reportChunkLoadFailure + MARK_BROKEN — a cosmetic workaround killing the chunk.
+
+    And the shape is not rare. Blocks.BROWN_MUSHROOM and RED_MUSHROOM both declare
+    hasPostProcess(always), so EVERY worldgen-placed mushroom lands in the post-processing list and
+    gets scanned; roughly a quarter of them sit on a border column. Any TF world hits this almost
+    immediately.
+
+    FIX: dev.superchunk.worldgen.GhostMushroomCheck. The canSurvive call is guarded, and any failure
+    is treated as "it survives", i.e. the block is left alone. Deliberately the conservative
+    direction: the scan exists only to DELETE blocks, so a check that could not be evaluated must
+    never delete one. The guard is scoped to the single call, not the loop, so one bad position does
+    not skip the rest of the chunk. Distinct (block, failure, culprit) signatures are logged once at
+    WARN — naming the offending mod frame — capped at 16, the rest at DEBUG. Worst case is the
+    pre-existing vanilla bug: a ghost mushroom near a chunk border for one post-processing round,
+    which is exactly what upstream's default already accepts. Ported to forge-1.20.1 (where the
+    equivalent region reads a 3x3 square, so the same hook needs a 2-chunk reach to trip it).
+
+    VERIFIED 2026-09-01, A/B on an isolated dedicated server, TWO MODS ONLY (SuperChunk 0.3.0 +
+    twilightforest-1.21.1-4.8.3345-universal), NeoForge 21.1.248, seed 8675309, gpu.enabled=false,
+    view/simulation distance 6. No pack, no other mod, no player needed — the spawn-chunk load is
+    enough, because CHUNK_SENDING maps to FullChunkStatus.BLOCK_TICKING and spawn chunks load at
+    ENTITY_TICKING.
+      - PRE-FIX leg (0.3.0 as shipped): "Error upgrading chunk [-1, 7] to 'minecraft:full, Border,
+        ChunkAccess Sending'" -> "Failed to load chunk -1,7" -> debug/chunk-world-*.txt written from
+        IO-Worker-1. Byte-for-byte the reported shape: Requested chunk -2,7 / Generating status
+        minecraft:full / Requested status minecraft:empty / Actual status [out of cache bounds] /
+        Maximum allowed status null / Dependencies [minecraft:spawn] / Requested distance 1. The
+        server NEVER REACHED "Done" — this is a world-load hang, not just a logged error. Killed
+        after 5m30s.
+      - FIXED leg (same world seed, same mods): "Done (3.120s)". One WARN, on the same chunk [-1, 7],
+        at BlockPos{x=-16, y=65, z=113} (x=-16 is a chunk-border column), naming
+        twilightforest.asmhooks.BlockHooks#modifySoilDecisionForMushroomBlockSurvivability as the
+        culprit. Then 768 chunks force-loaded across three separated regions: 0 broken chunks,
+        0 chunk IO reports, 0 ERROR/FATAL lines, clean save-all + stop.
+
+    Also applies to: any mod whose MushroomBlock.canSurvive / canSustainPlant hook reads outside the
+    chunk being sent. Set c2me.chunkSystem.suppressGhostMushrooms=false to switch the scan off.
+
+    PORTED: forge-1.20.1 and neo-1.21.11 both carry the guard. forge-1.20.1 was never crashing on
+    TF specifically — its region is the 3x3 holder square (read radius 1), so TF's one-chunk reach
+    fits; the guard is there for hooks that reach further.
 
   radium ................ Radium (a Lithium fork) ................. PASS (after fix)
 

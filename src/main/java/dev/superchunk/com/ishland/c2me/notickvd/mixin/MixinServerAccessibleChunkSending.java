@@ -14,6 +14,7 @@ import dev.superchunk.com.ishland.flowsched.scheduler.Cancellable;
 import dev.superchunk.com.ishland.flowsched.scheduler.ItemHolder;
 import dev.superchunk.com.ishland.flowsched.scheduler.KeyStatusPair;
 import dev.superchunk.com.ishland.flowsched.util.Assertions;
+import dev.superchunk.worldgen.GhostMushroomCheck;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import it.unimi.dsi.fastutil.shorts.ShortList;
@@ -93,7 +94,11 @@ public class MixinServerAccessibleChunkSending {
                         BlockState blockState = chunk.getBlockState(blockPos);
 
                         if (blockState.getBlock() == Blocks.BROWN_MUSHROOM || blockState.getBlock() == Blocks.RED_MUSHROOM) {
-                            if (!blockState.canSurvive(chunkRegion, blockPos)) {
+                            // SuperChunk: guarded. chunkRegion has a read radius of 0 (the minecraft:full
+                            // step declares one direct dependency), so a modded canSurvive hook that reads a
+                            // neighbouring chunk throws and would mark the chunk broken - Twilight Forest
+                            // 4.8.3345 does exactly that. See GhostMushroomCheck.
+                            if (!GhostMushroomCheck.canSurvive(blockState, chunkRegion, blockPos, chunkPos)) {
                                 blocksToRemove.add(blockPos);
                             }
                         }
