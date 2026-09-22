@@ -1,6 +1,7 @@
 package dev.superchunk.com.ishland.c2me.fixes.worldgen.threading_issues.mixin.threading_detections.random_instances;
 
 import dev.superchunk.com.ishland.c2me.fixes.worldgen.threading_issues.common.CheckedThreadLocalRandom;
+import dev.superchunk.compat.SkeinCompat;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.levelgen.RandomSupport;
@@ -25,7 +26,11 @@ public class MixinWorld {
             }
             clazz = clazz.getSuperclass();
         }
-        return new CheckedThreadLocalRandom(RandomSupport.generateUniqueSeed(), () -> this.thread);
+        // A dimension barrier transfers this level's exclusive ownership to its
+        // Skein worker. Keep the same random stream and reject every other worker.
+        return new CheckedThreadLocalRandom(RandomSupport.generateUniqueSeed(),
+                () -> SkeinCompat.isDimensionTicker((Level) (Object) this)
+                        ? Thread.currentThread() : this.thread);
     }
 
 }

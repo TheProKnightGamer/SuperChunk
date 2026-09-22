@@ -6,7 +6,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import dev.superchunk.compat.SkeinCompat;
 
 import java.util.ConcurrentModificationException;
 
@@ -15,10 +18,15 @@ public class MixinMinecraftServer {
 
     @Shadow @Final private Thread serverThread;
 
+    @Inject(method = "tickChildren", at = @At("HEAD"), require = 1)
+    private void superchunk$configureSkein(CallbackInfo ci) {
+        SkeinCompat.beforeTickChildren(this.serverThread);
+    }
+
     @Inject(method = "saveAllChunks", at = @At("HEAD"))
     private void preventAsyncSave(CallbackInfoReturnable<Boolean> cir) {
-        if (Thread.currentThread() != this.serverThread) {
-            final ConcurrentModificationException exception = new ConcurrentModificationException("Attempted to call MinecraftServer#saveAllChunks async");
+        if (Thread.currentThread() != this.serverThread || SkeinCompat.isDimensionPhaseActive()) {
+            final ConcurrentModificationException exception = new ConcurrentModificationException("Attempted to call MinecraftServer#saveAllChunks outside the exclusive server-thread phase");
             exception.printStackTrace();
             throw exception;
         }
@@ -26,8 +34,8 @@ public class MixinMinecraftServer {
 
     @Inject(method = "saveEverything", at = @At("HEAD"))
     private void preventAsyncSaveAll(CallbackInfoReturnable<Boolean> cir) {
-        if (Thread.currentThread() != this.serverThread) {
-            final ConcurrentModificationException exception = new ConcurrentModificationException("Attempted to call MinecraftServer#saveEverything async");
+        if (Thread.currentThread() != this.serverThread || SkeinCompat.isDimensionPhaseActive()) {
+            final ConcurrentModificationException exception = new ConcurrentModificationException("Attempted to call MinecraftServer#saveEverything outside the exclusive server-thread phase");
             exception.printStackTrace();
             throw exception;
         }

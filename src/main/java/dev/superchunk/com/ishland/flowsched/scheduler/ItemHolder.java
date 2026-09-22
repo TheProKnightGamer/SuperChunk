@@ -391,6 +391,53 @@ public class ItemHolder<K, V, Ctx, UserData> {
         return this.key;
     }
 
+    /**
+     * SuperChunk: fail every still-pending future strictly above {@code current} with
+     * {@link #UNLOADED_EXCEPTION}, because this holder is {@link #FLAG_BROKEN} and will never reach
+     * those statuses.
+     *
+     * <p>Without this, a broken item's higher-status futures are simply abandoned. Removal and
+     * downgrade both complete them ({@code setStatus} above, and {@code releaseTicket}), but the
+     * broken path did not — {@code StatusAdvancingScheduler.tickHandle0} just returns when it sees
+     * the flag. Anything waiting on one of those futures then waits forever. In SuperChunk that is
+     * the server thread: a chunk whose upgrade threw gets MARK_BROKEN, but its vanilla ticket level
+     * still satisfies {@code ServerChunkCache.chunkAbsent}, so {@code getChunk} walks into
+     * {@code managedBlock(future::isDone)} on a future nothing will ever complete and the watchdog
+     * kills the server 60s later with no indication of the cause (GitHub issue #7; reproduced
+     * locally by corrupting a chunk in a region file).
+     *
+     * <p>{@link #UNLOADED_EXCEPTION} specifically, not the original worldgen throwable:
+     * {@code NewChunkHolderVanillaInterface.wrapOptionalChunkFuture} maps that one exception to
+     * {@code ChunkResult} "Unloaded chunk" and sneaky-rethrows anything else. Mapping it to
+     * "unloaded" is what vanilla does with a chunk that failed to load — a non-creating
+     * {@code getChunk} gets null, a creating one throws "Chunk not there when requested" — so the
+     * failure is immediate and the earlier "Error upgrading chunk" line in the log is the diagnosis.
+     *
+     * <p>Futures are collected under the monitor but completed outside it: completion runs dependent
+     * stages inline, and those reach back into this holder.
+     *
+     * <p>Not a permanent state. {@code FLAG_BROKEN} is cleared when the item finally unloads
+     * ({@code ReadFromDisk(Async).downgradeFromThis}), and the downgrade path in {@code setStatus}
+     * above replaces every {@code isDone()} future with a fresh one, so a later reload starts clean.
+     */
+    void failPendingFuturesAbove(ItemStatus<K, V, Ctx> current) {
+        ArrayList<CompletableFuture<Void>> toFail = null;
+        synchronized (this) {
+            for (int i = current.ordinal() + 1; i < this.futures.length; i++) {
+                final CompletableFuture<Void> future = this.futures[i];
+                if (future != UNLOADED_FUTURE && !future.isDone()) {
+                    if (toFail == null) toFail = new ArrayList<>();
+                    toFail.add(future);
+                }
+            }
+        }
+        if (toFail != null) {
+            for (int i = 0, size = toFail.size(); i < size; i++) {
+                toFail.get(i).completeExceptionally(UNLOADED_EXCEPTION);
+            }
+        }
+    }
+
     public CompletableFuture<Void> getFutureForStatus(ItemStatus<K, V, Ctx> status) {
         synchronized (this) {
             return this.futures[status.ordinal()].thenApply(Function.identity());

@@ -32,8 +32,9 @@ pregen with no players.
 So: merging the upstream mods and tuning them is worth **+34%** over running them separately, and
 the GPU offload is worth a further **+50%** on top of that.
 
-No faults, crashes, or OOMs in any run. **The generated terrain is identical to
-vanilla's** — verified bit-exact over hundreds of millions of blocks.
+No faults, crashes, or OOMs in any run. Generation is checked against vanilla over
+hundreds of millions of blocks. The default fp32 compact-ID mode can produce rare
+block differences; see **Parity** below.
 
 Round 10 (2026-08-07) adds **+12.6%** on top of that, measured head-to-head at radius 3072
 (148,225 chunks) with each build at its own best settings — 1,090 → 1,228 chunks/sec steady-state,
@@ -78,6 +79,15 @@ provable rather than tuned:
 **Do not also install standalone C2ME, ScalableLux, Noisium, or VMP** — they're
 inside this jar. Standalone **Lithium is fine**: if one is present, SuperChunk's
 bundled copy stands down and the installed one takes over.
+
+**Skein:** SuperChunk supports Skein's parallel dimension ticking. It automatically
+disables Skein's parallel entity, random-block, block-entity, scheduled-tick, and
+saving phases in the live configuration to preserve the bundled optimizations'
+threading assumptions. The config file is unchanged, and the compatibility settings
+are reapplied after reloads. See [compatibility.txt](compatibility.txt) for the
+tested versions and limitations. Command blocks and command minecarts execute
+after parallel dimension ticking within the same server tick, keeping global
+selectors and conditional command chains together on the server thread.
 
 ## What's inside
 
@@ -140,6 +150,13 @@ by default) lets the GPU pick block identity; it was shipped only after a flip
 census showed zero divergence across 455.9M blocks. Strict mode is one flag
 away: `-Dsuperchunk.gpu.compactIds=off`.
 
+An additional seed tested on 2026-09-21 found one stone/air difference in
+143,200,256 compared blocks with fp32 decisions, reproduced at the same coordinate
+in both the original and optimized jars. The original zero-flip census therefore
+does not establish universal equivalence. See
+[`analysis/optimization-2026-09-21.md`](analysis/optimization-2026-09-21.md)
+for the optimization results and precision checks.
+
 ## Building
 
 ```bash
@@ -154,6 +171,9 @@ Install the plain jar, not the `-core` one — that rides inside it.
 - `GPU-AHEAD-PLAN.md` — GPU decide-chain design and parity gates
 - `MERGE_NOTES.md` — how the five upstream mods were merged
 - `analysis/` — per-engine merge analyses
+- `analysis/optimization-2026-09-21.md` — CPU/GPU consumer optimizations, regression checks, and fresh-world benchmarks
+- `analysis/optimization-round2-2026-09-21.md` — further biome, aquifer, surface, serialization, and GPU allocation improvements
+- `analysis/publication-review-2026-09-22.md` — independent review, Skein compatibility, and publication checks
 - `dist/README.md` — end-user install notes
 
 ## License

@@ -1,6 +1,7 @@
 param(
     [int]$Radius = 160,
-    [int]$MaxGenSeconds = 240
+    [int]$MaxGenSeconds = 240,
+    [string]$JavaHome = $env:JAVA_HOME
 )
 $ErrorActionPreference = 'Continue'
 $Root = (Join-Path $PSScriptRoot '..')
@@ -8,7 +9,8 @@ $RconPy = Join-Path $Root 'bench\rcon.py'
 $WorldDir = Join-Path $Root 'run\world'
 $RegionDir = Join-Path $WorldDir 'region'
 $Toml = Join-Path $Root 'run\config\c2me.toml'
-$env:JAVA_HOME = 'C:\Program Files\Java\jdk-17.0.17.10-hotspot'
+# gradlew.bat uses JAVA_HOME/bin/java.exe, or java.exe on PATH when unset.
+$env:JAVA_HOME = $JavaHome
 
 function Log($m){ Write-Host ("[acc] {0}" -f $m) }
 function Rcon([string[]]$cmds){

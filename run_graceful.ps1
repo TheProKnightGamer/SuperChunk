@@ -1,5 +1,9 @@
-param([string]$LogPath = (Join-Path $PSScriptRoot 'cs-verify.log'))
-$env:JAVA_HOME='C:\Program Files\Java\jdk-17.0.17.10-hotspot'
+param(
+  [string]$LogPath = (Join-Path $PSScriptRoot 'cs-verify.log'),
+  [string]$JavaHome = $env:JAVA_HOME
+)
+# gradlew.bat uses JAVA_HOME/bin/java.exe, or java.exe on PATH when unset.
+$env:JAVA_HOME = $JavaHome
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = (Join-Path $PSScriptRoot 'gradlew.bat')
 $psi.Arguments = ("-p `"$PSScriptRoot`" runServer --console=plain")
