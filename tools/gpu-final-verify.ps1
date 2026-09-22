@@ -4,10 +4,12 @@
    B) requireFp64=true production guard: GPU must NOT engage on a non-fp64 device.
   Each phase boots, captures the relevant log lines, stops gracefully.
 #>
+param([string]$JavaHome = $env:JAVA_HOME)
 $ErrorActionPreference='Continue'
 $Root=(Join-Path $PSScriptRoot '..')
 $Cfg="$Root\run\config\superchunk-gpu.properties"
-$env:JAVA_HOME='C:\Program Files\Java\jdk-17.0.17.10-hotspot'
+# gradlew.bat uses JAVA_HOME/bin/java.exe, or java.exe on PATH when unset.
+$env:JAVA_HOME = $JavaHome
 function KillJava(){ Get-CimInstance Win32_Process -Filter "Name='java.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and ($_.CommandLine -match 'superchunk' -or $_.CommandLine -match 'forgeserverdev') } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} } }
 function Rcon([string[]]$c){ $a=@('--host','127.0.0.1','--port','25575','--password','bench')+$c; (& python "$Root\bench\rcon.py" @a 2>&1) -join "`n" }
 

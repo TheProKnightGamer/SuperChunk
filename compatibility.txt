@@ -59,6 +59,60 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  skein ................. Skein ................................. dimension threading only
+
+    SuperChunk's per-level async catchers now recognise Skein's exclusive dimension owner.
+    A worker's class alone does not qualify: the caller must own the exact level, be outside a
+    deferring in-level task, and be inside Skein's active dimension barrier. Skein and dimension
+    threading must also be enabled, with the incompatible parallel phases disabled. Whole-server
+    saveAllChunks/saveEverything require the server thread and an inactive dimension barrier.
+    C2ME's opportunistic all-level autosave scan also pauses while dimensions tick in parallel.
+
+    The same ownership check covers the chunk executor's thread identity and C2ME's checked
+    per-level random source. This lets the exclusive dimension owner finish synchronous chunk
+    loads without failing status-transition thread assertions, and retains the level's original
+    random stream. C2ME's synchronous-load instrumentation also preserves managedBlock executor
+    pumping on a dimension owner; skipping it left command-block terrain queries waiting forever
+    at the following chunk-future join. Bundled Lithium's chunk load/unload callbacks and loaded
+    block-entity lookup accept the same exclusive owner. Unrelated workers keep the normal
+    thread checks.
+
+    Command-block ticks and powered command-minecart activations wait until the dimension barrier
+    closes, then run on the server thread in the same server tick. The whole transaction is
+    deferred: global entity selection, cross-dimension teleports, success counts, conditional
+    command chains, repeating-block scheduling and minecart cooldown updates remain together.
+    Deferring only an entity's removal would leave a transfer partially applied and would not
+    protect the earlier selector reads. This moves command effects to the end of the parallel
+    dimension phase; it does not grant workers access to another dimension.
+
+    Skein's Lithium detector does not recognise SuperChunk's relocated Lithium. To preserve its
+    one-thread-per-level assumptions, SuperChunk pins SkeinConfig.Live entities, randomTicks,
+    blockEntities, scheduledTicks and parallelSaving to false immediately after each configuration
+    refresh, including startup and /skein reload from tick functions. MinecraftServer.tickChildren
+    entry reapplies the pins after ServerTickEvent.Pre and before level dispatch. Skein's
+    configuration file and dimensions setting are unchanged. A warning explains any suppressed
+    parallel phases.
+
+    Any remaining reload request during an active dimension barrier is deferred through Skein's
+    stale flag to the next server-tick boundary. Both configuration refresh and registry-set
+    rebuilds wait until workers finish; /skein reload reports a queued request when called there.
+    Unsafe parallel phases and shared registry sets cannot be restored underneath running workers.
+
+    The bridge uses reflective ownership/configuration APIs without a required Skein dependency,
+    recognising both com.theproknightgamr.skein and the earlier com.asher.skein package names.
+    A detected Skein version with an unknown API fails closed with an explicit compatibility
+    error; no worker exemption is granted by guessing. This support is limited to dimension
+    threading; parallel work within a level and parallel chunk saving remain disabled while
+    SuperChunk is installed.
+
+    VALIDATION: 97 ownership/configuration/command-queue checks pass. Packaged Skein 1.0.0 on
+    NeoForge 21.1.248 passes fresh generation (1,089 requested chunks), save/restart, tick-function
+    and command-block reloads, three-dimension hopper transfers, local and cross-dimension
+    spreadplayers commands, a conditional command chain, and a powered command minecart.
+    No captured errors or quarantined dimensions occurred. Both known Skein package namespaces
+    boot successfully. Reproduce with tools/verify-skein-server.py; artifact hashes and limits
+    are in analysis/publication-review-2026-09-22.md. This is not a general modpack guarantee.
+
   modernfix ............. ModernFix (singleplayer only) ........... PASS (after fix)
 
     Reported 2026-08-05: with ModernFix's mixin.perf.suspend_integrated_server_during_load (ON by
@@ -149,6 +203,79 @@ FIXED  (was incompatible; SuperChunk changed to support it)
     PORTED: forge-1.20.1 and neo-1.21.11 both carry the guard. forge-1.20.1 was never crashing on
     TF specifically — its region is the 3x3 holder square (read radius 1), so TF's one-chunk reach
     fits; the guard is there for hooks that reach further.
+
+  (any mod) ............. broken chunk = server hang ............. FIXED (hardening)
+
+    GitHub issue #7 ("Watchdog Crash"). The reported dump has the server thread parked in
+    ServerChunkCache.getChunk while every c2me worker is idle on its semaphore — no work anywhere,
+    yet the tick never ends and the watchdog kills the server after 60s with nothing in the report
+    naming a cause.
+
+    Root cause is SuperChunk-side and mod-agnostic. When a chunk upgrade throws,
+    TheChunkSystem.handleTransactionException returns MARK_BROKEN and FlowSched sets FLAG_BROKEN.
+    From then on StatusAdvancingScheduler.tickHandle0 simply RETURNED for that holder — it never
+    completed the futures for the statuses the item can no longer reach, not even exceptionally
+    (removal and downgrade do complete them, with UNLOADED_EXCEPTION; the broken path did not).
+    Meanwhile chunkAbsent's redirected vanillaIf$getManagedLevel still reports the vanilla ticket
+    level, so ServerChunkCache.getChunk walks straight into managedBlock(future::isDone) on a future
+    nothing will ever complete. FLAG_BROKEN is cleared only when the item finally unloads, so a
+    broken chunk held by a ticket stays broken and the park is permanent.
+
+    Any mod that can make an upgrade throw turns into this hang. Already seen twice in the wild:
+    Twilight Forest's mushroom canSurvive hook (see its entry above) and Structure Layout Optimizer
+    via JigsawShapeTracker.seedTopLevel on an empty VoxelShape.
+
+    FIX: ItemHolder.failPendingFuturesAbove — when the scheduler sees FLAG_BROKEN it fails every
+    still-pending future above the current status with UNLOADED_EXCEPTION, which
+    NewChunkHolderVanillaInterface maps to ChunkResult "Unloaded chunk". That is what vanilla does
+    with a chunk that failed to load: a non-creating getChunk gets null, a creating one throws
+    "Chunk not there when requested", and the preceding "Error upgrading chunk [x, z]" line in the
+    log is the diagnosis. Not permanent — the flag clears on unload and the downgrade path in
+    ItemHolder.setStatus replaces every completed future, so a later reload starts clean.
+
+    Healthy in-flight chunks retain vanilla's unlimited wait. An optional diagnostic budget
+    (-Dsuperchunk.chunkSystem.nonCreatingGetChunkBudgetMillis; default -1 = unlimited, 0 = no wait)
+    drains main-thread tasks until it expires and then returns null. It is disabled by default:
+    Lithium's ChunkAwareBlockCollisionSweeper is the create=false caller in the reported dump,
+    and treats null as an empty chunk, so timing out a healthy but slow load can let entities fall
+    through terrain. The broken-holder future completion above fixes the reported hang directly.
+
+    VERIFIED 2026-09-15, A/B on one identical world with 128 bytes of chunk (200,200) corrupted in
+    r.6.6.mca, recoverFromErrors at its default false:
+      - PRE-FIX leg: "Failed to load chunk 200,200", then `execute if block` inside that chunk got
+        NO RESPONSE — RCON timed out at 25s, and so did a following `time query gametime` and even
+        `stop`. The server thread was parked exactly as in the issue-#7 dump.
+      - FIXED leg (same corrupted world): the same command returned in 0.0s with "An unexpected
+        error occurred trying to execute that command Chunk not there when requested: Unloaded
+        chunk", `time query gametime` answered normally, and `stop` shut down cleanly.
+
+  distanthorizons ....... Distant Horizons (chunk-IO thread leak) .. PASS (after fix)
+
+    Reported 2026-09-13 as GitHub issue #7 ("Watchdog Crash") and, in the same shape, on CurseForge
+    as "the game slowly freezes, somehow there is a memory leak". The watchdog dump has the server
+    thread parked in ServerChunkCache.getChunk and, further down, 435 live "C2ME Storage #n"
+    threads. Their thread ids interleave with repeated triplets of DH level threads (DH-Update
+    Propagate QueueThread / DH-Request Module TickerThread / DH-DataSource Request TickerThread):
+    ~145 rebuilt DH levels, each leaving behind a chunk/poi/entity storage that is never closed.
+
+    Root cause was SuperChunk-side amplification, not the leak itself. Every ChunkStorage /
+    SimpleRegionStorage constructor is redirected (chunkio.mixin.Mixin*Storage) to build a
+    C2MEStorageThread, which eagerly started one dedicated OS thread and kept it parked for the
+    object's lifetime. Vanilla's IOWorker instead shares Util.ioPool(), a cached pool whose threads
+    expire after 60s — so the same unclosed-storage pattern costs vanilla a few idle objects and
+    cost us hundreds of threads plus their reserved stacks.
+
+    FIX: C2MEStorageThread no longer extends Thread. The worker is created on the first task and
+    retires after 60s idle (-Dsuperchunk.io.storageIdleRetireMillis, 0 disables); the next task
+    transparently starts a fresh one, and close() starts one on purpose so the final flush still
+    runs after a retirement. An abandoned storage now costs no thread at all, matching vanilla's
+    shape. A one-shot WARN fires at 64 concurrent storages (-Dsuperchunk.io.storageLeakWarnAt)
+    naming the situation, since the leak itself is upstream and worth reporting there.
+
+    VERIFIED 2026-09-15 on the dev dedicated server with the retire threshold shortened to 3s:
+    7 storage threads right after a save -> 0 after idling -> 6 back and "Saved the game" on the
+    next save -> 0 after idling again -> /stop returned immediately, with all 9 storages logging
+    "Storage thread C2ME Storage #n stopped" and "All dimensions are saved".
 
   radium ................ Radium (a Lithium fork) ................. PASS (after fix)
 

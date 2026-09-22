@@ -98,6 +98,10 @@ public final class SuperChunk {
         // Registered unconditionally — the handler is a cheap no-op when GPU is off.
         try {
             NeoForge.EVENT_BUS.addListener((ServerStoppingEvent e) -> {
+                if (Boolean.getBoolean("superchunk.worldgen.biomeQuartCache.verify")) {
+                    dev.superchunk.worldgen.BiomeQuartCache.reportVerify();
+                }
+                dev.superchunk.worldgen.FirstPositionalFloat.reportVerify();
                 try {
                     GpuFillStats.logSummary("server stopping");
                 } catch (Throwable ignored) {

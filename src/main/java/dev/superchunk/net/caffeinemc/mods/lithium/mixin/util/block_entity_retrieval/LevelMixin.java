@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.mixin.util.block_entity_retrieval;
 
+import dev.superchunk.compat.SkeinCompat;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.world.blockentity.BlockEntityGetter;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
@@ -34,7 +35,8 @@ public abstract class LevelMixin implements BlockEntityGetter, LevelAccessor {
     @Override
     public BlockEntity lithium$getLoadedExistingBlockEntity(BlockPos pos) {
         if (!this.isOutsideBuildHeight(pos)) {
-            if (this.isClientSide || Thread.currentThread() == this.thread) {
+            if (this.isClientSide || Thread.currentThread() == this.thread
+                    || SkeinCompat.isDimensionTicker((Level) (Object) this)) {
                 ChunkAccess chunk = this.getChunk(SectionPos.blockToSectionCoord(pos.getX()), SectionPos.blockToSectionCoord(pos.getZ()), ChunkStatus.FULL, false);
                 if (chunk != null) {
                     return chunk.getBlockEntity(pos);

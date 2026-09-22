@@ -2,6 +2,7 @@ package dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.aquifer;
 
 import dev.superchunk.com.ishland.c2me.opts.worldgen.general.common.random_instances.RandomUtils;
 import dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCellCache;
+import dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferColumnCache;
 import dev.superchunk.gpu.aquifer.AquiferGpuVerify;
 import dev.superchunk.gpu.aquifer.BlockIdCensus;
 import net.minecraft.core.BlockPos;
@@ -219,13 +220,13 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
     private static final LongAccumulator scAdaptiveBugMaxGap = new LongAccumulator(Long::max, Long.MIN_VALUE);
     @Unique
     private static final AtomicLong scAdaptiveNextLogAt = new AtomicLong(2_000_000L);
-    // per-instance (per-chunk, single-thread) memo of columnCeiling(x,z); primitive map, no boxing
-    // (called per air block, so boxing here dominated the per-block cost). MIN_VALUE = absent.
+    // Per-instance memo of columnCeiling(x,z). The usual 3x3 aquifer lattice has only
+    // four candidate column pairs: direct indexing avoids hashing on every pair switch.
     @Unique
-    private it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap scColCeilingCache;
+    private ScAquiferColumnCache scColCeilingCache;
     // Single-entry last-(gx,gz) memo: the block filler walks many consecutive blocks sharing
     // the same cell-column (a whole vertical column, and 16 blocks in x/z), so this short-
-    // circuits the hashmap+key work for the large majority of scColumnCeiling calls. Result
+    // circuits the table lookup for consecutive scColumnCeiling calls. Result
     // is identical (pure perf). scLastCeilingValid distinguishes "unset" from a 0 ceiling.
     @Unique private int scLastGx, scLastGz, scLastCeiling;
     @Unique private boolean scLastCeilingValid;
@@ -342,16 +343,28 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
         if (this.scLastCeilingValid && gx == this.scLastGx && gz == this.scLastGz) {
             return this.scLastCeiling;
         }
+        return this.scColumnCeilingForGrid(gx, gz);
+    }
+
+    @Unique
+    private int scColumnCeilingForGrid(int gx, int gz) {
         if (this.scColCeilingCache == null) {
-            this.scColCeilingCache = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
-            this.scColCeilingCache.defaultReturnValue(Integer.MIN_VALUE);
+            this.scColCeilingCache = new ScAquiferColumnCache(this.minGridX, this.minGridZ,
+                    this.gridSizeX, this.gridSizeZ);
         }
-        long key = (((long) gx) << 32) ^ (gz & 0xFFFFFFFFL);
-        int cached = this.scColCeilingCache.get(key);
+        int cached = this.scColCeilingCache.get(gx, gz);
         if (cached != Integer.MIN_VALUE) {
             scRememberCeiling(gx, gz, cached);
             return cached;
         }
+        int maxLevel = this.scComputeColumnCeiling(gx, gz);
+        this.scColCeilingCache.put(gx, gz, maxLevel);
+        scRememberCeiling(gx, gz, maxLevel);
+        return maxLevel;
+    }
+
+    @Unique
+    private int scComputeColumnCeiling(int gx, int gz) {
         int sizeY = this.aquiferLocationCache.length / (this.gridSizeX * this.gridSizeZ);
         int maxLevel;
         if (SC_CELL_CACHE) {
@@ -369,8 +382,6 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
                 }
             }
         }
-        this.scColCeilingCache.put(key, maxLevel);
-        scRememberCeiling(gx, gz, maxLevel);
         return maxLevel;
     }
 

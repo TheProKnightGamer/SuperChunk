@@ -146,6 +146,11 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
         Assertions.assertTrue(holder.getStatus() == current);
         if (current.ordinal() < nextStatus.ordinal()) {
             if ((holder.getFlags() & ItemHolder.FLAG_BROKEN) != 0) {
+                // This item is broken and will never reach nextStatus. Fail the futures for it and
+                // everything above instead of abandoning them, or every waiter parks forever — for
+                // SuperChunk that means the server thread inside ServerChunkCache.getChunk until the
+                // watchdog fires. See ItemHolder#failPendingFuturesAbove.
+                holder.failPendingFuturesAbove(current);
                 return;
             }
 //            holder.submitOp(CompletableFuture.runAsync(() -> advanceStatus0(holder, nextStatus, key), getBackgroundExecutor()));
