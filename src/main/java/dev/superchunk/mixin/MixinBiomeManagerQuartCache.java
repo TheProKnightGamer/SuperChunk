@@ -53,11 +53,11 @@ public abstract class MixinBiomeManagerQuartCache {
 
     /** 0 = not yet decided, 1 = caching, -1 = pass-through (non-worldgen manager). */
     @Unique
-    private int superchunk$mode;
+    private volatile int superchunk$mode;
     @Unique
     private BiomeQuartCache superchunk$cache;
     @Unique
-    private int superchunk$generation;
+    private long superchunk$generation;
     /**
      * The thread the table was bound on. A {@code WorldGenRegion} is driven by a single worker, so
      * binding once keeps the hot path free of ThreadLocal lookups — but the assumption is CHECKED
@@ -66,6 +66,22 @@ public abstract class MixinBiomeManagerQuartCache {
      */
     @Unique
     private Thread superchunk$owner;
+
+    /** Publish the owner, table and ticket together before enabling the fast path. */
+    @Unique
+    private synchronized void superchunk$initializeCache() {
+        if (superchunk$mode != 0) {
+            return;
+        }
+        if (SUPERCHUNK$ENABLED && this.noiseBiomeSource instanceof WorldGenRegion) {
+            superchunk$cache = BiomeQuartCache.local();
+            superchunk$generation = superchunk$cache.claimGeneration();
+            superchunk$owner = Thread.currentThread();
+            superchunk$mode = 1;
+        } else {
+            superchunk$mode = -1;
+        }
+    }
 
     @SuppressWarnings("unchecked")
     @WrapOperation(
@@ -76,21 +92,19 @@ public abstract class MixinBiomeManagerQuartCache {
     private Holder<Biome> superchunk$cacheQuartBiome(BiomeManager.NoiseBiomeSource source,
                                                      int x, int y, int z,
                                                      Operation<Holder<Biome>> original) {
-        if (superchunk$mode == 0) {
-            superchunk$mode = (SUPERCHUNK$ENABLED && this.noiseBiomeSource instanceof WorldGenRegion) ? 1 : -1;
-            if (superchunk$mode == 1) {
-                // A WorldGenRegion is driven by one worker thread, so binding that thread's table
-                // and a private generation once is safe and keeps the hot path free of ThreadLocal
-                // lookups.
-                superchunk$cache = BiomeQuartCache.local();
-                superchunk$generation = superchunk$cache.claimGeneration();
-                superchunk$owner = Thread.currentThread();
-            }
+        int mode = superchunk$mode;
+        if (mode == 0) {
+            superchunk$initializeCache();
+            mode = superchunk$mode;
         }
-        if (superchunk$mode < 0 || superchunk$owner != Thread.currentThread()) {
+        if (mode < 0 || superchunk$owner != Thread.currentThread()) {
             return original.call(source, x, y, z);
         }
-        long encoded = BiomeQuartCache.encode(superchunk$generation, x, y, z);
+        if (!superchunk$cache.isCurrentGeneration(superchunk$generation)) {
+            superchunk$generation = superchunk$cache.claimGeneration();
+        }
+        long generation = superchunk$generation;
+        long encoded = BiomeQuartCache.encode(generation, x, y, z);
         if (encoded == BiomeQuartCache.UNCACHEABLE) {
             return original.call(source, x, y, z);
         }
@@ -107,7 +121,9 @@ public abstract class MixinBiomeManagerQuartCache {
         }
         Holder<Biome> value = original.call(source, x, y, z);
         // A null answer is not cached: it would be indistinguishable from a miss.
-        if (value != null) {
+        // A modded source can nest other managers' lookups and wrap this table while
+        // resolving a miss. Do not insert the outer result under a now-reused key.
+        if (value != null && superchunk$cache.isCurrentGeneration(generation)) {
             superchunk$cache.put(encoded, value);
         }
         return value;

@@ -61,10 +61,11 @@ public class ExecutorManager {
      * @return {@code true} if the lock is acquired, {@code false} otherwise.
      */
     boolean tryLock(Task task) {
+        LockToken[] lockTokens = task.lockTokens();
+        if (lockTokens.length == 0) return true;
         retry:
         while (true) {
             final FreeableTaskList listenerSet = new FreeableTaskList();
-            LockToken[] lockTokens = task.lockTokens();
             for (int i = 0; i < lockTokens.length; i++) {
                 LockToken token = lockTokens[i];
                 final FreeableTaskList present = this.lockListeners.putIfAbsent(token, listenerSet);

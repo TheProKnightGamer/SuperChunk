@@ -72,7 +72,32 @@ public class ServerBlockTicking extends NewChunkStatus {
                         final LevelChunk chunk = (LevelChunk) context.holder().getItem().get().chunk();
                         chunk.postProcessGeneration();
                         ServerLevel serverWorld = ((IThreadedAnvilChunkStorage) context.tacs()).getWorld();
-                        chunk.registerTickContainerInLevel(serverWorld);
+                        // Vanilla ChunkMap.prepareTickingChunk does postProcessGeneration() then
+                        // startTickingChunk() -> LevelChunk.unpackTicks(gameTime), which drains the
+                        // chunk's SAVED ticks (LevelChunkTicks.pendingTicks, filled from the region
+                        // NBT on load and from ProtoChunk.unpackBlockTicks on generation) into the
+                        // live queues. Upstream C2ME does the same here (Yarn spells the method
+                        // ServerWorld.disableTickSchedulers). The 1.21.1 port mistranslated it into
+                        // registerTickContainerInLevel (Yarn addChunkTickSchedulers) -- which is a
+                        // different method, and is already done at SERVER_ACCESSIBLE -- so unpack()
+                        // never ran anywhere and every saved tick was stranded.
+                        //
+                        // This is not merely "saved ticks are late" -- it makes those positions
+                        // permanently unschedulable. LevelChunkTicks' List constructor pre-seeds
+                        // `ticksPerPosition` with a ScheduledTick.probe for every saved tick, and
+                        // schedule() is a no-op when `ticksPerPosition.add` returns false. Entries
+                        // leave that set only via poll()/removeIf, and a tick that was never unpacked
+                        // is never in `tickQueue`, so it can never be polled. save() then rewrites the
+                        // stranded ticks to disk, so it survives restarts and accumulates. (Vanilla's
+                        // own collections -- the bundled Lithium world.tick_scheduler rewrite is in
+                        // LITHIUM_FORCE_DISABLED and never applies.)
+                        //
+                        // Broken-tree leaves are the visible symptom (GitHub issue #6): the leaves'
+                        // LeavesBlock.updateShape -> scheduleTick is silently dropped, DISTANCE never
+                        // reaches 7, isRandomlyTicking() stays false and they never decay. Verified
+                        // A/B on one identical saved world: without this line the leaves stay at
+                        // distance=1 and cannot be rescheduled; with it they reach distance=7 on load.
+                        serverWorld.startTickingChunk(chunk);
                         sendChunkToPlayer(context);
                         ((IThreadedAnvilChunkStorage) context.tacs()).getTotalChunksLoadedCount().incrementAndGet(); // never decremented in vanilla
                         if (LateModStatuses.fabric_lifecycle_events_v1_CHUNK_LEVEL_TYPE_CHANGE) {

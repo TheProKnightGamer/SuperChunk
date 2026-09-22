@@ -2,10 +2,8 @@ package dev.superchunk.com.ishland.flowsched.scheduler;
 
 import dev.superchunk.com.ishland.flowsched.util.Assertions;
 
-import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 public class TicketSet<K, V, Ctx> {
 
@@ -36,9 +34,9 @@ public class TicketSet<K, V, Ctx> {
      * Not thread-safe
      */
     public void addUnchecked(ItemTicket<K, V, Ctx> ticket) {
-        ItemStatus<K, V, Ctx> targetStatus = ticket.getTargetStatus();
-        this.status2TicketsSize[targetStatus.ordinal()] ++;
-        this.updateTargetStatus();
+        final int ordinal = ticket.getTargetStatus().ordinal();
+        this.status2TicketsSize[ordinal] ++;
+        this.updateTargetStatus(ordinal);
     }
 
     public boolean checkRemove(ItemTicket<K, V, Ctx> ticket) {
@@ -51,13 +49,25 @@ public class TicketSet<K, V, Ctx> {
      * Not thread-safe
      */
     public void removeUnchecked(ItemTicket<K, V, Ctx> ticket) {
-        ItemStatus<K, V, Ctx> targetStatus = ticket.getTargetStatus();
-        this.status2TicketsSize[targetStatus.ordinal()] --;
-        this.updateTargetStatus();
+        final int ordinal = ticket.getTargetStatus().ordinal();
+        this.status2TicketsSize[ordinal] --;
+        this.updateTargetStatus(ordinal);
     }
 
-    private void updateTargetStatus() {
-        this.targetStatus = this.computeTargetStatusSlow();
+    private void updateTargetStatus(int changedStatus) {
+        int target = this.targetStatus;
+        if (changedStatus > target && this.status2TicketsSize[changedStatus] > 0) {
+            target = changedStatus;
+        } else {
+            // Only losing the last ticket at the current maximum requires a scan. Most
+            // dependency-ticket changes leave that maximum untouched.
+            while (target > 0 && this.status2TicketsSize[target] <= 0) {
+                target --;
+            }
+        }
+        if (target != this.targetStatus) {
+            this.targetStatus = target;
+        }
     }
 
     /**
@@ -83,15 +93,6 @@ public class TicketSet<K, V, Ctx> {
         for (Set<ItemTicket<K, V, Ctx>> tickets : status2Tickets) {
             Assertions.assertTrue(tickets.isEmpty());
         }
-    }
-
-    private int computeTargetStatusSlow() {
-        for (int i = this.status2Tickets.length - 1; i > 0; i--) {
-            if (this.status2TicketsSize[i] > 0) {
-                return i;
-            }
-        }
-        return 0;
     }
 
 }

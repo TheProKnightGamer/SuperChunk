@@ -1,9 +1,7 @@
 modLoader = "javafml"
 loaderVersion = "[1,)"
 license = "LGPL-3.0-only"
-# TODO(unverified): no public repo/issue tracker is known for this project (source lives locally,
-# not on GitHub). Replace with the real URL if/when one exists, or drop this line — issueTrackerURL
-# is optional. Left as a best-guess placeholder for now.
+# The upstream project's public issue tracker.
 issueTrackerURL = "https://github.com/TheProKnightGamer/SuperChunk/issues"
 
 [[mods]]

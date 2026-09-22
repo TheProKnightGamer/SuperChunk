@@ -39,27 +39,18 @@ public abstract class NoiseChunkGeneratorMixin extends ChunkGenerator {
 			chunkSection.tickingBlockCount += 1;
 		}
 
-		// Capture the previous block state at this position before the direct palette write below.
-		// Lithium's LevelChunkSection#setBlockState @Inject (see LevelChunkSectionMixin#updateFlagCounters)
-		// maintains the per-section block-counting flags (WATER / LAVA / PATH_NOT_OPEN / ...). The direct
-		// palette write bypasses that @Inject, leaving the flag counts stale for freshly generated,
-		// not-yet-reloaded chunks. LithiumBlockTracking binds whichever Lithium is live (bundled or
-		// standalone), so this stays correct with an installed Lithium of any bindable version.
-		final BlockState noisium$previousBlockState = LithiumBlockTracking.active()
-				? chunkSection.getBlockState(chunkSectionBlockPosX, chunkSectionBlockPosY, chunkSectionBlockPosZ)
-				: null;
-
-		// Set the blockstate in the palette storage directly to improve performance
-		var blockStateId = chunkSection.states.data.palette().idFor(blockState);
-		chunkSection.states.data.storage().set(
-				chunkSection.states.strategy.getIndex(chunkSectionBlockPosX, chunkSectionBlockPosY,
-						chunkSectionBlockPosZ
-				), blockStateId);
-
-		// Maintain Lithium's section block-counting flags that the direct palette write above bypasses.
-		// Mirrors LevelChunkSectionMixin#updateFlagCounters: lithium$trackBlockStateChange(newState, oldState).
+		// idFor can resize and replace Data: capture it only AFTER inserting the state.
+		var states = chunkSection.states;
+		int blockStateId = states.data.palette().idFor(blockState);
+		var data = states.data;
+		int index = states.strategy.getIndex(chunkSectionBlockPosX, chunkSectionBlockPosY, chunkSectionBlockPosZ);
 		if (LithiumBlockTracking.active()) {
-			LithiumBlockTracking.track(chunkSection, blockState, noisium$previousBlockState);
+			// Retrieve the old ID during the write, avoiding a second bit-storage lookup.
+			// As in PalettedContainer.getAndSet, resolve it using the post-resize palette.
+			int previousId = data.storage().getAndSet(index, blockStateId);
+			LithiumBlockTracking.track(chunkSection, blockState, data.palette().valueFor(previousId));
+		} else {
+			data.storage().set(index, blockStateId);
 		}
 
 		return blockState;

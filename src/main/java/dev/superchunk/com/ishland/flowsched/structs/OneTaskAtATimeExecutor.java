@@ -16,10 +16,6 @@ public class OneTaskAtATimeExecutor implements Executor {
         this.queue = queue;
     }
 
-    private boolean canRun() {
-        return !this.queue.isEmpty();
-    }
-
     private void run0() {
         try {
             Runnable command;
@@ -37,7 +33,9 @@ public class OneTaskAtATimeExecutor implements Executor {
     }
 
     private void trySchedule() {
-        if (!this.queue.isEmpty() && this.needsWakeup()) {
+        // The active consumer rechecks the queue after releasing ownership. Producers can
+        // avoid a contended compare-and-set while that consumer is still draining it.
+        if (!this.currentlyRunning.get() && !this.queue.isEmpty() && this.needsWakeup()) {
             this.backingExecutor.execute(this.task);
         }
     }

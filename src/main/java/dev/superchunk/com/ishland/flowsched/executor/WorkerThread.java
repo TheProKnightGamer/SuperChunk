@@ -9,6 +9,7 @@ import java.util.concurrent.locks.LockSupport;
 public class WorkerThread extends Thread {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("FlowSched Executor Worker Thread");
+    private static final Runnable NO_LOCKS_TO_RELEASE = () -> {};
 
     private final ExecutorManager executorManager;
     private volatile boolean shutdown = false;
@@ -41,18 +42,24 @@ public class WorkerThread extends Thread {
             return true; // polled
         }
         try {
-            AtomicBoolean released = new AtomicBoolean(false);
-            try {
-                task.run(() -> {
+            final Runnable releaseLocks;
+            if (task.lockTokens().length == 0) {
+                // There is no release state to track for lock-free tasks. The same
+                // callback is safe even when retained or invoked more than once.
+                releaseLocks = NO_LOCKS_TO_RELEASE;
+            } else {
+                AtomicBoolean released = new AtomicBoolean(false);
+                releaseLocks = () -> {
                     if (released.compareAndSet(false, true)) {
                         executorManager.releaseLocks(task);
                     }
-                });
+                };
+            }
+            try {
+                task.run(releaseLocks);
             } catch (Throwable t) {
                 try {
-                    if (released.compareAndSet(false, true)) {
-                        executorManager.releaseLocks(task);
-                    }
+                    releaseLocks.run();
                 } catch (Throwable t1) {
                     t.addSuppressed(t1);
                     LOGGER.error("Exception thrown while releasing locks", t);
