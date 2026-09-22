@@ -1,6 +1,7 @@
 package dev.superchunk.com.ishland.c2me.opts.scheduling.mixin.idle_tasks.autosave.enhanced_autosave;
 
 import dev.superchunk.com.ishland.c2me.opts.scheduling.common.idle_tasks.IThreadedAnvilChunkStorage;
+import dev.superchunk.compat.SkeinCompat;
 import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 import net.minecraft.Util;
 import net.minecraft.server.MinecraftServer;
@@ -41,6 +42,9 @@ public abstract class MixinMinecraftServer extends ReentrantBlockableEventLoop<T
     @ModifyReturnValue(method = "pollTask", at = @At("RETURN"))
     private boolean postRunTask(boolean original) {
         if (original) return true;
+        // The coordinator can pump server tasks while it helps a dimension tick.
+        // Its idle autosave must not touch levels still owned by other workers.
+        if (SkeinCompat.isDimensionPhaseActive()) return false;
         if (this.c2me$shouldKeepSavingChunks()) {
             for (ServerLevel serverWorld : this.getAllLevels()) {
                 if (((IThreadedAnvilChunkStorage) serverWorld.getChunkSource().chunkMap).c2me$runOneChunkAutoSave()) {

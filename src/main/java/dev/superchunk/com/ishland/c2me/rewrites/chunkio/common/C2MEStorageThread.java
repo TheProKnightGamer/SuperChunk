@@ -37,7 +37,24 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Function;
 
-public class C2MEStorageThread extends Thread {
+/**
+ * SuperChunk: the worker is created on demand and retires after {@link #IDLE_RETIRE_MS} of idleness,
+ * instead of being one OS thread pinned for the lifetime of the object.
+ *
+ * <p>Every {@code ChunkStorage}/{@code SimpleRegionStorage} constructor is redirected to build one of
+ * these (see the {@code chunkio.mixin.Mixin*Storage} family), so the thread count tracks the number of
+ * live storages. Vanilla's {@code IOWorker} instead shares {@code Util.ioPool()}, a cached pool whose
+ * threads expire after 60s — so a mod that constructs storages and never closes them costs vanilla only
+ * a few objects, while it cost us one permanently parked thread each. Distant Horizons does exactly
+ * that: a watchdog dump from issue #7 has <b>435</b> live "C2ME Storage #n" threads, interleaved in the
+ * thread-id order with repeated triplets of DH level threads, i.e. ~145 rebuilt DH levels each leaking
+ * a chunk/poi/entity storage. Hundreds of parked threads plus their reserved stacks are the "slowly
+ * freezes, looks like a memory leak" reports.
+ *
+ * <p>Retiring restores vanilla's shape: an idle storage costs no thread, and the next task transparently
+ * starts a fresh worker. {@code -Dsuperchunk.io.storageIdleRetireMillis=0} disables retirement.
+ */
+public class C2MEStorageThread implements Runnable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("C2ME Storage");
 
@@ -75,23 +92,138 @@ public class C2MEStorageThread extends Thread {
     private final Long2ReferenceLinkedOpenHashMap<Either<CompoundTag, byte[]>> cache = new Long2ReferenceLinkedOpenHashMap<>();
     private final Queue<Runnable> pendingTasks = PlatformDependent.newMpscQueue();
     private final Executor executor = command -> {
-        if (Thread.currentThread() == this) {
+        if (Thread.currentThread() == this.worker) {
             command.run();
         } else {
             final boolean empty = this.taskSize.getAndIncrement() == 0;
             pendingTasks.add(command);
             if (empty) this.wakeUp();
+            ensureWorker(false); // no lock held here — see ensureWorker's note on lock ordering
         }
     };
     private final java.util.ArrayList<CompletableFuture<Void>> writeFutures = new java.util.ArrayList<>();
     private final Object sync = new Object();
 
+    /** How long a worker may sit idle before it exits; {@code <= 0} pins it forever (legacy behaviour). */
+    private static final long IDLE_RETIRE_MS = Long.getLong("superchunk.io.storageIdleRetireMillis", 60_000L);
+    /**
+     * Warn once at this many simultaneously-open storages. Three per loaded dimension (chunk / poi /
+     * entities) is normal, so a big dimension-heavy pack can legitimately reach a few dozen — the
+     * threshold is set well above that and the message is phrased as a hint, not an accusation.
+     */
+    private static final int LEAK_WARN_THRESHOLD = Integer.getInteger("superchunk.io.storageLeakWarnAt", 192);
+
+    private static final AtomicInteger LIVE_STORAGES = new AtomicInteger();
+    private static final AtomicBoolean LEAK_WARNED = new AtomicBoolean(false);
+
+    private final String name;
+    /**
+     * Priority and context ClassLoader the worker runs at, captured from the CONSTRUCTING thread.
+     * {@code new Thread()} copies both from whoever calls it, which used to be the constructor and is
+     * now whichever thread happens to submit the first task (a worldgen worker, a CompletableFuture
+     * completion thread, the server thread...) — and could differ between restarts of one storage.
+     * Capturing them here keeps every worker identical to the old eager thread.
+     */
+    private final int priority;
+    private final ClassLoader contextClassLoader;
+    /** The running worker, or {@code null} while retired. Guarded for writes by {@link #workerLock}. */
+    private volatile Thread worker;
+    private final Object workerLock = new Object();
+
     public C2MEStorageThread(RegionStorageInfo arg, Path path, boolean dsync) {
         this.storage = new RegionFileStorage(arg, path, dsync);
-        this.setName("C2ME Storage #%d".formatted(SERIAL.incrementAndGet()));
-        this.setDaemon(true);
-        this.setUncaughtExceptionHandler((t, e) -> LOGGER.error("Thread %s died".formatted(t), e));
-        this.start();
+        this.name = "C2ME Storage #%d".formatted(SERIAL.incrementAndGet());
+        this.priority = Thread.currentThread().getPriority();
+        this.contextClassLoader = Thread.currentThread().getContextClassLoader();
+        final int live = LIVE_STORAGES.incrementAndGet();
+        if (live >= LEAK_WARN_THRESHOLD && LEAK_WARNED.compareAndSet(false, true)) {
+            LOGGER.warn("{} chunk storages are open at once ({} was the last). Three per loaded dimension is "
+                    + "normal; far more than that usually means some mod constructs ChunkStorage/"
+                    + "SimpleRegionStorage instances without closing them, and each one holds open region "
+                    + "files. SuperChunk retires their idle IO threads, but any such leak is upstream.",
+                    live, this.name);
+        }
+        // The worker starts on the first task (see #executor) rather than here, so a storage that is
+        // built and then abandoned never costs a thread.
+    }
+
+    /**
+     * Start a worker if none is running. Cheap and lock-free on the hot path (the volatile read).
+     *
+     * <p>Never called while {@link #sync} is held: the retirement path takes {@code sync} then
+     * {@link #workerLock}, so acquiring them the other way round would deadlock. {@code #executor}
+     * therefore does its {@link #wakeUp()} first and this second, with neither lock held across the
+     * other.
+     *
+     * @param forShutdown start one even though {@link #closing} is set, to run the final flush
+     */
+    private void ensureWorker(boolean forShutdown) {
+        if (this.worker != null) return;
+        if (!forShutdown && this.closing.get()) return; // the shutdown worker will drain what is queued
+        synchronized (this.workerLock) {
+            if (this.worker != null) return;
+            if (this.closeFuture.isDone()) return; // fully closed: never resurrect
+            final Thread t = new Thread(this, this.name);
+            t.setDaemon(true);
+            t.setPriority(this.priority);
+            t.setContextClassLoader(this.contextClassLoader);
+            // Self-heal instead of wedging: if run() dies on an uncaught throwable the slot must be
+            // released, or `worker` stays non-null forever, ensureWorker short-circuits for good and
+            // close() never completes — blocking the world-save thread on its join().
+            t.setUncaughtExceptionHandler((thread, e) -> {
+                LOGGER.error("Thread %s died".formatted(thread), e);
+                this.releaseWorker(thread);
+            });
+            this.worker = t;
+            try {
+                t.start();
+            } catch (Throwable e) {
+                // OutOfMemoryError: unable to create native thread is exactly the state this class
+                // exists to avoid. Publishing `worker` before a failed start would wedge it forever.
+                this.worker = null;
+                throw e;
+            }
+        }
+    }
+
+    /** Release the worker slot if {@code thread} still owns it, so a later task can start a fresh one. */
+    private void releaseWorker(Thread thread) {
+        synchronized (this.workerLock) {
+            if (this.worker == thread) {
+                this.worker = null;
+            }
+        }
+    }
+
+    /**
+     * Give up this worker if there is provably nothing to do.
+     *
+     * <p>No task can be lost across a retirement, and the argument rests on two invariants that are
+     * easy to break by accident — do not change either without re-deriving this:
+     * <ol>
+     *   <li><b>The worker is the only thread that decrements {@code taskSize}</b>, and never while
+     *       holding {@code sync}. So once the check below reads 0, every later operation on that
+     *       counter is an increment, and the FIRST of them sees 0 and therefore takes the
+     *       {@code empty} branch in {@code #executor} — i.e. it definitely calls {@link #wakeUp()}.
+     *       (Producers that skip {@code wakeUp()} may read a stale non-null {@code worker}; that is
+     *       harmless, because the replacement started for the first one drains the whole queue.)</li>
+     *   <li><b>{@code wakeUp()} takes {@code sync}</b>, which this method is called while holding.
+     *       That producer therefore cannot enter {@code sync} before we leave it, so our
+     *       {@code worker = null} happens-before its {@code wakeUp()}, which happens-before its
+     *       {@link #ensureWorker(boolean)} — and it sees {@code null} and starts a replacement.</li>
+     * </ol>
+     *
+     * <p>The same {@code workerLock} release/acquire pair is also what safely hands the plain
+     * (non-thread-safe) {@code writeBacklog} / {@code cache} / {@code writeFutures} from one worker
+     * generation to the next: old worker's writes -> monitorexit here -> monitorenter in
+     * {@code ensureWorker} -> {@code Thread.start()} -> new worker.
+     */
+    private boolean retireWorker() {
+        synchronized (this.workerLock) {
+            if (this.taskSize.get() != 0 || this.closing.get() || hasPendingTasks()) return false;
+            this.worker = null;
+            return true;
+        }
     }
 
     @Override
@@ -111,7 +243,14 @@ public class C2MEStorageThread extends Thread {
                     } catch (Throwable t) {
                         LOGGER.error("Error closing storage", t);
                     }
+                    LIVE_STORAGES.decrementAndGet();
+                    // Complete first, then release the worker slot: ensureWorker(true) bails on either
+                    // a live worker or a done closeFuture, so a concurrent close() can never start a
+                    // second worker that would re-run this block.
                     this.closeFuture.complete(null);
+                    synchronized (this.workerLock) {
+                        this.worker = null;
+                    }
                     break;
                 } else {
                     // attempt to spin-wait before sleeping
@@ -124,15 +263,34 @@ public class C2MEStorageThread extends Thread {
                     }
                     synchronized (sync) {
                         if (this.taskSize.get() != 0 || this.closing.get()) continue main_loop;
-                        try {
-                            sync.wait();
-                        } catch (InterruptedException ignored) {
+                        if (IDLE_RETIRE_MS <= 0L) {
+                            try {
+                                sync.wait(); // retirement disabled: park until woken, as before
+                            } catch (InterruptedException ignored) {
+                            }
+                            continue main_loop;
+                        }
+                        // Deadline loop, so a spurious wakeup or an interrupt cannot retire early and
+                        // turn the idle timeout into thread-churn.
+                        final long deadline = System.nanoTime() + IDLE_RETIRE_MS * 1_000_000L;
+                        long remaining;
+                        while ((remaining = deadline - System.nanoTime()) > 0L) {
+                            if (this.taskSize.get() != 0 || this.closing.get()) continue main_loop;
+                            try {
+                                sync.wait(Math.max(1L, remaining / 1_000_000L));
+                            } catch (InterruptedException ignored) {
+                            }
+                        }
+                        if (this.taskSize.get() != 0 || this.closing.get()) continue main_loop;
+                        if (retireWorker()) {
+                            LOGGER.debug("Storage thread {} retired after {} ms idle", this.name, IDLE_RETIRE_MS);
+                            return; // the next task starts a fresh worker
                         }
                     }
                 }
             }
         }
-        LOGGER.info("Storage thread {} stopped", this);
+        LOGGER.info("Storage thread {} stopped", this.name);
     }
 
     private boolean pollTasks() {
@@ -210,6 +368,9 @@ public class C2MEStorageThread extends Thread {
     public CompletableFuture<Void> close() {
         this.closing.set(true);
         this.wakeUp();
+        // The worker may have retired while idle, in which case nobody is left to run the final
+        // flush + storage.close() and complete closeFuture — and callers join() on it.
+        this.ensureWorker(true);
         return this.closeFuture.thenApply(Function.identity());
     }
 

@@ -90,6 +90,20 @@ public final class JigsawShapeTracker {
      */
     public static void seedTopLevel(VoxelShape free, AABB startBox) {
         if (!ACTIVE) return;
+        // VoxelShape.bounds() throws UnsupportedOperationException("No bounds for empty shape") on an
+        // empty shape. The top-level free shape is `bounds MINUS startBox`, which vanilla structures
+        // never empty out -- but a mod that shrinks the placement bounds or enlarges the start piece
+        // (Structure Layout Optimizer, integrated_api's JigsawPlacementUnlimit) can make the start
+        // box swallow the bounds, and then this threw out of ChunkStatusTasks.generateStructureStarts,
+        // MARK_BROKEN'd the chunk and left it permanently invisible (reported 2026-08-01 with
+        // structure_layout_optimizer on 0.1.0, before the load-time stand-down in
+        // StructureLayoutOptimizerCompat). There is no free space to model, so seed nothing: every
+        // testFree/subtractFree for this shape finds no region and falls through to the real
+        // VoxelShape op.
+        if (free.isEmpty()) {
+            MAP.get().clear();
+            return;
+        }
         JigsawFreeShape region = new JigsawFreeShape(free.bounds());
         region.addBox(startBox);
         IdentityHashMap<VoxelShape, JigsawFreeShape> map = MAP.get();

@@ -33,7 +33,10 @@ import java.util.concurrent.atomic.LongAdder;
  * filled itself. Four bits is enough because the table is wiped when the counter wraps: at ~2,500
  * distinct cells per manager against a 4,096-slot table, a manager's misses are compulsory
  * cold-start misses anyway (measured hit rate 88.1% over 420M lookups), and a 48 KB wipe every 16
- * managers is far cheaper than a per-manager clear.
+ * managers is far cheaper than a per-manager clear. Managers retain the full generation
+ * ticket, including the wrap epoch: a manager revisited after the table wraps must claim
+ * a new ticket before accessing it. Clearing alone does not prevent an old manager from
+ * mistaking a newer manager's reused four-bit generation for its own.
  *
  * <p><b>Correctness.</b> Entries are never invalidated within a generation, so this is only sound
  * where {@code getNoiseBiome} is a pure function for the manager's lifetime. That is the worldgen
@@ -60,7 +63,8 @@ public final class BiomeQuartCache {
 
     private static final ThreadLocal<BiomeQuartCache> LOCAL = ThreadLocal.withInitial(BiomeQuartCache::new);
 
-    private static final boolean METRICS = Boolean.getBoolean("superchunk.worldgen.biomeQuartCache.metrics");
+    private static final boolean METRICS = Boolean.getBoolean("superchunk.worldgen.biomeQuartCache.metrics")
+            || Boolean.getBoolean("superchunk.worldgen.biomeQuartCache.verify");
     private static final LongAdder HITS = new LongAdder();
     private static final LongAdder MISSES = new LongAdder();
     private static final long REPORT_EVERY = 1L << 24;
@@ -69,7 +73,7 @@ public final class BiomeQuartCache {
     /** Key 0 is unused: {@link #encode} always sets a generation of 1..15 in the high bits. */
     private final long[] key = new long[SLOTS];
     private final Object[] value = new Object[SLOTS];
-    private int nextGen;
+    private long nextGen;
 
     private BiomeQuartCache() {
     }
@@ -83,25 +87,31 @@ public final class BiomeQuartCache {
      * Claims a generation for one {@code BiomeManager}. Wiping on wrap is what lets the generation
      * live in four spare key bits instead of a fifth array.
      */
-    public int claimGeneration() {
-        nextGen = (nextGen + 1) & GEN_MASK;
-        if (nextGen == 0) {
+    public long claimGeneration() {
+        nextGen++;
+        if ((nextGen & GEN_MASK) == 0) {
             Arrays.fill(key, 0L);
             Arrays.fill(value, null);
-            nextGen = 1;
+            nextGen++;
         }
         return nextGen;
     }
 
+    /** Whether this ticket still belongs to the table's current wrap epoch. */
+    public boolean isCurrentGeneration(long generation) {
+        return (generation >>> GEN_BITS) == (nextGen >>> GEN_BITS);
+    }
+
     /**
      * Packs {@code (generation, x, y, z)} into the table key, or {@link #UNCACHEABLE} when a
-     * coordinate does not fit its field. {@code generation} is 1..15.
+     * coordinate does not fit its field. Only the low four bits of the generation ticket
+     * are stored; callers must check {@link #isCurrentGeneration(long)} before accessing it.
      */
-    public static long encode(int generation, int x, int y, int z) {
+    public static long encode(long generation, int x, int y, int z) {
         if (((x + 0x800000) >>> 24) != 0 || ((z + 0x800000) >>> 24) != 0 || ((y + 0x800) >>> 12) != 0) {
             return UNCACHEABLE;
         }
-        return ((long) generation << 60)
+        return ((generation & GEN_MASK) << 60)
                 | ((long) (x & 0xFFFFFF) << 36)
                 | ((long) (z & 0xFFFFFF) << 12)
                 | (y & 0xFFF);

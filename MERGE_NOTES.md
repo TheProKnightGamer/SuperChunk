@@ -19,8 +19,10 @@ fragile, frozen at today's upstream — no upstream bug-fix pulls.)
 - ModDevGradle 2.0.119, NeoForge **21.1.215**, MC **1.21.1**, Java **21**.
 - Mappings: **Mojang official + Parchment 2024.11.17**. NeoForge runs Mojmap at
   runtime, so **mixins need NO refmap** (big simplification).
-- Launch Gradle with JDK 17 (`C:\Program Files\Java\jdk-17.0.17.10-hotspot`);
-  JAVA_HOME=jdk-25 breaks Gradle 9.x. Compile toolchain (21) auto-provisioned.
+- Use Java 21 via `JAVA_HOME` or Java on `PATH`. The PowerShell launchers accept
+  `-JavaHome` to override the JDK directory; otherwise they inherit `JAVA_HOME`
+  and let the Gradle wrapper fall back to `java.exe` on `PATH` when unset.
+  The compile toolchain targets Java 21 and can be auto-provisioned.
 - config-cache OFF; gradle jvm -Xmx4G.
 
 ## Upstream mapping reality (the core merge cost)

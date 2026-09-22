@@ -9,6 +9,9 @@
 
 .PARAMETER MaxGenSeconds
   Hard cap on the gen window (default 240).
+
+.PARAMETER JavaHome
+  Optional JDK directory override. Defaults to JAVA_HOME, or Java on PATH if unset.
 #>
 [CmdletBinding()]
 param(
@@ -18,7 +21,7 @@ param(
   [string]$RconHost   = '127.0.0.1',
   [int]$RconPort      = 25575,
   [string]$RconPass   = 'bench',
-  [string]$JavaHome   = 'C:\Program Files\Java\jdk-17.0.17.10-hotspot'
+  [string]$JavaHome   = $env:JAVA_HOME
 )
 $ErrorActionPreference = 'Continue'
 $Root    = (Join-Path $PSScriptRoot '..')
@@ -35,6 +38,7 @@ if (Test-Path $World) { Remove-Item -Recurse -Force $World }
 if (Test-Path $Log)   { Remove-Item -Force $Log }
 
 Log "starting runServer (JAVA_HOME=$JavaHome) ..."
+# gradlew.bat uses JAVA_HOME/bin/java.exe, or java.exe on PATH when unset.
 $env:JAVA_HOME = $JavaHome
 $gradlew = Join-Path $Root 'gradlew.bat'
 $tee = "& '$gradlew' -p '$Root' runServer --console=plain *>&1 | Tee-Object -FilePath '$Log'"

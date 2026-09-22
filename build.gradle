@@ -371,6 +371,32 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
 }
 
+// ModDev supplies Minecraft to main only. The standalone regression programs also
+// compare against vanilla's bit storage, without booting the game or applying mixins.
+sourceSets.test.compileClasspath += sourceSets.main.compileClasspath
+sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
+// These programs use explicit assertions and need no additional test framework.
+tasks.named('test') { failOnNoDiscoveredTests = false }
+[
+    schedulerRegressionTest: 'dev.superchunk.com.ishland.flowsched.scheduler.SchedulerRegressionTest',
+    smallPaletteRegressionTest: 'dev.superchunk.worldgen.SmallPaletteIndicesTest',
+    fastPalettePackingRegressionTest: 'dev.superchunk.chunkio.FastPalettePackingTest',
+    biomeFiddleRegressionTest: 'dev.superchunk.worldgen.BiomeFiddleMathTest',
+    aquiferColumnRegressionTest: 'dev.superchunk.worldgen.AquiferColumnCacheTest',
+    positionalFloatRegressionTest: 'dev.superchunk.worldgen.FirstPositionalFloatTest',
+    biomeCacheRegressionTest: 'dev.superchunk.worldgen.BiomeQuartCacheTest',
+    skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest'
+].each { taskName, testMain ->
+    def regression = tasks.register(taskName, JavaExec) {
+        group = 'verification'
+        description = "Runs ${testMain} standalone regression checks."
+        dependsOn tasks.named('testClasses')
+        classpath = sourceSets.test.runtimeClasspath
+        mainClass = testMain
+    }
+    tasks.named('check') { dependsOn regression }
+}
+
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
 idea {
     module {

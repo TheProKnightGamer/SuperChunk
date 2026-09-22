@@ -154,11 +154,11 @@ public class SchedulingManager {
     }
 
     private void updatePriorityInternal(long pos) {
-        final int priority = getPriority(pos);
         final FreeableTaskList locks = this.pos2Tasks.get(pos);
         if (locks != null) {
             synchronized (locks) {
                 if (locks.freed) return;
+                final int priority = getPriority(pos);
                 for (AbstractPosAwarePrioritizedTask lock : locks) {
                     lock.setPriority(priority);
                     GlobalExecutors.prioritizedScheduler.notifyPriorityChange(lock);
@@ -172,7 +172,8 @@ public class SchedulingManager {
         int fromSyncLoad;
         ChunkPos currentSyncLoad1 = currentSyncLoad;
         if (currentSyncLoad1 != null) {
-            final int chebyshevDistance = chebyshev(new ChunkPos(pos), currentSyncLoad1);
+            final int chebyshevDistance = Math.max(Math.abs(ChunkPos.getX(pos) - currentSyncLoad1.x),
+                    Math.abs(ChunkPos.getZ(pos) - currentSyncLoad1.z));
             if (chebyshevDistance <= 8) {
                 fromSyncLoad = chebyshevDistance;
 //                System.out.println("dist for chunk [%d,%d] is %d".formatted(currentSyncLoad.x, currentSyncLoad.z, chebyshevDistance));
@@ -313,17 +314,11 @@ public class SchedulingManager {
     }
 
     private void updateSyncLoadInternal(ChunkPos pos) {
-        long startTime = System.nanoTime();
         for (int xOff = -8; xOff <= 8; xOff++) {
             for (int zOff = -8; zOff <= 8; zOff++) {
                 updatePriorityInternal(ChunkPos.asLong(pos.x + xOff, pos.z + zOff));
             }
         }
-        long endTime = System.nanoTime();
-    }
-
-    private static int chebyshev(ChunkPos a, ChunkPos b) {
-        return Math.max(Math.abs(a.x - b.x), Math.abs(a.z - b.z));
     }
 
     private static int chebyshev(long a, long b) {

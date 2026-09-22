@@ -2,6 +2,8 @@ package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common;
 
 import dev.superchunk.com.ishland.c2me.base.common.config.ConfigSystem;
 
+import java.util.concurrent.TimeUnit;
+
 public class Config {
 
     public static final boolean asyncSerialization = new ConfigSystem.ConfigAccessor()
@@ -98,6 +100,20 @@ public class Config {
                     Only applies when useLegacyScheduling is disabled.
                     """)
             .getBoolean(false, false);
+
+    /**
+     * How long a {@code create == false} {@code ServerChunkCache.getChunk} may keep draining
+     * main-thread tasks waiting for an in-flight chunk before it gives up and returns null, in
+     * nanoseconds. Negative by default, preserving vanilla's wait for healthy in-flight chunks.
+     * {@code 0} = never wait; positive values opt into a timeout. A timeout can make collision
+     * queries treat a still-loading chunk as empty, so it is only a diagnostic escape hatch.
+     * See {@code MixinServerChunkManager#superchunk$boundNonCreatingGetChunk}.
+     *
+     * <p>A system property rather than a config key: the only reasons to change it are bisection
+     * and reproducing GitHub issue #7.
+     */
+    public static final long nonCreatingGetChunkBudgetNanos =
+            TimeUnit.MILLISECONDS.toNanos(Long.getLong("superchunk.chunkSystem.nonCreatingGetChunkBudgetMillis", -1L));
 
     public static void init() {
         // intentionally empty

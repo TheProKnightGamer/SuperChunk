@@ -277,14 +277,30 @@ public final class CompactConsume {
         if (ids.length != 256 * fullY) {
             return Ctx.fail(Reason.LENGTH);
         }
-        // Alphabet scan: completeness (no absent), validity (0..10; sentinel carries no
-        // sched bit), sentinel presence. Table-classified branchless accumulate (the
-        // branchy per-byte form was the profile's top single frame at 24 workers); on
-        // the RARE failure the byte-exact rescan below reproduces the ORIGINAL
-        // first-offending-byte precedence, so the returned Reason is identical.
+        // All ordinary ids (0..9, with either sched bit) classify as zero. Check eight
+        // at once: after clearing bit7, adding 118 sets a byte's high bit iff its id
+        // is >=10. The largest sum is 127+118=245, so bytes cannot carry into each
+        // other. Only words containing sentinel/invalid ids need the classification
+        // table. The validated section-aligned length above is a multiple of eight.
+        // On failure the byte-exact rescan below preserves first-offending precedence.
         int acc = 0;
-        for (byte idByte : ids) {
-            acc |= PREP_CLASS[idByte & 0xFF];
+        for (int i = 0; i < ids.length; i += 8) {
+            long word = (long) LONGS.get(ids, i);
+            long low = word & 0x7F7F7F7F7F7F7F7FL;
+            long special = (low + 0x7676767676767676L) & 0x8080808080808080L;
+            if (special != 0) {
+                // A word of valid ids plus plain sentinel 10 needs no scalar scan
+                // either. Adding 117 detects ids >=11; special & word rejects a
+                // sentinel carrying bit7 (0x8a), which is outside the alphabet.
+                if ((((low + 0x7575757575757575L) | (special & word))
+                        & 0x8080808080808080L) == 0) {
+                    acc |= PREP_SENTINEL;
+                } else {
+                    for (int j = i; j < i + 8; j++) {
+                        acc |= PREP_CLASS[ids[j] & 0xFF];
+                    }
+                }
+            }
         }
         if ((acc & (PREP_ABSENT | PREP_UNKNOWN)) != 0) {
             for (byte idByte : ids) {
@@ -355,7 +371,7 @@ public final class CompactConsume {
     }
 
     // =====================================================================
-    // Byte -> BlockState mapping (built once per chunk; <=11 states).
+    // Byte -> BlockState mapping (immutable; cached per worker/default block).
     // =====================================================================
 
     private static final class Mapping {
@@ -390,6 +406,17 @@ public final class CompactConsume {
         }
     }
 
+    private static final ThreadLocal<Mapping> MAPPINGS = new ThreadLocal<>();
+
+    private static Mapping mapping(BlockState defaultBlock) {
+        Mapping mapping = MAPPINGS.get();
+        if (mapping == null || mapping.states[0] != defaultBlock) {
+            mapping = new Mapping(defaultBlock);
+            MAPPINGS.set(mapping);
+        }
+        return mapping;
+    }
+
     // =====================================================================
     // CONSUME entry (mode `on`). Called from the doFill HEAD mixin.
     // =====================================================================
@@ -422,7 +449,7 @@ public final class CompactConsume {
                 countFallback(ctx.reason);
                 return false;
             }
-            Mapping m = new Mapping(gen.generatorSettings().value().defaultBlock());
+            Mapping m = mapping(gen.generatorSettings().value().defaultBlock());
             long t0 = System.nanoTime();
             if (!ctx.hasSentinel) {
                 // FAST path: point of no return — take the entry (releases any pooled
@@ -503,18 +530,58 @@ public final class CompactConsume {
     // FAST path: pure array-driven fill (no interpolation at all).
     // =====================================================================
 
+    private static final class FastScratch {
+        final int[] hist = new int[11];
+        final int[] pid = new int[11];
+        final int[] surfB = new int[256];
+        final int[] surfY = new int[256];
+        final int[] floorB = new int[256];
+        final int[] floorY = new int[256];
+        boolean inUse;
+    }
+
+    private static final ThreadLocal<FastScratch> FAST_SCRATCH = ThreadLocal.withInitial(FastScratch::new);
+
     private static void fastFill(ChunkAccess chunk, Ctx ctx, Mapping m) {
+        FastScratch scratch = FAST_SCRATCH.get();
+        // A mod callback can re-enter generation on this worker. Its nested fill
+        // must not overwrite the outer fill's pending heightmap results.
+        if (scratch.inUse) {
+            scratch = new FastScratch();
+        }
+        scratch.inUse = true;
+        try {
+            fastFill(chunk, ctx, m, scratch);
+        } finally {
+            scratch.inUse = false;
+        }
+    }
+
+    private static void fastFill(ChunkAccess chunk, Ctx ctx, Mapping m, FastScratch scratch) {
         // Same creation order as vanilla doFill.
         Heightmap floor = chunk.getOrCreateHeightmapUnprimed(Heightmap.Types.OCEAN_FLOOR_WG);
         Heightmap surf = chunk.getOrCreateHeightmapUnprimed(Heightmap.Types.WORLD_SURFACE_WG);
         byte[] ids = ctx.ids;
 
-        int[] hist = new int[11];
+        int[] hist = scratch.hist;
+        int[] pid = scratch.pid;
+        int fromY = ctx.fullY;
+        int toY = 0;
         for (int yBase = ctx.oy; yBase < ctx.oy + ctx.fullY; yBase += 16) {
             LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(yBase));
             int base = (yBase - ctx.oy) * 256;
             java.util.Arrays.fill(hist, 0);
-            for (int i = 0; i < 4096; i++) {
+            // Air and solid sections have long runs of the same id. Count their
+            // prefix eight blocks at a time, ignoring only the scheduling bit. The
+            // first mixed word and remaining suffix use the general histogram.
+            int firstId = ids[base] & 0x7F;
+            long repeated = 0x0101010101010101L * firstId;
+            int i = 0;
+            while (i < 4096 && ((long) LONGS.get(ids, base + i) & 0x7F7F7F7F7F7F7F7FL) == repeated) {
+                i += 8;
+            }
+            hist[firstId] = i;
+            for (; i < 4096; i++) {
                 hist[ids[base + i] & 0x7F]++;
             }
             int nonAirCount = 0;
@@ -526,11 +593,18 @@ public final class CompactConsume {
             if (nonAirCount == 0) {
                 continue;   // vanilla writes nothing into an all-air section
             }
-            writeSection(section, ids, base, hist, m, nonAirCount);
+            fromY = Math.min(fromY, yBase - ctx.oy);
+            toY = yBase - ctx.oy + 16;
+            writeSection(section, ids, base, hist, pid, m, nonAirCount);
         }
 
-        heightmapsFromIds(ctx, m, surf, floor);
-        marksFromIds(chunk, ctx, m);
+        if (toY != 0) {
+            // The histogram already proved all ids outside these section bounds
+            // map to skipped AIR. Neither heightmap updates nor fluid marks can
+            // originate there, so avoid reading those bytes again.
+            heightmapsFromIds(ctx, m, surf, floor, fromY, toY, scratch);
+            marksFromIds(chunk, ctx, m, fromY, toY);
+        }
     }
 
     /**
@@ -540,7 +614,7 @@ public final class CompactConsume {
      * pre-existing content, mirroring vanilla's overwrite-non-air-only semantics).
      */
     private static void writeSection(LevelChunkSection section, byte[] ids, int base,
-                                     int[] hist, Mapping m, int nonAirCount) {
+                                     int[] hist, int[] pid, Mapping m, int nonAirCount) {
         PalettedContainer<BlockState> states = section.states;
         BitStorage pre = states.data.storage();
         boolean fresh = pre.getBits() == 0 && states.data.palette().valueFor(0) == AIR;
@@ -568,7 +642,6 @@ public final class CompactConsume {
         // palette, so ids are stable after this block. Air resolves LAST (valid in the
         // final palette); every unused/air byte maps to it (sentinel bytes cannot reach
         // the fast path — prepare() routes them to the hybrid).
-        int[] pid = new int[11];
         for (int b = 0; b <= 9; b++) {
             if (hist[b] > 0 && m.nonAir[b]) {
                 pid[b] = states.data.palette().idFor(m.states[b]);
@@ -586,14 +659,21 @@ public final class CompactConsume {
             // SECTION_STATES index = y<<8 | z<<4 | x and 16 nibbles/long => one long per
             // (y,z) row, x in the low-to-high nibbles. Full overwrite of all 4096 slots.
             long[] raw = storage.getRaw();
-            for (int y = 0; y < 16; y++) {
-                int yRow = base + y * 256;   // ids row start for (y, x=0, z=0): index (y*16 + x)*16 + z
-                for (int z = 0; z < 16; z++) {
-                    long word = 0L;
-                    for (int x = 15; x >= 0; x--) {
-                        word = (word << 4) | pid[ids[yRow + x * 16 + z] & 0x7F];
+            int firstId = ids[base] & 0x7F;
+            if (hist[firstId] == 4096) {
+                // Solid sections need no per-block transpose or palette lookup. A
+                // repeated nibble produces exactly the same words as the loop below.
+                java.util.Arrays.fill(raw, 0x1111111111111111L * pid[firstId]);
+            } else {
+                for (int y = 0; y < 16; y++) {
+                    int yRow = base + y * 256;   // ids index (y*16 + x)*16 + z
+                    for (int z = 0; z < 16; z++) {
+                        long word = 0L;
+                        for (int x = 15; x >= 0; x--) {
+                            word = (word << 4) | pid[ids[yRow + x * 16 + z] & 0x7F];
+                        }
+                        raw[y * 16 + z] = word;
                     }
-                    raw[y * 16 + z] = word;
                 }
             }
             sectionsBulk.increment();
@@ -650,7 +730,8 @@ public final class CompactConsume {
      * {@code 1 + max(y passing)}, and untouched columns stay unprimed exactly like
      * vanilla's (air blocks never call update).
      */
-    private static void heightmapsFromIds(Ctx ctx, Mapping m, Heightmap surf, Heightmap floor) {
+    private static void heightmapsFromIds(Ctx ctx, Mapping m, Heightmap surf, Heightmap floor,
+                                         int fromY, int toY, FastScratch scratch) {
         byte[] ids = ctx.ids;
         // ROW-MAJOR rewrite of the per-column top-down scan (the original's
         // ids[by*256 + col] walk is stride-256 through ~250 all-air rows per column —
@@ -662,14 +743,14 @@ public final class CompactConsume {
         // Air rows (id 1, sched bit irrelevant) can trigger neither m.surf nor
         // m.floor, so a whole row whose 8-byte words all satisfy
         // (word & 0x7F..7F) == 0x01..01 is skipped with 32 sequential long tests.
-        int[] surfB = new int[256];
-        int[] surfY = new int[256];
-        int[] floorB = new int[256];
-        int[] floorY = new int[256];
+        int[] surfB = scratch.surfB;
+        int[] surfY = scratch.surfY;
+        int[] floorB = scratch.floorB;
+        int[] floorY = scratch.floorY;
         java.util.Arrays.fill(surfB, -1);
         java.util.Arrays.fill(floorB, -1);
         long un0 = -1L, un1 = -1L, un2 = -1L, un3 = -1L;   // columns without a floor hit yet
-        for (int by = ctx.fullY - 1; by >= 0 && (un0 | un1 | un2 | un3) != 0; by--) {
+        for (int by = toY - 1; by >= fromY && (un0 | un1 | un2 | un3) != 0; by--) {
             int rowBase = by * 256;
             boolean allAir = true;
             for (int w = 0; w < 256; w += 8) {
@@ -721,7 +802,7 @@ public final class CompactConsume {
     }
 
     /** bit7 -> markPosForPostprocessing, exactly vanilla's condition: written fluid block with sched. */
-    private static void marksFromIds(ChunkAccess chunk, Ctx ctx, Mapping m) {
+    private static void marksFromIds(ChunkAccess chunk, Ctx ctx, Mapping m, int fromY, int toY) {
         byte[] ids = ctx.ids;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         // SWAR word-skip: a mark needs a written FLUID with the sched bit. On the fixed
@@ -739,7 +820,8 @@ public final class CompactConsume {
             }
         }
         if (std) {
-            for (int i = 0; i < ids.length; i += 8) {
+            int end = toY * 256;
+            for (int i = fromY * 256; i < end; i += 8) {
                 long w = (long) LONGS.get(ids, i);
                 long t = (w ^ 0x8282828282828282L) & 0xFEFEFEFEFEFEFEFEL;
                 if (((t - 0x0101010101010101L) & ~t & 0x8080808080808080L) == 0) {
@@ -759,7 +841,7 @@ public final class CompactConsume {
             }
             return;
         }
-        for (int by = 0; by < ctx.fullY; by++) {
+        for (int by = fromY; by < toY; by++) {
             int rowBase = by * 256;
             for (int bx = 0; bx < 16; bx++) {
                 int base = rowBase + bx * 16;
@@ -995,7 +1077,7 @@ public final class CompactConsume {
         VERIFY_TL.remove();
         try {
             Ctx ctx = vc.ctx;
-            Mapping m = new Mapping(gen.generatorSettings().value().defaultBlock());
+            Mapping m = mapping(gen.generatorSettings().value().defaultBlock());
             long mismatchesBefore = mismatchTotal();
             int chunkFlips = 0;
             if (ctx.hasSentinel) {
