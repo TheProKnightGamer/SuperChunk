@@ -83,7 +83,13 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         // Sodium-only: widen Sodium's hardcoded render-distance slider cap to client.maxRenderDistance.
         // Inert without Sodium (target class absent); the -D kill switch allows bisection.
         if (mixinClassName.endsWith("SodiumRenderDistanceCap")) {
-            return Boolean.parseBoolean(System.getProperty("superchunk.client.sodiumRenderDistanceCap", "true"));
+            // SodiumConfigBuilder exists from Sodium 0.8; on 0.6 the slider is not ours to widen.
+            return Boolean.parseBoolean(System.getProperty("superchunk.client.sodiumRenderDistanceCap", "true"))
+                    && dev.superchunk.compat.OptionalTargets.present(targetClassName);
+        }
+        if (mixinClassName.startsWith("dev.superchunk.mixin.compat.MixinSkein")) {
+            // Each Skein hook names both of Skein's package roots; only one exists in any build.
+            return dev.superchunk.compat.OptionalTargets.present(targetClassName);
         }
         return true;
     }
@@ -103,5 +109,9 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+        // The probe has the highest priority, so every other mod's mixins are already merged.
+        if (mixinClassName.endsWith(".MixinProbeBiomeLookup")) {
+            MixinTargetScan.record(targetClassName, targetClass);
+        }
     }
 }

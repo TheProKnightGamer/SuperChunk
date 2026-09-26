@@ -53,7 +53,7 @@ public abstract class MixinServerChunkManager implements ISyncLoadManager {
             at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerChunkCache$MainThreadExecutor;managedBlock(Ljava/util/function/BooleanSupplier;)V"), require = 0)
     private void instrumentAwaitChunk(ServerChunkCache.MainThreadExecutor instance, BooleanSupplier stopCondition, Operation<Void> original, int x, int z, ChunkStatus leastStatus, boolean create) {
         if (stopCondition.getAsBoolean()) return;
-        if (Thread.currentThread() != this.mainThread && !SkeinCompat.isDimensionTicker(this.level)) {
+        if (Thread.currentThread() != this.mainThread && !SkeinCompat.isChunkTaskOwner(this.level)) {
             // This wrapper may decline instrumentation, but it must still pump the
             // executor. Suppressing managedBlock strands getChunk at its following
             // join when another mod legitimately transfers level ownership.

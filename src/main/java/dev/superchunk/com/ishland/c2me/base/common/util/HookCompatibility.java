@@ -69,7 +69,7 @@ public class HookCompatibility {
             if (listeners.length > 0) {
                 if (ISSUED_WARNINGS.compareAndSet(false, true)) {
                     EventListener[] rawListeners = tryGetRawListeners(listenerList);
-                    LOGGER.warn("Certain optimizations may be disabled because ChunkDataEvent.Save is used by: {}", rawListeners != null ? Arrays.toString(rawListeners) : Arrays.toString(listeners));
+                    LOGGER.info("Certain optimizations may be disabled because ChunkDataEvent.Save is used by: {}", rawListeners != null ? Arrays.toString(rawListeners) : Arrays.toString(listeners));
                 }
                 return false;
             } else {

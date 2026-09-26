@@ -8,6 +8,7 @@ reused. Existing worlds/configuration/processes are never modified.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import queue
 import re
@@ -15,6 +16,19 @@ import shutil
 import subprocess
 import threading
 import time
+
+
+def process_cpu_seconds(pid):
+    """User+system CPU seconds of a Linux process, or None where /proc is unavailable.
+
+    CPU time per chunk is far less sensitive to competing load than wall-clock
+    chunks/s, which makes it the better comparison on a shared machine.
+    """
+    try:
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def main():
@@ -30,6 +44,8 @@ def main():
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--extra-mod', type=Path, action='append', default=[],
                         help='Additional mod jar for an isolated compatibility check')
+    parser.add_argument('--datapack', type=Path, action='append', default=[],
+                        help='Datapack (.zip or folder) placed in world/datapacks before the world is created')
     parser.add_argument('--config-file', type=Path, action='append', default=[],
                         help='Additional .toml config copied by filename into the isolated config directory')
     parser.add_argument('--setup-command', action='append', default=[],
@@ -57,6 +73,9 @@ def main():
         if not extra.is_file() or extra.suffix.lower() != '.jar' or extra.name in copied_names:
             parser.error('--extra-mod requires an existing jar with a unique destination filename')
         copied_names.add(extra.name)
+    if any(not (p.is_dir() or (p.is_file() and p.suffix.lower() == '.zip')) for p in args.datapack) \
+            or len({p.name for p in args.datapack}) != len(args.datapack):
+        parser.error('--datapack requires existing .zip files or folders with unique names')
     config_names = set()
     for config_file in args.config_file:
         if (not config_file.is_file() or config_file.suffix.lower() != '.toml'
@@ -80,6 +99,9 @@ def main():
         shutil.copy2(extra, output / 'mods' / extra.name)
     for config_file in args.config_file:
         shutil.copy2(config_file, output / 'config' / config_file.name)
+    for pack in args.datapack:
+        (output / 'world/datapacks').mkdir(parents=True, exist_ok=True)
+        (shutil.copytree if pack.is_dir() else shutil.copy2)(pack, output / 'world/datapacks' / pack.name)
     cache = template / 'config/superchunk-gpu-cache'
     if args.gpu and cache.is_dir():
         shutil.copytree(cache, output / 'config/superchunk-gpu-cache')
@@ -87,9 +109,11 @@ def main():
         f'level-seed={args.seed}\nserver-ip=127.0.0.1\nserver-port=0\n'
         'online-mode=false\nview-distance=2\nsimulation-distance=2\n'
         'max-tick-time=-1\nenable-rcon=false\nspawn-protection=0\n')
+    # logging.verbose: the health and verify checks below read SuperChunk's INFO lines, which the
+    # mod hides by default. A --config logging.verbose=... line comes later and wins.
     (output / 'config/superchunk.properties').write_text(
         f'gpu.enabled={str(args.gpu).lower()}\nc2me.globalExecutorParallelism={args.workers}\n'
-        + '\n'.join(args.config) + '\n')
+        'logging.verbose=true\n' + '\n'.join(args.config) + '\n')
     command = ['java', f'-Xms{args.heap}', f'-Xmx{args.heap}', '-XX:+UseZGC',
                '-XX:+ZGenerational', '-Dterminal.jline=false', '-Dterminal.ansi=false',
                *args.jvm_arg, '@' + str(launchers[-1]), 'nogui']
@@ -100,6 +124,7 @@ def main():
                   setup_commands=args.setup_command, finish_commands=args.finish_command,
                   extra_mods=[dict(name=p.name, sha256=hashlib.sha256(
                       (output / 'mods' / p.name).read_bytes()).hexdigest()) for p in args.extra_mod],
+                  datapacks=[str(p) for p in args.datapack],
                   config_files=[dict(name=p.name, sha256=hashlib.sha256(
                       (output / 'config' / p.name).read_bytes()).hexdigest()) for p in args.config_file],
                   chunky_sha256=hashlib.sha256(chunky[0].read_bytes()).hexdigest(),
@@ -144,6 +169,7 @@ def main():
                         r'faults=[1-9]|MISMATCHES(?: total)?=[1-9]|mismatches=[1-9]|BUGS(?:\([^)]*\))?=[1-9]|'
                         r'Failed to start the minecraft server|Encountered an unexpected exception')
     generation_start = None
+    cpu_start = None
     stop_sent = False
     try:
         while time.monotonic() - started < args.timeout:
@@ -170,14 +196,20 @@ def main():
                             'chunky center 2048 2048', f'chunky radius {args.radius}', 'chunky start'):
                     send(cmd)
                 generation_start = time.monotonic()
+                cpu_start = process_cpu_seconds(process.pid)
             if 'Task finished for minecraft:overworld' in line and not stop_sent:
                 result['generation_ok'] = True
                 result['generation_seconds'] = time.monotonic() - generation_start
+                cpu_end = process_cpu_seconds(process.pid)
+                if cpu_start is not None and cpu_end is not None:
+                    result['generation_cpu_seconds'] = cpu_end - cpu_start
                 result['chunky_result'] = line.strip()
                 count = re.search(r'Processed: ([\d,]+)', line)
                 if count:
                     result['chunks'] = int(count[1].replace(',', ''))
                     result['chunks_per_second'] = result['chunks'] / result['generation_seconds']
+                    if 'generation_cpu_seconds' in result:
+                        result['cpu_ms_per_chunk'] = 1000 * result['generation_cpu_seconds'] / result['chunks']
                 print(line.strip(), flush=True)
                 if args.profile:
                     send('jfr stop')

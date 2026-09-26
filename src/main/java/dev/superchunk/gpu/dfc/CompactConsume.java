@@ -168,6 +168,7 @@ public final class CompactConsume {
     private static final LongAdder fbLength = new LongAdder();
     private static final LongAdder fbAbsent = new LongAdder();
     private static final LongAdder fbUnknownByte = new LongAdder();
+    private static final LongAdder fbRoute = new LongAdder();
     private static final LongAdder fbDebugVoid = new LongAdder();
     private static final LongAdder faults = new LongAdder();
 
@@ -211,7 +212,7 @@ public final class CompactConsume {
     // =====================================================================
 
     private enum Reason {
-        OK, DISABLED, DEBUG_VOID, NO_ENTRY, NO_IDS, GEOMETRY, UNALIGNED, LENGTH, ABSENT, UNKNOWN_BYTE
+        OK, DISABLED, DEBUG_VOID, NO_ENTRY, NO_IDS, ROUTE, GEOMETRY, UNALIGNED, LENGTH, ABSENT, UNKNOWN_BYTE
     }
 
     private static final class Ctx {
@@ -273,6 +274,11 @@ public final class CompactConsume {
         byte[] ids = stored.ids;
         if (ids == null) {
             return Ctx.fail(Reason.NO_IDS);
+        }
+        // The key is position + lattice geometry, which another dimension can share: take only
+        // ids decided for this chunk's own dimension (its route), never a same-shaped neighbour's.
+        if (stored.route == null || stored.route != CompactIds.routeFor(nc)) {
+            return Ctx.fail(Reason.ROUTE);
         }
         if (ids.length != 256 * fullY) {
             return Ctx.fail(Reason.LENGTH);
@@ -365,6 +371,7 @@ public final class CompactConsume {
             case LENGTH -> fbLength.increment();
             case ABSENT -> fbAbsent.increment();
             case UNKNOWN_BYTE -> fbUnknownByte.increment();
+            case ROUTE -> fbRoute.increment();
             default -> {
             }
         }
@@ -478,6 +485,8 @@ public final class CompactConsume {
             consumeNanos.add(System.nanoTime() - t0);
             maybeReport();
             return true;
+        } catch (RecoveryFailed t) {
+            throw t;
         } catch (Throwable t) {
             // prepare/mapping failed before any write — safe to run the original loop.
             faults.increment();
@@ -522,7 +531,18 @@ public final class CompactConsume {
             }
         } catch (Throwable t2) {
             LOG.error("[compact-consume] section restore ALSO failed — chunk gen will surface the original fault.", t2);
-            throw new IllegalStateException("compact-consume fault recovery failed", t);
+            throw new RecoveryFailed(t);
+        }
+    }
+
+    /**
+     * The fill faulted and the sections could not be restored: the chunk is half-written, so the
+     * original loop must NOT run over it (it only writes non-air, so stray bytes would survive).
+     * Thrown past {@link #consumeFill}'s pre-flight catch so the chunk's generation fails instead.
+     */
+    private static final class RecoveryFailed extends IllegalStateException {
+        RecoveryFailed(Throwable cause) {
+            super("compact-consume fault recovery failed", cause);
         }
     }
 
@@ -805,58 +825,64 @@ public final class CompactConsume {
     private static void marksFromIds(ChunkAccess chunk, Ctx ctx, Mapping m, int fromY, int toY) {
         byte[] ids = ctx.ids;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        // SWAR word-skip: a mark needs a written FLUID with the sched bit. On the fixed
+        // SWAR section skip: a mark needs a written FLUID with the sched bit. On the fixed
         // kernel alphabet the fluid ids are exactly water=2/lava=3, so interesting bytes
         // are exactly {0x82, 0x83} == ((raw & 0xFE) == 0x82). Marks are rare (aquifer
-        // fluid surfaces), so an 8-bytes-per-long zero-byte-detect skips ~99% of the
-        // array with one branch per word; a hit replays the ORIGINAL per-byte logic
-        // over those 8 bytes in linear order — the by/bx/bz loop nest below IS linear
-        // ids order, so mark order and conditions are identical. If the mapping's
-        // fluid set is ever NOT exactly {2,3} (exotic datapack), fall back verbatim.
+        // fluid surfaces), so an 8-bytes-per-long zero-byte-detect proves ~every section
+        // mark-free. If the mapping's fluid set is ever NOT exactly {2,3} (exotic datapack),
+        // no section is skipped.
         boolean std = m.nonAir[2] && m.fluid[2] && m.nonAir[3] && m.fluid[3];
         for (int b = 0; b < m.fluid.length && std; b++) {
             if (b != 2 && b != 3 && m.nonAir[b] && m.fluid[b]) {
                 std = false;
             }
         }
-        if (std) {
-            int end = toY * 256;
-            for (int i = fromY * 256; i < end; i += 8) {
-                long w = (long) LONGS.get(ids, i);
-                long t = (w ^ 0x8282828282828282L) & 0xFEFEFEFEFEFEFEFEL;
-                if (((t - 0x0101010101010101L) & ~t & 0x8080808080808080L) == 0) {
-                    continue;   // no byte in {0x82, 0x83} among these 8
-                }
-                for (int j = i; j < i + 8; j++) {
-                    int raw = ids[j] & 0xFF;
-                    if ((raw & 0x80) != 0) {
-                        int b = raw & 0x7F;
-                        if (m.nonAir[b] && m.fluid[b]) {
-                            int rem = j & 255;
-                            pos.set(ctx.ox + (rem >> 4), ctx.oy + (j >> 8), ctx.oz + (rem & 15));
-                            chunk.markPosForPostprocessing(pos);
-                        }
-                    }
-                }
+        final int width = ctx.cellWidth;
+        final int cells = ctx.cellsXZ;
+        // fromY/toY are section-aligned (prepare() rejects unaligned noise ranges).
+        for (int sectionY = fromY; sectionY < toY; sectionY += 16) {
+            if (std && !anyMarkByte(ids, sectionY * 256, (sectionY + 16) * 256)) {
+                continue;
             }
-            return;
-        }
-        for (int by = fromY; by < toY; by++) {
-            int rowBase = by * 256;
-            for (int bx = 0; bx < 16; bx++) {
-                int base = rowBase + bx * 16;
-                for (int bz = 0; bz < 16; bz++) {
-                    int raw = ids[base + bz] & 0xFF;
-                    if ((raw & 0x80) != 0) {
-                        int b = raw & 0x7F;
-                        if (m.nonAir[b] && m.fluid[b]) {
-                            pos.set(ctx.ox + bx, ctx.oy + by, ctx.oz + bz);
-                            chunk.markPosForPostprocessing(pos);
+            // Each section keeps its own mark list, so only the order within a section matters,
+            // and it must be vanilla doFill's: cellX, cellZ ascending, then y descending (cellY
+            // and y-in-cell both descend), then x, z ascending within the cell. Id-array order
+            // (y ascending) changed the saved PostProcessing lists and the order fluids tick.
+            for (int cx = 0; cx < cells; cx++) {
+                for (int cz = 0; cz < cells; cz++) {
+                    for (int by = sectionY + 15; by >= sectionY; by--) {
+                        int rowBase = by * 256;
+                        for (int dx = 0; dx < width; dx++) {
+                            int bx = cx * width + dx;
+                            int base = rowBase + bx * 16;
+                            for (int dz = 0; dz < width; dz++) {
+                                int bz = cz * width + dz;
+                                int raw = ids[base + bz] & 0xFF;
+                                if ((raw & 0x80) != 0) {
+                                    int b = raw & 0x7F;
+                                    if (m.nonAir[b] && m.fluid[b]) {
+                                        pos.set(ctx.ox + bx, ctx.oy + by, ctx.oz + bz);
+                                        chunk.markPosForPostprocessing(pos);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /** Whether {@code ids[from, to)} holds a byte in {0x82, 0x83} (a scheduled water/lava id). */
+    private static boolean anyMarkByte(byte[] ids, int from, int to) {
+        for (int i = from; i < to; i += 8) {
+            long w = (long) LONGS.get(ids, i);
+            long t = (w ^ 0x8282828282828282L) & 0xFEFEFEFEFEFEFEFEL;
+            if (((t - 0x0101010101010101L) & ~t & 0x8080808080808080L) != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // =====================================================================
@@ -1392,12 +1418,12 @@ public final class CompactConsume {
             LOG.info("[compact-consume] ({}) chunks consumed={} (fast={} hybrid={}) mean {} ms/chunk | "
                             + "hybrid cells cpu={} consumed={} | sections bulk={} setLoop={} slowWrite={} | "
                             + "fallbacks: disabled={} lithiumUnsafe={} noEntry={} noIds={} geometry={} unaligned={} length={} "
-                            + "absent={} unknownByte={} debugVoid={} | faults={} (consume {})",
+                            + "absent={} unknownByte={} debugVoid={} route={} | faults={} (consume {})",
                     reason, consumed, chunksFast.sum(), chunksHybrid.sum(), String.format("%.3f", msPerChunk),
                     hybridCellsCpu.sum(), hybridCellsConsumed.sum(),
                     sectionsBulk.sum(), sectionsSetLoop.sum(), sectionsSlowWrite.sum(),
                     fbDisabled.sum(), fbLithiumUnsafe.sum(), fbNoEntry.sum(), fbNoIds.sum(), fbGeometry.sum(), fbUnaligned.sum(),
-                    fbLength.sum(), fbAbsent.sum(), fbUnknownByte.sum(), fbDebugVoid.sum(),
+                    fbLength.sum(), fbAbsent.sum(), fbUnknownByte.sum(), fbDebugVoid.sum(), fbRoute.sum(),
                     faults.sum(), disabled ? "DISABLED" : "enabled");
         }
         if (CompactIds.VERIFY) {

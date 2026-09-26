@@ -41,6 +41,21 @@ public abstract class MixinPalettedContainerGetAll<T> {
     private static final boolean SUPERCHUNK$ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.paletteGetAll", "true"));
 
+    /** Stand down when another mod hooks the replaced method ({@link dev.superchunk.worldgen.ForeignHooks}). */
+    @Unique
+    private static byte superchunk$hooks;
+
+    @Unique
+    private static boolean superchunk$unhooked() {
+        byte state = superchunk$hooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The palette getAll replica (PalettedContainer.getAll)",
+                    "net.minecraft.world.level.chunk.PalettedContainer#getAll");
+            superchunk$hooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
+
     @Shadow
     public volatile PalettedContainer.Data<T> data;
 
@@ -49,7 +64,7 @@ public abstract class MixinPalettedContainerGetAll<T> {
     // touch PalettedContainer siblings; a cancel-fight here would be silent feature loss).
     @WrapMethod(method = "getAll", require = 0)
     private void superchunk$fastGetAll(Consumer<T> consumer, Operation<Void> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$ENABLED || !superchunk$unhooked()) {
             original.call(consumer);
             return;
         }

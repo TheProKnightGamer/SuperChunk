@@ -29,6 +29,7 @@ public final class SchedulerRegressionTest {
         checkTicketTargets();
         checkBrokenHolderFutures();
         checkBrokenSchedulerFutures();
+        checkBrokenDependencyBlocker();
         checkSerialExecutor();
         checkWorkerLocks();
         checkDeferredReleasesAndFailures();
@@ -188,6 +189,69 @@ public final class SchedulerRegressionTest {
             else requireUnloaded(observers.get(status - 1));
         }
         requireUnloaded(holder.getFutureForStatus(Status.ALL[7]));
+    }
+
+    private static void checkBrokenDependencyBlocker() {
+        // Item 1 needs item 2 at status 4 to reach 5; item 2's upgrade to 4 fails. Item 2 is broken
+        // and its futures fail, but item 1 is not broken: it parks in its upgrade to 5 with pending
+        // futures (what froze the server thread), and findBrokenBlocker must name item 2.
+        ArrayDeque<Runnable> work = new ArrayDeque<>();
+        RuntimeException upgradeFailure = new RuntimeException("intentional item-2 upgrade failure");
+        StatusAdvancingScheduler<Integer, Object, Object, Object> scheduler = new StatusAdvancingScheduler<>() {
+            @Override protected Executor getBackgroundExecutor() { return work::addLast; }
+            @Override protected DepStatus getUnloadedStatus() { return DepStatus.ALL[0]; }
+            @Override protected Object makeContext(ItemHolder<Integer, Object, Object, Object> holder,
+                    ItemStatus<Integer, Object, Object> nextStatus,
+                    KeyStatusPair<Integer, Object, Object>[] dependencies, boolean isUpgrade) {
+                if (holder.getKey() == 2 && nextStatus == DepStatus.ALL[4]) throw upgradeFailure;
+                return new Object();
+            }
+            @Override protected ExceptionHandlingAction handleTransactionException(
+                    ItemHolder<Integer, Object, Object, Object> holder,
+                    ItemStatus<Integer, Object, Object> nextStatus, boolean isUpgrade, Throwable throwable) {
+                return ExceptionHandlingAction.MARK_BROKEN;
+            }
+        };
+        int brokenBefore = ItemHolder.brokenItemCount();
+        ItemHolder<Integer, Object, Object, Object> dependent = scheduler.addTicket(1, DepStatus.ALL[7], () -> { });
+        require(scheduler.findBrokenBlocker(1, DepStatus.ALL[7], 64) == null, "healthy in-flight item reported blocked");
+        int tasks = 0;
+        while (!work.isEmpty()) {
+            require(++tasks < 1_000, "scheduler never went idle");
+            work.removeFirst().run();
+        }
+        ItemHolder<Integer, Object, Object, Object> broken = scheduler.getHolder(2);
+        require(broken != null && (broken.getFlags() & ItemHolder.FLAG_BROKEN) != 0, "dependency was not marked broken");
+        require(broken.getStatus() == DepStatus.ALL[3], "broken dependency is not at status 3");
+        require(ItemHolder.brokenItemCount() == brokenBefore + 1, "broken item count did not rise by one");
+        require(dependent.getStatus() == DepStatus.ALL[4], "dependent is not parked below its broken dependency");
+        require(!dependent.getFutureForStatus(DepStatus.ALL[7]).isDone(), "test premise: the dependent's future is pending");
+        require(scheduler.findBrokenBlocker(1, DepStatus.ALL[7], 64) == 2, "blocker not found through the dependency");
+        require(scheduler.findBrokenBlocker(1, DepStatus.ALL[5], 64) == 2, "blocker not found for the next status");
+        require(scheduler.findBrokenBlocker(1, DepStatus.ALL[4], 64) == null, "a reached status reported blocked");
+        require(scheduler.findBrokenBlocker(2, DepStatus.ALL[7], 64) == 2, "a broken item is its own blocker");
+        require(scheduler.findBrokenBlocker(3, DepStatus.ALL[7], 64) == null, "an absent item reported blocked");
+        require(scheduler.findBrokenBlocker(1, DepStatus.ALL[7], 0) == null, "the node budget was not honoured");
+    }
+
+    /** Like {@link Status}, but status 5 of item 1 needs item 2 at status 4. */
+    private record DepStatus(int ordinal) implements ItemStatus<Integer, Object, Object> {
+        private static final DepStatus[] ALL = new DepStatus[16];
+        static {
+            for (int i = 0; i < ALL.length; i++) ALL[i] = new DepStatus(i);
+        }
+        @Override public DepStatus[] getAllStatuses() { return ALL; }
+        @Override public Completable upgradeToThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        @Override public Completable postUpgradeToThis(Object context) { return Completable.complete(); }
+        @Override public Completable preDowngradeFromThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        @Override public Completable downgradeFromThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        @SuppressWarnings("unchecked")
+        @Override public KeyStatusPair<Integer, Object, Object>[] getDependencies(ItemHolder<Integer, Object, Object, ?> holder) {
+            if (this.ordinal == 5 && holder.getKey() == 1) {
+                return new KeyStatusPair[]{new KeyStatusPair<>(2, ALL[4])};
+            }
+            return EMPTY_DEPENDENCIES;
+        }
     }
 
     private static void requireSucceeded(CompletableFuture<Void> future) {

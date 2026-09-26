@@ -71,6 +71,12 @@ public final class GpuBatchDispatcher implements AutoCloseable {
     private static final String SUPPORT_CL = "/superchunk/kernels/dfc_support.cl";
     private static final String KERNEL_NAME = "df_batch_lattice_multichunk";
 
+    /**
+     * How often the batch completer polls a batch's readback event, in nanoseconds
+     * ({@code -Dsuperchunk.gpu.completerPollMicros}, default 50; 0 = the driver's blocking wait).
+     */
+    static final long AWAIT_POLL_NANOS = 1000L * Long.getLong("superchunk.gpu.completerPollMicros", 50L);
+
     private final CLProgram program;
     private final boolean fp32;
     /** Slot queues carry CL_QUEUE_PROFILING_ENABLE — gates the per-command event capture. */
@@ -802,6 +808,15 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             return CLProgram.waitForEvent(readEvent);
         }
 
+        /**
+         * {@link #await()} for the batch completer: polls and parks instead of sitting in the
+         * driver's spinning wait. The few tens of microseconds of wake-up latency are hidden by
+         * the second batch in flight.
+         */
+        public boolean awaitParked() {
+            return AWAIT_POLL_NANOS <= 0L ? this.await() : CLProgram.awaitEventParked(readEvent, AWAIT_POLL_NANOS);
+        }
+
         /** Chunks with a decide-chain id slice this batch (0 = corner-only batch). */
         public int decidePresent() {
             return decidePresent;
@@ -862,16 +877,28 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         /**
          * Copies chunk {@code c}'s {@code M*n} slice out of the pinned staging into
          * {@code dst[0..sliceLen)}. Call only after a successful {@link #await()}.
+         * False when the dispatcher was closed meanwhile (the staging is freed; nothing read).
          */
-        public void readSlice(int c, double[] dst) {
-            int base = c * sliceLen;
-            if (fp32) {
-                FloatBuffer f = slot.hOutF;
-                for (int i = 0; i < sliceLen; i++) {
-                    dst[i] = f.get(base + i);
+        public boolean readSlice(int c, double[] dst) {
+            lifecycleLock.readLock().lock();
+            try {
+                // Same guard as ids(): close() unmaps the pinned staging under the write lock,
+                // and a completer that outlived its shutdown join must not read freed memory.
+                if (closed) {
+                    return false;
                 }
-            } else {
-                slot.hOutD.get(base, dst, 0, sliceLen);
+                int base = c * sliceLen;
+                if (fp32) {
+                    FloatBuffer f = slot.hOutF;
+                    for (int i = 0; i < sliceLen; i++) {
+                        dst[i] = f.get(base + i);
+                    }
+                } else {
+                    slot.hOutD.get(base, dst, 0, sliceLen);
+                }
+                return true;
+            } finally {
+                lifecycleLock.readLock().unlock();
             }
         }
 
@@ -890,28 +917,50 @@ public final class GpuBatchDispatcher implements AutoCloseable {
          * climate root {@code k}'s quart grid at {@code [k*climN ..]}) out of the slot's
          * climate pinned staging into {@code dst[0..climSliceLen)}. Call only after a
          * successful {@link #await()} and only when {@link #climateAvailable()}.
+         * False when the dispatcher was closed meanwhile (nothing read).
          */
-        public void readClimSlice(int c, double[] dst) {
-            int base = c * climSliceLen;
-            if (fp32) {
-                FloatBuffer f = slot.hClimOutF;
-                for (int i = 0; i < climSliceLen; i++) {
-                    dst[i] = f.get(base + i);
+        public boolean readClimSlice(int c, double[] dst) {
+            lifecycleLock.readLock().lock();
+            try {
+                if (closed) {
+                    return false;
                 }
-            } else {
-                slot.hClimOutD.get(base, dst, 0, climSliceLen);
+                int base = c * climSliceLen;
+                if (fp32) {
+                    FloatBuffer f = slot.hClimOutF;
+                    for (int i = 0; i < climSliceLen; i++) {
+                        dst[i] = f.get(base + i);
+                    }
+                } else {
+                    slot.hClimOutD.get(base, dst, 0, climSliceLen);
+                }
+                return true;
+            } finally {
+                lifecycleLock.readLock().unlock();
             }
         }
 
-        /** Bulk variant: the whole {@code K*M*n} buffer into {@code out} (blocking batchFill compat). */
-        void readAll(double[] out) {
-            if (fp32) {
-                FloatBuffer f = slot.hOutF;
-                for (int i = 0; i < outElems; i++) {
-                    out[i] = f.get(i);
+        /**
+         * Bulk variant: the whole {@code K*M*n} buffer into {@code out} (blocking batchFill compat).
+         * False when the dispatcher was closed meanwhile (nothing read).
+         */
+        boolean readAll(double[] out) {
+            lifecycleLock.readLock().lock();
+            try {
+                if (closed) {
+                    return false;
                 }
-            } else {
-                slot.hOutD.get(0, out, 0, outElems);
+                if (fp32) {
+                    FloatBuffer f = slot.hOutF;
+                    for (int i = 0; i < outElems; i++) {
+                        out[i] = f.get(i);
+                    }
+                } else {
+                    slot.hOutD.get(0, out, 0, outElems);
+                }
+                return true;
+            } finally {
+                lifecycleLock.readLock().unlock();
             }
         }
 
@@ -1036,7 +1085,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             if (!inf.await()) {
                 return false;
             }
-            inf.readAll(out);
+            if (!inf.readAll(out)) {
+                return false;
+            }
             if (idsOut != null && inf.decidePresent() > 0) {
                 long tIds0 = System.nanoTime();
                 for (int c = 0; c < K; c++) {
@@ -2011,6 +2062,16 @@ public final class GpuBatchDispatcher implements AutoCloseable {
 
         /** Frees every native resource this slot owns. Called only from close() (write lock). */
         void free() {
+            // Drain this slot's queue before freeing anything: a batch released without an
+            // await (failure or shutdown path) may still have non-blocking writes reading the
+            // host staging freed below, or reads writing into the pinned outputs.
+            if (queue != NULL) {
+                try {
+                    org.lwjgl.opencl.CL10.clFinish(queue);
+                } catch (Throwable ignored) {
+                    // a failed finish still frees; the context teardown reclaims the rest
+                }
+            }
             CLProgram.releaseKernel(decideKernel);
             decideKernel = NULL;
             CLProgram.releaseKernel(climKernel);

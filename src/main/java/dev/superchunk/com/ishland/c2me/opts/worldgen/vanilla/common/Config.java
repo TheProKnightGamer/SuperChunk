@@ -19,6 +19,8 @@ public class Config {
                     (may cause incompatibility with other mods)
                     """)
             .incompatibleMod("biolith", "*")
+            // upstream C2ME-NeoForge patch 0009: its End biomes are not a function of (x, z) alone
+            .incompatibleMod("simplyimprovedterrain", "*")
             .getBoolean(true, false);
 
     public static final boolean optimizeStructureWeightSampler = new ConfigSystem.ConfigAccessor()

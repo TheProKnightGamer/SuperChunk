@@ -25,15 +25,16 @@ import java.nio.file.StandardOpenOption;
  * <p>A mod cannot change the collector of the already-running JVM (it is fixed before the JVM
  * starts), so "automatic" means the next launch:
  * <ul>
- *   <li><b>Dedicated server</b>: if {@code user_jvm_args.txt} (read by the standard NeoForge run
- *       scripts) is present, writable, and selects no explicit collector, we append a marked ZGC
- *       block. Applies on the next restart; remove the block to revert.</li>
+ *   <li><b>Dedicated server</b>, when opted in: if {@code user_jvm_args.txt} (read by the standard
+ *       NeoForge run scripts) is present and writable, and neither it nor the running JVM's own
+ *       arguments select a collector, we append a marked ZGC block. Applies on the next restart;
+ *       remove the block to revert.</li>
  *   <li><b>Client</b>: the launcher owns JVM args, so we write {@code config/superchunk-jvm-args.txt}
  *       with the exact flags to paste into the launcher's JVM/"Additional Arguments" field, and log
  *       a WARN pointing at it.</li>
  * </ul>
- * Disable the write with {@code -Dsuperchunk.gc.autoConfig=false}; silence entirely with
- * {@code -Dsuperchunk.diag.gcAdvisory=false}.
+ * The {@code user_jvm_args.txt} write is opt-in with {@code -Dsuperchunk.gc.autoConfig=true} (off by
+ * default since 0.4.0); silence entirely with {@code -Dsuperchunk.diag.gcAdvisory=false}.
  */
 public final class GcAdvisory {
 
@@ -70,24 +71,27 @@ public final class GcAdvisory {
                 return;
             }
 
-            boolean autoWrite = Boolean.parseBoolean(System.getProperty("superchunk.gc.autoConfig", "true"));
+            // Editing the server's user_jvm_args.txt is opt-in: ZGC needs more memory than a
+            // compressed-oops G1 heap, so switching a memory-capped or small host silently can turn
+            // a working server into out-of-memory kills. The flags file in config/ is harmless.
+            boolean autoWrite = Boolean.parseBoolean(System.getProperty("superchunk.gc.autoConfig", "false"));
             String serverResult = autoWrite ? tryConfigureServerArgs() : null;
-            if (autoWrite) {
-                writeClientHint();
-            }
+            writeClientHint();
 
             if ("written".equals(serverResult)) {
                 LOGGER.warn("[SuperChunk] GC advisory: stop-the-world collector active ({}). AUTO-CONFIGURED "
                                 + "Generational ZGC in user_jvm_args.txt — RESTART the server to apply (remove that "
-                                + "marked block to revert; disable with -Dsuperchunk.gc.autoConfig=false).",
+                                + "marked block to revert; stop with -Dsuperchunk.gc.autoConfig=false).",
                         names);
             } else if ("conflict".equals(serverResult)) {
-                LOGGER.warn("[SuperChunk] GC advisory: stop-the-world collector active ({}) and user_jvm_args.txt "
+                // Advice, not a fault: shown with logging.verbose=true.
+                LOGGER.info("[SuperChunk] GC advisory: stop-the-world collector active ({}) and user_jvm_args.txt "
                                 + "already selects a collector — not overriding. For smooth chunk streaming replace it "
                                 + "with '{}' (Java 21) and give >= 8G heap.",
                         names, ZGC_FLAGS);
             } else {
-                LOGGER.warn("[SuperChunk] GC advisory: a stop-the-world collector is active ({}, heap {}MB). At high "
+                // Advice, not a fault: shown with logging.verbose=true.
+                LOGGER.info("[SuperChunk] GC advisory: a stop-the-world collector is active ({}, heap {}MB). At high "
                                 + "render/no-tick distances SuperChunk's GC pauses (tens–hundreds of ms) surface as "
                                 + "periodic stutter, NOT a memory leak. For smooth chunk streaming switch to Generational "
                                 + "ZGC — add '{}' to your launcher's JVM/Additional Arguments (client) and REMOVE any "
@@ -119,6 +123,12 @@ public final class GcAdvisory {
                     || lower.contains("useserialgc") || lower.contains("useconcmarksweepgc")) {
                 return "conflict"; // an explicit collector we won't silently override
             }
+            // The collector may also be chosen outside this file (the start script's java line,
+            // JDK_JAVA_OPTIONS, ...). Appending ZGC then selects two collectors and the JVM refuses
+            // to start, so only write when this JVM was launched with no explicit collector at all.
+            if (explicitCollectorElsewhere()) {
+                return "conflict";
+            }
             String nl = System.lineSeparator();
             String block = nl
                     + "# --- SuperChunk: Generational ZGC for smooth high-render-distance chunk streaming ---" + nl
@@ -130,6 +140,25 @@ public final class GcAdvisory {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** Whether this JVM's own arguments or Java option variables name a garbage collector. */
+    private static boolean explicitCollectorElsewhere() {
+        java.util.List<String> args = new java.util.ArrayList<>(
+                java.lang.management.ManagementFactory.getRuntimeMXBean().getInputArguments());
+        for (String variable : new String[] {"JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS"}) {
+            String value = System.getenv(variable);
+            if (value != null) {
+                args.addAll(java.util.Arrays.asList(value.trim().split("\\s+")));
+            }
+        }
+        for (String arg : args) {
+            String a = arg.toLowerCase(java.util.Locale.ROOT);
+            if (a.startsWith("-xx:+use") && a.endsWith("gc")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Turnkey reference for launcher-managed (client) setups where we cannot edit the JVM args. */

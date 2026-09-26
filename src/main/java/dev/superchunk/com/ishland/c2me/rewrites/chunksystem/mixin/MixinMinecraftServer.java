@@ -7,8 +7,6 @@ import com.llamalad7.mixinextras.sugar.Share;
 import com.llamalad7.mixinextras.sugar.ref.LocalLongRef;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import org.slf4j.Logger;
-import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -22,7 +20,8 @@ public abstract class MixinMinecraftServer {
 
     @Shadow public abstract Iterable<ServerLevel> getAllLevels();
 
-    @Shadow @Final private static Logger LOGGER;
+    @org.spongepowered.asm.mixin.Unique
+    private static final org.slf4j.Logger SUPERCHUNK$SHUTDOWN_LOG = org.slf4j.LoggerFactory.getLogger("SuperChunk-Shutdown");
 
     @Inject(method = "stopServer", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/MinecraftServer;waitUntilNextTick()V"))
     private void onTaskWait(CallbackInfo ci, @Share("c2me:shutdownLastPrint") LocalLongRef lastPrint, @Share("c2me:shutdownFirstPrint") LocalLongRef firstPrint) {
@@ -43,14 +42,14 @@ public abstract class MixinMinecraftServer {
                     }
                 }
                 if (haveState) {
-                    LOGGER.info(builder.toString());
+                    SUPERCHUNK$SHUTDOWN_LOG.info(builder.toString());
                 }
             }
 
             for (ServerLevel world : this.getAllLevels()) {
                 final int itemCount = ((IChunkSystemAccess) world.getChunkSource().chunkMap).c2me$getTheChunkSystem().itemCount();
                 if (itemCount > 0) {
-                    LOGGER.info("{}/{}: waiting for {} chunks to unload", world, world.dimension().location(), itemCount);
+                    SUPERCHUNK$SHUTDOWN_LOG.info("{}/{}: waiting for {} chunks to unload", world, world.dimension().location(), itemCount);
                 }
             }
             lastPrint.set(now);
