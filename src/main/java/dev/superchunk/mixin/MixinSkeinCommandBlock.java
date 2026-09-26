@@ -21,7 +21,7 @@ public abstract class MixinSkeinCommandBlock {
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true, require = 1)
     private void superchunk$deferCommandTick(BlockState state, ServerLevel level, BlockPos pos,
                                              RandomSource random, CallbackInfo ci) {
-        if (!SkeinCompat.isDimensionPhaseActive()) {
+        if (!SkeinCompat.isParallelPhaseActive()) {
             return;
         }
         // Selectors can read other levels before teleport/removal callbacks run. Defer

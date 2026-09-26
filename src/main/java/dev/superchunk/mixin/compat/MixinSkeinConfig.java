@@ -25,7 +25,7 @@ public abstract class MixinSkeinConfig {
     }
 
     @Inject(method = "refresh", at = @At("RETURN"), require = 1)
-    private static void superchunk$pinDimensionOnly(CallbackInfo ci) {
+    private static void superchunk$pinSupportedPhases(CallbackInfo ci) {
         SkeinCompat.afterConfigRefresh();
     }
 

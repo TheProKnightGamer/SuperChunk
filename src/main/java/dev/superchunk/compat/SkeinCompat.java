@@ -10,19 +10,19 @@ import java.lang.invoke.VarHandle;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Allows Skein's dimension owner through the per-level async catchers.
+ * Negotiates Skein dimension and cell ownership without weakening unrelated thread checks.
  *
  * <p>A worker can also run cell ticks or save jobs, so its class alone is not
  * evidence of exclusive level ownership. Only the dimension barrier, the
- * exact level's non-deferring owner, and a dimension-only configuration qualify.
- * Whole-server saves retain their server-thread requirement.
+ * exact level's non-deferring owner qualify for whole-level ticking. Cell workers
+ * may drive chunk callbacks only while holding their level's chunk-load lock.
+ * Whole-server saves retain their server-thread requirement; SuperChunk owns serialization.
  *
- * <p>Skein's Lithium detector does not recognise SuperChunk's relocated copy.
- * After every config refresh, explicitly disable Skein's in-level phases and
- * parallel saving in its live configuration, leaving its dimension setting
- * intact. Refreshes and registry rebuilds during the dimension barrier use
- * Skein's stale flag to run at the next server-tick boundary. No configuration
- * file is changed. An unknown API fails closed.
+ * <p>The versioned cell bridge recognizes bundled and standalone Lithium and
+ * checks the actual startup mixin configuration. SuperChunk disables conflicting
+ * Lithium caches before mixin selection. Older Skein builds retain the dimension-only
+ * policy. Reloads and whole command transactions wait for the relevant barriers.
+ * An incompatible API fails closed.
  */
 public final class SkeinCompat {
     private static final String[] PACKAGE_ROOTS = {"com.theproknightgamr.skein", "com.asher.skein"};
@@ -43,13 +43,13 @@ public final class SkeinCompat {
         if (Thread.currentThread() != serverThread) {
             throw new IllegalStateException("SuperChunk must configure Skein on the server thread before levels tick");
         }
-        pinDimensionOnly();
+        pinSupportedPhases();
     }
 
     /** Config refresh RETURN: also covers startup and commands executed after tickChildren HEAD. */
     public static void afterConfigRefresh() {
         if (BRIDGE != null) {
-            pinDimensionOnly();
+            pinSupportedPhases();
             deferredRefreshLogged.set(false);
         }
     }
@@ -66,10 +66,13 @@ public final class SkeinCompat {
         return true;
     }
 
-    private static void pinDimensionOnly() {
-        if (BRIDGE.pinDimensionOnly() && !warned) {
+    private static void pinSupportedPhases() {
+        if (BRIDGE.pinSupportedPhases() && !warned) {
             warned = true;
-            LogUtils.getLogger().warn("SuperChunk supports Skein dimension threading only: disabling Skein's "
+            if (BRIDGE.cellPhase != null) {
+                LogUtils.getLogger().info("SuperChunk negotiated Skein's cell bridge: tick phases require isolated random sources; "
+                        + "Skein parallel saving remains disabled because SuperChunk owns chunk serialization.");
+            } else LogUtils.getLogger().warn("SuperChunk supports Skein dimension threading only: disabling Skein's "
                     + "entities, randomTicks, blockEntities, scheduledTicks and saving parallel phases in its live "
                     + "configuration. Bundled Lithium assumes one thread per level. The dimensions setting and "
                     + "config file are unchanged; these compatibility pins are reapplied after config reloads.");
@@ -79,6 +82,15 @@ public final class SkeinCompat {
     /** True only for this level's exclusive dimension-ticking worker. */
     public static boolean isDimensionTicker(Level level) {
         return BRIDGE != null && BRIDGE.isDimensionTicker(level);
+    }
+
+    /** Cell workers may drive chunk callbacks only while holding Skein's chunk-load lock. */
+    public static boolean isChunkTaskOwner(Level level) {
+        return BRIDGE != null && BRIDGE.isChunkTaskOwner(level);
+    }
+
+    public static boolean isParallelPhaseActive() {
+        return BRIDGE != null && BRIDGE.isParallelPhaseActive();
     }
 
     /** All-level server tasks must wait until Skein releases its dimension barrier. */
@@ -93,7 +105,7 @@ public final class SkeinCompat {
      * fail instead of falling through into a partially executed command.
      */
     public static boolean deferCommand(Level level, Runnable command) {
-        if (BRIDGE == null || !BRIDGE.isDimensionPhaseActive()) {
+        if (BRIDGE == null || !BRIDGE.isParallelPhaseActive()) {
             return false;
         }
         var server = level == null ? null : level.getServer();
@@ -130,11 +142,17 @@ public final class SkeinCompat {
             }
             // Only an absent entry class permits trying another namespace. Once
             // found, every API member must come from that same implementation.
+            Class<?> cellBridge;
+            try {
+                cellBridge = classes.find(presentRoot + ".core.SuperChunkBridge");
+            } catch (ClassNotFoundException legacy) {
+                cellBridge = null;
+            }
             return new Bridge(classes.find(presentRoot + ".core.TickContext$Worker"),
                     classes.find(presentRoot + ".core.TickContext"),
                     classes.find(presentRoot + ".core.DimensionTicker"),
                     classes.find(presentRoot + ".SkeinConfig"),
-                    classes.find(presentRoot + ".SkeinConfig$Live"), levelType);
+                    classes.find(presentRoot + ".SkeinConfig$Live"), levelType, cellBridge);
         } catch (ReflectiveOperationException | LinkageError exception) {
             throw unsupported(exception);
         }
@@ -156,12 +174,16 @@ public final class SkeinCompat {
         private final MethodHandle dimensionPhase;
         private final MethodHandle deferPastBarrier;
         private final MethodHandle markConfigStale;
+        private final MethodHandle cellPhase;
+        private final MethodHandle chunkTaskOwner;
+        private final MethodHandle deferCellCommand;
+        private final MethodHandle supportsParallelTicks;
         private final VarHandle enabled;
         private final VarHandle dimensions;
         private final VarHandle[] parallelFlags = new VarHandle[PARALLEL_FLAGS.length];
 
         private Bridge(Class<?> worker, Class<?> context, Class<?> ticker, Class<?> config,
-                       Class<?> live, Class<?> levelType)
+                       Class<?> live, Class<?> levelType, Class<?> cellBridge)
                 throws ReflectiveOperationException {
             if (!Thread.class.isAssignableFrom(worker)) {
                 throw new NoSuchMethodException("Skein TickContext.Worker is not a Thread");
@@ -180,11 +202,28 @@ public final class SkeinCompat {
             for (int i = 0; i < PARALLEL_FLAGS.length; i++) {
                 this.parallelFlags[i] = lookup.findStaticVarHandle(live, PARALLEL_FLAGS[i], boolean.class);
             }
+            if (cellBridge == null) {
+                this.cellPhase = this.chunkTaskOwner = this.deferCellCommand = null;
+                this.supportsParallelTicks = null;
+            } else {
+                try {
+                    int version = (int) lookup.findStatic(cellBridge, "apiVersion", MethodType.methodType(int.class)).invokeExact();
+                    if (version != 1) throw new IllegalStateException("Unsupported Skein cell bridge version " + version);
+                } catch (Throwable error) {
+                    throw unsupported(error);
+                }
+                this.cellPhase = lookup.findStatic(cellBridge, "phaseActive", MethodType.methodType(boolean.class));
+                this.chunkTaskOwner = lookup.findStatic(cellBridge, "ownsChunkTasks", MethodType.methodType(boolean.class, levelType))
+                        .asType(MethodType.methodType(boolean.class, Object.class));
+                this.deferCellCommand = lookup.findStatic(cellBridge, "deferCommand", MethodType.methodType(boolean.class, levelType, Runnable.class))
+                        .asType(MethodType.methodType(boolean.class, Object.class, Runnable.class));
+                this.supportsParallelTicks = lookup.findStatic(cellBridge, "supportsParallelTicks", MethodType.methodType(boolean.class));
+            }
         }
 
         boolean deferConfigMutation() {
             try {
-                if (!(boolean) this.dimensionPhase.invokeExact()) {
+                if (!this.isParallelPhaseActive()) {
                     return false;
                 }
                 // markStale is the same volatile handoff used by Skein's file
@@ -204,7 +243,30 @@ public final class SkeinCompat {
             }
         }
 
+        boolean isParallelPhaseActive() {
+            try {
+                return this.cellPhase == null ? this.isDimensionPhaseActive() : (boolean) this.cellPhase.invokeExact();
+            } catch (Throwable exception) {
+                throw unsupported(exception);
+            }
+        }
+
+        boolean isChunkTaskOwner(Object level) {
+            if (this.isDimensionTicker(level)) return true;
+            try {
+                return level != null && this.chunkTaskOwner != null && !(boolean) this.parallelFlags[4].getVolatile()
+                        && (boolean) this.chunkTaskOwner.invokeExact(level);
+            } catch (Throwable exception) {
+                throw unsupported(exception);
+            }
+        }
+
         boolean deferCommand(Object level, boolean serverCoordinator, Runnable command) {
+            try {
+                if (this.deferCellCommand != null && (boolean) this.deferCellCommand.invokeExact(level, command)) return true;
+            } catch (Throwable exception) {
+                throw unsupported(exception);
+            }
             if (!this.isDimensionPhaseActive()) {
                 return false;
             }
@@ -223,13 +285,15 @@ public final class SkeinCompat {
             }
         }
 
-        boolean pinDimensionOnly() {
+        boolean pinSupportedPhases() {
             try {
-                if ((boolean) this.dimensionPhase.invokeExact()) {
+                if (this.isParallelPhaseActive()) {
                     throw new IllegalStateException("Cannot change Skein compatibility settings during a dimension phase");
                 }
                 boolean changed = false;
-                for (VarHandle flag : this.parallelFlags) {
+                int first = this.supportsParallelTicks != null && (boolean) this.supportsParallelTicks.invokeExact() ? 4 : 0;
+                for (int i = first; i < this.parallelFlags.length; i++) {
+                    VarHandle flag = this.parallelFlags[i];
                     if ((boolean) flag.getVolatile()) {
                         flag.setVolatile(false);
                         changed = true;
@@ -251,7 +315,8 @@ public final class SkeinCompat {
                         || (boolean) this.deferring.invokeExact() || !(boolean) this.owns.invokeExact(level)) {
                     return false;
                 }
-                for (VarHandle flag : this.parallelFlags) {
+                for (int i = this.cellPhase == null ? 0 : 4; i < this.parallelFlags.length; i++) {
+                    VarHandle flag = this.parallelFlags[i];
                     if ((boolean) flag.getVolatile()) {
                         return false;
                     }
