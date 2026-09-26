@@ -27,6 +27,15 @@ public class MixinServerChunkManager {
     @Redirect(method = "tickChunks", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkHolder;getTickingChunk()Lnet/minecraft/world/level/chunk/LevelChunk;"))
     private LevelChunk includeAccessibleChunks(ChunkHolder instance) {
         if (instance instanceof IFastChunkHolder fastChunkHolder) {
+            // SuperChunk: a FULL chunk outside the ticking range is listed only so its pending
+            // block/light changes get broadcast (vanilla lists ticking chunks only, and the spawn
+            // and block-tick steps refuse non-ticking ones anyway). Listing every FULL chunk cost a
+            // shuffle draw, an allocation and map lookups per chunk per tick (~1.7 ms/tick at view
+            // distance 44). A change made to one during this tick goes out next tick.
+            if (!fastChunkHolder.c2me$blockTicking()
+                    && !((dev.superchunk.com.ishland.c2me.notickvd.common.IPendingBroadcast) instance).superchunk$hasPendingBroadcast()) {
+                return null;
+            }
             return fastChunkHolder.c2me$immediateWorldChunk();
         } else {
             return instance.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);

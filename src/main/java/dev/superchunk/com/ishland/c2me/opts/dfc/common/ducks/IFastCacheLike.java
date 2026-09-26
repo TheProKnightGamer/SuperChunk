@@ -11,6 +11,17 @@ public interface IFastCacheLike extends DensityFunction {
 
     boolean c2me$getCached(double[] res, int[] x, int[] y, int[] z, EvalType evalType);
 
+    /**
+     * SuperChunk: fills {@code res} with exactly what calling {@link #c2me$getCached(int, int, int, EvalType)}
+     * for each element would return, when none of those calls can miss or throw; {@code false}
+     * (res untouched or partly written) otherwise, and the caller must go element by element.
+     * Lets generated code read a cache in bulk where it used to read it per element
+     * ({@code MulNode} with a constant factor). Only interpolators implement it.
+     */
+    default boolean c2me$getCachedPointwise(double[] res, int[] x, int[] y, int[] z, EvalType evalType) {
+        return false;
+    }
+
     void c2me$cache(int x, int y, int z, EvalType evalType, double cached);
 
     void c2me$cache(double[] res, int[] x, int[] y, int[] z, EvalType evalType);

@@ -21,13 +21,13 @@ public class GlobalExecutors {
 
     static {
         if (SchedulingUtil.isExternallyManaged()) {
-            System.out.println("[ScalableLux] Lighting scaling is enabled in externally managed mode");
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Lighting").info("[ScalableLux] Lighting scaling is enabled in externally managed mode");
         } else if (FORCE_ENABLED) {
-            System.out.println("[ScalableLux] Lighting scaling is forced enabled, using %d threads".formatted(Config.PARALLELISM));
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Lighting").info("[ScalableLux] Lighting scaling is forced enabled, using %d threads".formatted(Config.PARALLELISM));
         } else if (ENABLED) {
-            System.out.println("[ScalableLux] Lighting scaling is enabled, using %d threads".formatted(Config.PARALLELISM));
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Lighting").info("[ScalableLux] Lighting scaling is enabled, using %d threads".formatted(Config.PARALLELISM));
         } else {
-            System.out.println("[ScalableLux] Lighting scaling is disabled (due to low parallelism in the settings)");
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Lighting").info("[ScalableLux] Lighting scaling is disabled (due to low parallelism in the settings)");
         }
     }
 

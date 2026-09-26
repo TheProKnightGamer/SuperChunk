@@ -6,4 +6,7 @@ public interface IFastChunkHolder {
 
     LevelChunk c2me$immediateWorldChunk();
 
+    /** SuperChunk: whether the chunk has reached block ticking (vanilla {@code getTickingChunk() != null}). */
+    boolean c2me$blockTicking();
+
 }

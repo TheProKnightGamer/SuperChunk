@@ -36,7 +36,9 @@ public final class DhMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        return DistantHorizonsCompat.applyBatchGeneratorHooks();
+        // The step class has a different name in different DH builds; skip the absent one before
+        // Mixin looks it up (and logs a WARN for it on every boot).
+        return DistantHorizonsCompat.applyBatchGeneratorHooks() && OptionalTargets.present(targetClassName);
     }
 
     @Override

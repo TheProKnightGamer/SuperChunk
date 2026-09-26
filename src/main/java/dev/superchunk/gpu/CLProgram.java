@@ -941,6 +941,37 @@ public final class CLProgram implements AutoCloseable {
     }
 
     /**
+     * {@link #waitForEvent} without the driver's wait, for a thread that only collects results:
+     * NVIDIA's {@code clWaitForEvents} spins its thread for the whole wait (the batch completer
+     * burned 0.7-0.9 of a core doing nothing). Polls the event's status and parks
+     * {@code pollNanos} between polls. False on any error / NULL / a failed command, like
+     * {@link #waitForEvent}.
+     */
+    public static boolean awaitEventParked(long event, long pollNanos) {
+        if (event == NULL) {
+            return false;
+        }
+        try (MemoryStack stack = stackPush()) {
+            IntBuffer status = stack.mallocInt(1);
+            while (true) {
+                if (clGetEventInfo(event, CL_EVENT_COMMAND_EXECUTION_STATUS, status, null) != CL_SUCCESS) {
+                    return false;
+                }
+                int state = status.get(0);
+                if (state == CL_COMPLETE) {
+                    return true;
+                }
+                if (state < 0) {
+                    return false; // the command terminated with an error
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(pollNanos);
+            }
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
      * Non-blocking query: true iff {@code event}'s command has already completed
      * (execution status == {@code CL_COMPLETE}). Used purely for instrumentation
      * (did the async readback finish before we needed it?). Never throws.

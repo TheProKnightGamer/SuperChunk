@@ -56,62 +56,68 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
      ("Disabling ioSystem.gcFreeChunkSerializer: Incompatible with architectury") — a graceful
      built-in stand-down, not a crash. Nothing to do.
 
+  Worldgen-overlap check, 2026-09-24 (0.4.0 plus the optimizations in
+  analysis/optimization-2026-09-24.md):
+  The 167 mods of a real server modpack were scanned for mixins into the classes those
+  optimizations touch. The nine that overlap worldgen were then run together with SuperChunk.
+  Each run generated a fresh radius-512 world (4,225 chunks), saved it and stopped cleanly with
+  zero ERROR lines. The mods were:
+    lithostitched 1.5.4, deeper-oceans 2.0.0, yungsapi 5.1.6, YUNG's Better Mineshafts 5.1.1,
+    YUNG's Better Strongholds 5.1.3, lithium (standalone) 0.15.1, sparsestructures 3.0,
+    moogs_structures 1.1.0, async-locator-refined 1.5.2
+  Every verify flag was on. The new code paths matched vanilla on 248M biome-zoom checks,
+  8.5M climate lookups and 8.9M ore-vein generators, with zero mismatches.
+  Those optimizations stand down automatically whenever another mod's mixin is merged into the
+  classes they replace (BiomeManager, the Climate R-tree, the Xoroshiro random classes). None of
+  these nine do so, so all of the optimizations stayed on.
+
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
-  skein ................. Skein ................................. dimension threading only
+  skein ................. Skein ................................. parallel tick phases
 
-    SuperChunk's per-level async catchers now recognise Skein's exclusive dimension owner.
-    A worker's class alone does not qualify: the caller must own the exact level, be outside a
-    deferring in-level task, and be inside Skein's active dimension barrier. Skein and dimension
-    threading must also be enabled, with the incompatible parallel phases disabled. Whole-server
-    saveAllChunks/saveEverything require the server thread and an inactive dimension barrier.
-    C2ME's opportunistic all-level autosave scan also pauses while dimensions tick in parallel.
+    Updated Skein exposes version 1 of its optional SuperChunk cell bridge. With both updated
+    jars installed, dimensions, entities, random blocks, block entities and opted-in scheduled
+    ticks can run in parallel. Older Skein builds retain dimension-only compatibility. Existing
+    user settings still decide which supported phases run; scheduled ticks remain opt-in.
 
-    The same ownership check covers the chunk executor's thread identity and C2ME's checked
-    per-level random source. This lets the exclusive dimension owner finish synchronous chunk
-    loads without failing status-transition thread assertions, and retains the level's original
-    random stream. C2ME's synchronous-load instrumentation also preserves managedBlock executor
-    pumping on a dimension owner; skipping it left command-block terrain queries waiting forever
-    at the following chunk-future join. Bundled Lithium's chunk load/unload callbacks and loaded
-    block-entity lookup accept the same exclusive owner. Unrelated workers keep the normal
-    thread checks.
+    Before Lithium selects its mixins, SuperChunk disables nine shared-cache options when Skein
+    is installed: alloc.chunk_random, util.world_border_listener,
+    world.block_entity_ticking.world_border, world.chunk_access, block.hopper,
+    chunk.entity_class_groups, entity.inactive_navigations,
+    entity.collisions.unpushable_cramming and util.block_entity_retrieval. This applies to bundled
+    and standalone Lithium through the generated lithium.properties. Other optimizations remain
+    available. Skein checks the actual startup configuration, including the relocated bundled
+    implementation; editing the file after boot cannot pretend an applied mixin is disabled.
 
-    Command-block ticks and powered command-minecart activations wait until the dimension barrier
-    closes, then run on the server thread in the same server tick. The whole transaction is
-    deferred: global entity selection, cross-dimension teleports, success counts, conditional
-    command chains, repeating-block scheduling and minecart cooldown updates remain together.
-    Deferring only an entity's removal would leave a transfer partially applied and would not
-    protect the earlier selector reads. This moves command effects to the end of the parallel
-    dimension phase; it does not grant workers access to another dimension.
+    Whole-level access requires the exact dimension owner inside its active barrier. Cell workers
+    cannot claim that role. They may drive their level's chunk executor only while holding Skein's
+    chunk-load lock; unrelated threads retain the original checks. Bundled chunk lifecycle
+    callbacks use this rule, and updated Skein supplies the corresponding standalone Lithium hook.
+    Random isolation must already exist on every level before cell phases are allowed.
 
-    Skein's Lithium detector does not recognise SuperChunk's relocated Lithium. To preserve its
-    one-thread-per-level assumptions, SuperChunk pins SkeinConfig.Live entities, randomTicks,
-    blockEntities, scheduledTicks and parallelSaving to false immediately after each configuration
-    refresh, including startup and /skein reload from tick functions. MinecraftServer.tickChildren
-    entry reapplies the pins after ServerTickEvent.Pre and before level dispatch. Skein's
-    configuration file and dimensions setting are unchanged. A warning explains any suppressed
-    parallel phases.
+    Command blocks and command minecarts defer whole transactions across cell and dimension
+    barriers, including selectors, cross-dimension teleports, success counts and conditional
+    chains. Configuration and registry refreshes wait until workers finish. These checks remain
+    active when dimension threading is disabled but cell threading is enabled.
 
-    Any remaining reload request during an active dimension barrier is deferred through Skein's
-    stale flag to the next server-tick boundary. Both configuration refresh and registry-set
-    rebuilds wait until workers finish; /skein reload reports a queued request when called there.
-    Unsafe parallel phases and shared registry sets cannot be restored underneath running workers.
+    SuperChunk owns chunk serialization. Skein parallelSaving stays disabled; whole-server save
+    operations retain their server-thread requirement. C2ME's all-level autosave scan pauses
+    during dimension work. The live compatibility policy is reapplied after config reloads.
 
-    The bridge uses reflective ownership/configuration APIs without a required Skein dependency,
-    recognising both com.theproknightgamr.skein and the earlier com.asher.skein package names.
-    A detected Skein version with an unknown API fails closed with an explicit compatibility
-    error; no worker exemption is granted by guessing. This support is limited to dimension
-    threading; parallel work within a level and parallel chunk saving remain disabled while
-    SuperChunk is installed.
+    VALIDATION: 120 bridge ownership/configuration/command-queue checks. Real transformed-server
+    tests exercised all four in-level phases together in three dimensions with bundled and
+    standalone Lithium 0.15.4: 288 hopper/chest pairs conserved all items, 96 random-ticked leaves
+    decayed, 192 scheduled leaves updated, and four concurrent cell tasks loaded missing chunks.
+    The same run passed 32 seeded explosion comparisons, 512 concurrent projectile-query checks,
+    and 100 entity stress ticks split between the cluster and grid schedulers.
 
-    VALIDATION: 97 ownership/configuration/command-queue checks pass. Packaged Skein 1.0.0 on
-    NeoForge 21.1.248 passes fresh generation (1,089 requested chunks), save/restart, tick-function
-    and command-block reloads, three-dimension hopper transfers, local and cross-dimension
-    spreadplayers commands, a conditional command chain, and a powered command minecart.
-    No captured errors or quarantined dimensions occurred. Both known Skein package namespaces
-    boot successfully. Reproduce with tools/verify-skein-server.py; artifact hashes and limits
-    are in analysis/publication-review-2026-09-22.md. This is not a general modpack guarantee.
+    Packaged jars on NeoForge 21.1.248 passed 1,089 requested chunks of generation, saves/restart,
+    tick-function and command-block reloads, inventory transfers in all dimensions, local and
+    cross-dimension spreadplayers, conditional chains, and powered command-minecart commands.
+    Reproduce that suite with tools/verify-skein-server.py --parallel-phases. Omit the flag when
+    testing older, dimension-only Skein. This is bounded compatibility testing, not a general
+    modpack guarantee.
 
   modernfix ............. ModernFix (singleplayer only) ........... PASS (after fix)
 
@@ -269,7 +275,7 @@ FIXED  (was incompatible; SuperChunk changed to support it)
     retires after 60s idle (-Dsuperchunk.io.storageIdleRetireMillis, 0 disables); the next task
     transparently starts a fresh one, and close() starts one on purpose so the final flush still
     runs after a retirement. An abandoned storage now costs no thread at all, matching vanilla's
-    shape. A one-shot WARN fires at 64 concurrent storages (-Dsuperchunk.io.storageLeakWarnAt)
+    shape. A one-shot WARN fires at 192 concurrent storages (-Dsuperchunk.io.storageLeakWarnAt)
     naming the situation, since the leak itself is upstream and worth reporting there.
 
     VERIFIED 2026-09-15 on the dev dedicated server with the retire threshold shortened to 3s:
@@ -533,6 +539,23 @@ INCOMPATIBLE  (unfixable)
     SAME-RISK, UNTESTED, ALSO IN THAT PACK: chunksending (its own ChunkHolderMixin), smoothchunk,
     cupboard and sable all mix into ServerChunkCache/ChunkHolder. None got the chance to fail before
     Better Chunk Loading did — removing betterchunkloading may simply surface the next one.
+
+  scalablelux / c2me / noisium ... the standalone copies of bundled mods ... FAIL (hard, by design)
+
+    REPRODUCED 2026-09-25: a dedicated server with SuperChunk 0.4.0 plus ONE of ScalableLux 0.1.0.1,
+    C2ME-NeoForge 0.4.0-alpha.0.106 or Noisium 2.7.0 (all for 1.21.1) exits within seconds, before
+    the mod list:
+      scalablelux, c2me: IllegalArgumentException: Decoration with key 'fabric-modId' already exists
+        on config scalablelux.mixins.json / c2me-base.mixins.json. FML decorates every mixin config
+        with the id of the mod that lists it, and both mods ship configs under the exact names
+        SuperChunk registers for its bundled copies.
+      noisium: InjectionError: Critical injection failure: Redirector
+        noisium$populateNoiseWrapSetBlockStateOperation — its redirect collides with the bundled one.
+    RESOLUTION: remove the standalone jar; SuperChunk already contains it. Declared incompatible in
+    neoforge.mods.toml since 0.4.0, which turns the raw Mixin crash into NeoForge's error screen
+    naming the mod to remove. Renaming our configs would NOT be a fix: the crash would become the
+    same mixins applying twice. (VMP is also bundled; not declared, as no 1.21.1 jar was at hand to
+    reproduce with.)
 
 =============================================================
 ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per request)

@@ -4,7 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class LithiumMod {
-    private static final Logger LOGGER = LoggerFactory.getLogger("Lithium");
+    private static final Logger LOGGER = LoggerFactory.getLogger("SuperChunk-Lithium");
 
     private static String MOD_VERSION;
 

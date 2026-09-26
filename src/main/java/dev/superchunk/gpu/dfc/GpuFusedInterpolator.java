@@ -652,7 +652,21 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                     // metric. Short-circuits so the biome path (recordAsyncServe=false) issues
                     // NO clGetEventInfo and NO second lock cycle.
                     boolean alreadyComplete = recordAsyncServe && CLProgram.eventComplete(event);
-                    CLProgram.waitForEvent(event);
+                    if (!CLProgram.waitForEvent(event)) {
+                        // The dispatch or its read failed (device error, kernel abort): the staging
+                        // holds no valid result for this chunk. Never serve it — take the blocking
+                        // fallback, which reports its own failure instead of returning stale data.
+                        if (mappedPtr != NULL) {
+                            try {
+                                rt.unmapAsyncRead(mappedPtr, mappedBytes);
+                            } catch (Throwable ignored) {
+                                // the context teardown reclaims a map that cannot be released
+                            }
+                            mappedPtr = NULL;
+                        }
+                        LOGGER.warn("[SuperChunk-GPU] [fusion] async fused read failed — blocking fallback.");
+                        return false;
+                    }
                     if (mappedPtr != NULL) {
                         // ZERO-COPY: read the per-root slices DIRECTLY from the mapped host-
                         // resident corner buffer (byte-for-byte the same conversion as the
@@ -787,13 +801,15 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                 }
                 boolean any = evValue != NULL || evLerp3 != NULL;
                 try {
+                    // A failed wait means the staging is not this chunk's field: report "not ready".
+                    boolean ok = true;
                     if (evLerp3 != NULL) {
-                        CLProgram.waitForEvent(evLerp3);
+                        ok &= CLProgram.waitForEvent(evLerp3);
                     }
                     if (evValue != NULL) {
-                        CLProgram.waitForEvent(evValue);
+                        ok &= CLProgram.waitForEvent(evValue);
                     }
-                    return any;
+                    return any && ok;
                 } finally {
                     CLProgram.releaseEvent(evValue);
                     CLProgram.releaseEvent(evLerp3);
@@ -1717,10 +1733,11 @@ public final class GpuFusedInterpolator implements AutoCloseable {
                 } else {
                     // Synchronous production: wait on both readbacks (the worker never waits — it
                     // serves the field ready). Wait order is irrelevant to the values.
-                    if (evLerp3 != NULL) {
-                        CLProgram.waitForEvent(evLerp3);
+                    boolean ok = evLerp3 == NULL || CLProgram.waitForEvent(evLerp3);
+                    ok &= CLProgram.waitForEvent(evValue);
+                    if (!ok) {
+                        return false; // failed read: leave the holder unserved rather than stale
                     }
-                    CLProgram.waitForEvent(evValue);
                     // Copy pinned staging -> holder's REUSED arrays (the only per-chunk memcpy; no
                     // allocation). fp32 widens float->double (exact; matches the fast-path read).
                     copyStagingInto(holder.value, total, false);

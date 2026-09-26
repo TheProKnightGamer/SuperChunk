@@ -41,6 +41,7 @@ public class PlayerNoTickLoader {
     private final LongSet managedChunks = new LongLinkedOpenHashSet();
     private final LongFunction<ChunkIterator> createFunction = pos -> new SpiralIterator(ChunkPos.getX(pos), ChunkPos.getZ(pos), this.viewDistance);
     private final ReferenceArrayList<CompletableFuture<Void>> chunkLoadFutures = new ReferenceArrayList<>();
+    private final StuckLoadSweeper stuckLoads = new StuckLoadSweeper();
     private final AtomicBoolean closing = new AtomicBoolean(false);
 
     private int viewDistance = 12;
@@ -128,6 +129,7 @@ public class PlayerNoTickLoader {
     }
 
     void tickFutures() {
+        this.stuckLoads.sweep(((IChunkSystemAccess) this.tacs).c2me$getTheChunkSystem());
         this.chunkLoadFutures.removeIf(CompletableFuture::isDone);
 
         if (this.closing.get()) return;
@@ -170,7 +172,7 @@ public class PlayerNoTickLoader {
     }
 
     private CompletableFuture<Void> loadChunk(int x, int z) {
-        CompletableFuture<Void> future = this.loadChunk0(x, z);
+        CompletableFuture<Void> future = this.stuckLoads.track(this.loadChunk0(x, z), new ChunkPos(x, z));
         future.thenRunAsync(() -> {
             try {
                 this.chunkLoadFutures.remove(future);

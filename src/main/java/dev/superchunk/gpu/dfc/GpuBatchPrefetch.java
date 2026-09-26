@@ -237,7 +237,8 @@ public final class GpuBatchPrefetch {
                         // the grids (PROBE: the consumer ignores them — counters prove
                         // arrival). Written drainer-side before the future completed.
                         byte[] ids = CompactIds.PROBE && handle != null ? handle.ids() : null;
-                        GpuBatchStore.put(key, new GpuBatchStore.Stored(ffused, ext, grids, holder, ids));
+                        GpuBatchStore.put(key, new GpuBatchStore.Stored(ffused, ext, grids, holder, ids,
+                                aux != null ? aux.route : null));
                         if (CompactIds.PROBE) {
                             CompactIds.recordDeposit(ids);
                         }

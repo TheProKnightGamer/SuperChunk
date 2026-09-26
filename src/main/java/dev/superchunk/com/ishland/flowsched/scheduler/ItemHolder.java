@@ -128,6 +128,20 @@ public class ItemHolder<K, V, Ctx, UserData> {
         return pair != null ? pair.right() : null;
     }
 
+    /**
+     * {@link #upgradingStatusTo()} and {@link #getDependencies} without the open check, for
+     * {@link StatusAdvancingScheduler#findBrokenBlocker}, which reads holders it does not own and
+     * must not print an assertion trace when one closes under it.
+     */
+    ItemStatus<K, V, Ctx> peekUpgradingStatus() {
+        final Pair<CancellationSignaller, ItemStatus<K, V, Ctx>> pair = this.runningUpgradeAction.get();
+        return pair != null ? pair.right() : null;
+    }
+
+    synchronized KeyStatusPair<K, V, Ctx>[] peekDependencies(ItemStatus<K, V, Ctx> status) {
+        return this.requestedDependencies[status.ordinal()];
+    }
+
     public void addTicket(ItemTicket<K, V, Ctx> ticket) {
         assertOpen();
         final boolean add = this.tickets.checkAdd(ticket);
@@ -321,10 +335,13 @@ public class ItemHolder<K, V, Ctx, UserData> {
                 return;
             }
             for (int i = Math.max(currentStatus.ordinal(), targetStatus.ordinal()) + 1; i < this.futures.length; i ++) {
-                if (futuresToFire == null) futuresToFire = new ArrayList<>();
                 CompletableFuture<Void> oldFuture = this.futures[i];
-                futuresToFire.add(oldFuture);
                 this.futures[i] = UNLOADED_FUTURE;
+                // Completing a done future is a no-op, but completeExceptionally still allocates
+                // its result wrapper first; UNLOADED_FUTURE itself is always done.
+                if (oldFuture.isDone()) continue;
+                if (futuresToFire == null) futuresToFire = new ArrayList<>();
+                futuresToFire.add(oldFuture);
             }
         }
         if (futuresToFire != null) {
@@ -413,6 +430,11 @@ public class ItemHolder<K, V, Ctx, UserData> {
      * {@code getChunk} gets null, a creating one throws "Chunk not there when requested" — so the
      * failure is immediate and the earlier "Error upgrading chunk" line in the log is the diagnosis.
      *
+     * <p>Only this holder's own futures are failed. Items waiting on it through a dependency ticket
+     * (for a chunk, the neighbours that need it at a status it will never reach) are not broken and
+     * keep their futures pending; the server thread's wait on one of those is ended by
+     * {@link StatusAdvancingScheduler#findBrokenBlocker} instead.
+     *
      * <p>Futures are collected under the monitor but completed outside it: completion runs dependent
      * stages inline, and those reach back into this holder.
      *
@@ -471,9 +493,24 @@ public class ItemHolder<K, V, Ctx, UserData> {
         return this.flags.get();
     }
 
+    /**
+     * SuperChunk: how many open holders, across every scheduler, are {@link #FLAG_BROKEN} right now.
+     * Zero in a healthy game, which lets a waiter skip
+     * {@link StatusAdvancingScheduler#findBrokenBlocker} with one volatile read. Counted on the flag's
+     * transitions only; a holder released while still broken is uncounted in {@link #release()}.
+     */
+    public static int brokenItemCount() {
+        return BROKEN_ITEMS.get();
+    }
+
+    private static final AtomicInteger BROKEN_ITEMS = new AtomicInteger();
+
     public void setFlag(int flag) {
         assertOpen();
-        this.flags.getAndUpdate(operand -> operand | flag);
+        final int prev = this.flags.getAndUpdate(operand -> operand | flag);
+        if ((flag & FLAG_BROKEN) != 0 && (prev & FLAG_BROKEN) == 0) {
+            BROKEN_ITEMS.incrementAndGet();
+        }
     }
 
     /**
@@ -482,7 +519,10 @@ public class ItemHolder<K, V, Ctx, UserData> {
     public void clearFlag(int flag) {
         assertOpen();
         Assertions.assertTrue((flag & FLAG_REMOVED) == 0, "Cannot clear FLAG_REMOVED");
-        this.flags.getAndUpdate(operand -> operand & ~flag);
+        final int prev = this.flags.getAndUpdate(operand -> operand & ~flag);
+        if ((flag & FLAG_BROKEN) != 0 && (prev & FLAG_BROKEN) != 0) {
+            BROKEN_ITEMS.decrementAndGet();
+        }
     }
 
     void release() {
@@ -490,7 +530,10 @@ public class ItemHolder<K, V, Ctx, UserData> {
         synchronized (this) {
             this.tickets.assertEmpty();
         }
-        setFlag(FLAG_REMOVED);
+        final int prev = this.flags.getAndUpdate(operand -> operand | FLAG_REMOVED);
+        if ((prev & FLAG_BROKEN) != 0 && (prev & FLAG_REMOVED) == 0) {
+            BROKEN_ITEMS.decrementAndGet();
+        }
     }
 
     public void addDependencyTicket(StatusAdvancingScheduler<K, V, Ctx, ?> scheduler, K key, ItemStatus<K, V, Ctx> status, Runnable callback) {

@@ -385,6 +385,10 @@ tasks.named('test') { failOnNoDiscoveredTests = false }
     aquiferColumnRegressionTest: 'dev.superchunk.worldgen.AquiferColumnCacheTest',
     positionalFloatRegressionTest: 'dev.superchunk.worldgen.FirstPositionalFloatTest',
     biomeCacheRegressionTest: 'dev.superchunk.worldgen.BiomeQuartCacheTest',
+    flatClimateRegressionTest: 'dev.superchunk.worldgen.FlatClimateIndexTest',
+    biomeFiddleCacheRegressionTest: 'dev.superchunk.worldgen.BiomeFiddleCacheTest',
+    configDocsRegressionTest: 'dev.superchunk.config.SuperChunkConfigDocsTest',
+    mixinTargetScanRegressionTest: 'dev.superchunk.MixinTargetScanTest',
     skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest'
 ].each { taskName, testMain ->
     def regression = tasks.register(taskName, JavaExec) {
@@ -393,6 +397,10 @@ tasks.named('test') { failOnNoDiscoveredTests = false }
         dependsOn tasks.named('testClasses')
         classpath = sourceSets.test.runtimeClasspath
         mainClass = testMain
+        // Minecraft's logging writes logs/ into the working directory; keep it out of the tree.
+        def runDir = layout.buildDirectory.dir('regression-tests').get().asFile
+        workingDir = runDir
+        doFirst { runDir.mkdirs() }
     }
     tasks.named('check') { dependsOn regression }
 }

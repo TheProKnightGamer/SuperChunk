@@ -55,9 +55,9 @@ provable rather than tuned:
 2. Drop **`superchunk-<version>.jar`** into `mods/`. That one jar works on both
    sides — it bundles the OpenCL bindings it needs and leaves a client's own
    LWJGL alone. The OpenCL driver comes from your GPU vendor's normal driver.
-3. GPU offload turns on automatically when a capable device is present, and
-   falls back to the CPU path cleanly when it isn't. One switch:
-   `gpu.enabled=true|false` in `config/superchunk.properties`.
+3. GPU offload is off by default. Turn it on with `gpu.enabled=true` in
+   `config/superchunk.properties`; it needs an OpenCL GPU with double-precision
+   (fp64) support, and falls back to the CPU path cleanly when none is usable.
 4. Optional tuning — worker count and heap are the only machine-specific knobs
    (C2ME auto-scales by default):
 
@@ -75,19 +75,25 @@ provable rather than tuned:
    worth nothing on its own and everything in combination: raising it alone is
    −0.5%, the round-10 kernel work alone is −1.4% (a faster kernel drains the GPU
    batcher and shrinks its batches), and together they are **+6.3%**.
+5. SuperChunk is quiet by default: it logs only warnings and errors. Set
+   `logging.verbose=true` in `config/superchunk.properties` to also see its
+   startup summaries and any diagnostics you enable — do that before
+   capturing a log for a bug report.
 
 **Do not also install standalone C2ME, ScalableLux, Noisium, or VMP** — they're
 inside this jar. Standalone **Lithium is fine**: if one is present, SuperChunk's
 bundled copy stands down and the installed one takes over.
 
-**Skein:** SuperChunk supports Skein's parallel dimension ticking. It automatically
-disables Skein's parallel entity, random-block, block-entity, scheduled-tick, and
-saving phases in the live configuration to preserve the bundled optimizations'
-threading assumptions. The config file is unchanged, and the compatibility settings
-are reapplied after reloads. See [compatibility.txt](compatibility.txt) for the
-tested versions and limitations. Command blocks and command minecarts execute
-after parallel dimension ticking within the same server tick, keeping global
-selectors and conditional command chains together on the server thread.
+**Skein:** With the updated Skein cell bridge, SuperChunk supports parallel
+dimensions, entities, random blocks, block entities, and opted-in scheduled ticks.
+It automatically disables the conflicting shared Lithium caches before mixins
+load, for either bundled or standalone Lithium. Skein checks Lithium's actual
+startup configuration. Older Skein builds retain dimension-only support.
+SuperChunk keeps ownership of serialization, so Skein's parallel-saving phase
+stays off. Reloads preserve these rules. Command blocks and command minecarts
+wait for cell and dimension barriers within the same server tick, preserving
+selectors and conditional command chains. See [compatibility.txt](compatibility.txt)
+for the tested versions and limitations.
 
 ## What's inside
 
@@ -157,6 +163,14 @@ does not establish universal equivalence. See
 [`analysis/optimization-2026-09-21.md`](analysis/optimization-2026-09-21.md)
 for the optimization results and precision checks.
 
+The CPU noise fill has a whole-pregen check besides the lockstep verify flags: with
+`-Dsuperchunk.debug.noiseFillHash=<file>` every chunk's fill is hashed, and since a chunk's fill
+depends only on its position and seed, two runs must agree chunk for chunk
+(`tools/noisehashdiff.py`). Its first run found that SuperChunk's older cross-chunk aquifer
+cache let the first chunk to compute an aquifer cell decide it for its neighbours where vanilla
+computes it per chunk (5–7 chunks per 4,882 differed); fixed 2026-09-25, see
+[`analysis/worldgen-big-2026-09-25.md`](analysis/worldgen-big-2026-09-25.md).
+
 ## Building
 
 ```bash
@@ -174,6 +188,10 @@ Install the plain jar, not the `-core` one — that rides inside it.
 - `analysis/optimization-2026-09-21.md` — CPU/GPU consumer optimizations, regression checks, and fresh-world benchmarks
 - `analysis/optimization-round2-2026-09-21.md` — further biome, aquifer, surface, serialization, and GPU allocation improvements
 - `analysis/publication-review-2026-09-22.md` — independent review, Skein compatibility, and publication checks
+- `analysis/optimization-2026-09-24.md` — exact biome-lookup (climate R-tree, zoom jitter) and allocation optimizations, with live parity and compatibility checks
+- `analysis/review-2026-09-25.md` — code and performance review: chunk-save, hang and compatibility fixes, quiet logging, remaining backlog
+- `analysis/jjthunder-freeze-2026-09-25.md` — diagnosis of a world freeze with the JJThunder To The Max datapack
+- `analysis/worldgen-big-2026-09-25.md` — noise-fill CPU pass (lerp tables, bulk multiply, air-cell skip), the pregen hash check, and the aquifer cell cache exactness fix
 - `dist/README.md` — end-user install notes
 
 ## License

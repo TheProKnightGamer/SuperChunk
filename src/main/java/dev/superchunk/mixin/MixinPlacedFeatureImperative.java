@@ -61,6 +61,7 @@ import java.util.List;
 @Mixin(PlacedFeature.class)
 public abstract class MixinPlacedFeatureImperative {
 
+
     @Unique
     private static final boolean SUPERCHUNK$ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.placementImperative", "true"));
@@ -68,6 +69,27 @@ public abstract class MixinPlacedFeatureImperative {
     @Unique
     private static final boolean SUPERCHUNK$FAST_MODS =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.placementFastMods", "true"));
+
+    /** Stand down when another mod hooks the replaced method ({@link dev.superchunk.worldgen.ForeignHooks}). */
+    @Unique
+    private static byte superchunk$hooks;
+
+    @Unique
+    private static boolean superchunk$unhooked() {
+        byte state = superchunk$hooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The feature placement replica (PlacedFeature.placeWithContext)",
+                    "net.minecraft.world.level.levelgen.placement.PlacedFeature#placeWithContext",
+                    "net.minecraft.world.level.levelgen.placement.PlacementFilter#getPositions",
+                    "net.minecraft.world.level.levelgen.placement.RepeatingPlacement#getPositions",
+                    "net.minecraft.world.level.levelgen.placement.InSquarePlacement#getPositions",
+                    "net.minecraft.world.level.levelgen.placement.HeightmapPlacement#getPositions",
+                    "net.minecraft.world.level.levelgen.placement.HeightRangePlacement#getPositions",
+                    "net.minecraft.world.level.levelgen.placement.RandomOffsetPlacement#getPositions");
+            superchunk$hooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
 
     @Shadow
     @Final
@@ -83,7 +105,7 @@ public abstract class MixinPlacedFeatureImperative {
     @WrapMethod(method = "placeWithContext", require = 0)
     private boolean superchunk$imperativePlace(PlacementContext context, RandomSource source, BlockPos pos,
                                                Operation<Boolean> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$ENABLED || !superchunk$unhooked()) {
             return original.call(context, source, pos);
         }
         ConfiguredFeature<?, ?> cf = this.feature.value();
@@ -110,7 +132,7 @@ public abstract class MixinPlacedFeatureImperative {
             // RepeatingPlacement — IntStream.range(0, count(src,pos)).mapToObj(p -> pos). count() is the
             // eager range bound (evaluated once, drawing its RNG once); the same pos is emitted N times,
             // all placed (no short-circuit).
-            if (mod instanceof RepeatingPlacement) {
+            if (mod instanceof RepeatingPlacement && dev.superchunk.worldgen.InheritedPlacementPositions.of(mod.getClass())) {
                 int n = ((IRepeatingPlacementAccess) mod).superchunk$count(src, pos);
                 boolean placed = false;
                 for (int k = 0; k < n; k++) {
@@ -121,7 +143,7 @@ public abstract class MixinPlacedFeatureImperative {
                 return placed;
             }
             // InSquarePlacement — nextInt(16)+X then nextInt(16)+Z, new BlockPos(i, y, j).
-            if (mod instanceof InSquarePlacement) {
+            if (mod instanceof InSquarePlacement && dev.superchunk.worldgen.InheritedPlacementPositions.of(mod.getClass())) {
                 int i = src.nextInt(16) + pos.getX();
                 int j = src.nextInt(16) + pos.getZ();
                 return superchunk$stage(ctx, src, new BlockPos(i, pos.getY(), j), idx + 1, cf);

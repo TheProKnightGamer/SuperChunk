@@ -9,8 +9,7 @@ import net.minecraft.nbt.Tag;
 
 public final class ModuleEntryPoint {
 
-    @SuppressWarnings("unused")
-    public static final boolean enabled = new ConfigSystem.ConfigAccessor()
+    private static final boolean CONFIGURED = new ConfigSystem.ConfigAccessor()
             .key("ioSystem.gcFreeChunkSerializer")
             .comment("""
                     EXPERIMENTAL FEATURE
@@ -23,6 +22,24 @@ public final class ModuleEntryPoint {
                     """)
             .incompatibleMod("architectury", "*")
             .getBoolean(false, false);
+
+    /**
+     * SuperChunk: always off. This serializer never writes NeoForge's chunk data attachments or
+     * the aux light data that NeoForge's {@code ChunkSerializer.write} adds, and its
+     * {@code ChunkMap.save} overwrite skips {@code ChunkDataEvent.Save} (upstream C2ME-NeoForge's
+     * event fallback was not ported). Enabled, every save would drop other mods' per-chunk data for
+     * good. Setting it only logs a warning.
+     */
+    @SuppressWarnings("unused")
+    public static final boolean enabled = false;
+
+    static {
+        if (CONFIGURED) {
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Config").warn("[SuperChunk-Config] "
+                    + "c2me.ioSystem.gcFreeChunkSerializer=true is ignored: that chunk saver does not write "
+                    + "NeoForge's per-chunk mod data, so it would lose other mods' data on every save.");
+        }
+    }
 
     private static boolean registered = false;
 

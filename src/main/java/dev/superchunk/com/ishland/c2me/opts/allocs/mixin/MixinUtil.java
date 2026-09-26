@@ -16,29 +16,38 @@ public abstract class MixinUtil {
     /**
      * @author ishland
      * @reason use another impl
+     *
+     * <p>SuperChunk: fails as soon as any input fails, like vanilla. (The Yarn-to-Mojmap port had
+     * swapped this body with {@link #sequence}'s: upstream {@code combine} is Mojmap
+     * {@code sequenceFailFast}, {@code combineSafe} is {@code sequence}. With them swapped, a reload
+     * listener that threw in its prepare stage never reached the barrier, so
+     * {@code SimpleReloadInstance}'s fail-fast wait never completed and the reload hung.)
      */
     @Overwrite
     @SuppressWarnings("unchecked")
     public static <V> CompletableFuture<List<V>> sequenceFailFast(List<? extends CompletableFuture<? extends V>> futures) {
-        return Combinators.collect((List<? extends CompletableFuture<V>>) futures, Collectors.<V>toList()).toCompletableFuture();
+        final CompletableFuture<List<V>> future = Combinators.collect((List<? extends CompletableFuture<V>>) futures, Collectors.<V>toList()).toCompletableFuture();
+        BiConsumer<Object, Throwable> action = (v, throwable) -> {
+            if (throwable != null) {
+                future.completeExceptionally(throwable);
+            }
+        };
+        for (CompletableFuture<? extends V> completableFuture : futures) {
+            completableFuture.whenComplete(action);
+        }
+        return future;
     }
 
     /**
      * @author ishland
      * @reason use another impl
+     *
+     * <p>SuperChunk: completes once every input has, like vanilla's {@code allOf}-based version
+     * (the collect chain only completes when all inputs have).
      */
     @Overwrite
     public static <V> CompletableFuture<List<V>> sequence(List<? extends CompletableFuture<V>> futures) {
-        final CompletableFuture<List<V>> future = Combinators.collect(futures, Collectors.<V>toList()).toCompletableFuture();
-        BiConsumer<V, Throwable> action = (v, throwable) -> {
-            if (throwable != null) {
-                future.completeExceptionally(throwable);
-            }
-        };
-        for (CompletableFuture<V> completableFuture : futures) {
-            completableFuture.whenComplete(action);
-        }
-        return future;
+        return Combinators.collect(futures, Collectors.<V>toList()).toCompletableFuture();
     }
 
     /**

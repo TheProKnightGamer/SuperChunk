@@ -16,7 +16,7 @@ import java.util.Set;
  */
 @SuppressWarnings("CanBeFinal")
 public class LithiumConfig {
-    private static final Logger LOGGER = LogManager.getLogger("LithiumConfig");
+    private static final Logger LOGGER = LogManager.getLogger("SuperChunk-LithiumConfig");
 
     private static final String JSON_KEY_LITHIUM_OPTIONS = "lithium:options";
 

@@ -66,6 +66,21 @@ public abstract class MixinOreFeatureFast {
     private static final boolean SUPERCHUNK$ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.oreFast", "true"));
 
+    /** Stand down when another mod hooks the replaced method ({@link dev.superchunk.worldgen.ForeignHooks}). */
+    @Unique
+    private static byte superchunk$hooks;
+
+    @Unique
+    private static boolean superchunk$unhooked() {
+        byte state = superchunk$hooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The ore placement replica (OreFeature.doPlace)",
+                    "net.minecraft.world.level.levelgen.feature.OreFeature#doPlace");
+            superchunk$hooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
+
     // @WrapMethod rather than a HEAD-cancel @Inject: when the fast path fires the effect
     // is the same (other mods' injects into doPlace are bypassed — the documented replica
     // tradeoff), but wraps never cancel-fight other cancelling injectors, and if another
@@ -77,7 +92,7 @@ public abstract class MixinOreFeatureFast {
                                            double minY, double maxY,
                                            int x, int y, int z, int width, int height,
                                            Operation<Boolean> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$ENABLED || !superchunk$unhooked()) {
             return original.call(level, random, config, minX, maxX, minZ, maxZ, minY, maxY, x, y, z, width, height);
         }
         return superchunk$doPlace(level, random, config,

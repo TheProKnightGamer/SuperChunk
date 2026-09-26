@@ -361,8 +361,23 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
         // no-op: the chunk system drives status promotion itself
     }
 
-    public boolean isAccessible() {
+    /**
+     * Upstream C2ME's {@code isAccessible()} override (the Yarn name). The port had kept the Yarn
+     * name, so it overrode nothing: vanilla's flag is set only in {@code updateFutures} (a no-op
+     * here) and recomputed from the vanilla ticket level (pinned unused here), so it stayed false
+     * and {@code ChunkMap.saveChunkIfNeeded} / {@code saveAllChunks} skipped every holder. Chunks were
+     * written only when they unloaded: autosave, the singleplayer pause save and {@code /save-all}
+     * saved nothing, so a crash or kill lost every change made since the chunks loaded.
+     */
+    @Override
+    public boolean wasAccessibleSinceLastSave() {
         return this.newHolder.getStatus().ordinal() >= NewChunkStatus.SERVER_ACCESSIBLE.ordinal();
+    }
+
+    /** Upstream {@code updateAccessibleStatus()}: accessibility is the chunk system's own status. */
+    @Override
+    public void refreshAccessibility() {
+        // no-op
     }
 
     @Override
@@ -427,6 +442,11 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
 
     public void combineSavingFuture(CompletableFuture<?> savingFuture) {
         this.newHolder.submitOp(savingFuture.thenAccept(o -> {}));
+    }
+
+    @Override
+    public boolean c2me$blockTicking() {
+        return this.newHolder.getStatus().ordinal() >= NewChunkStatus.BLOCK_TICKING.ordinal();
     }
 
     @Override

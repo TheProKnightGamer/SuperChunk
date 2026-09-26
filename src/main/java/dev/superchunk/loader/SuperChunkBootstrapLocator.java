@@ -125,7 +125,7 @@ public final class SuperChunkBootstrapLocator implements IDependencyLocator {
                     throw new IllegalStateException("shell jar " + shell.getFileName() + " carries no " + CORE_MOD_RESOURCE);
                 }
                 host = contributeNested(pipeline, coreJar, ModFileDiscoveryAttributes.DEFAULT, "superchunk-core");
-                LOGGER.info("Single-jar bootstrap: contributed the SuperChunk mod from {}!{}.",
+                LOGGER.debug("Single-jar bootstrap: contributed the SuperChunk mod from {}!{}.",
                         shell.getFileName(), CORE_MOD_RESOURCE);
             } catch (ModLoadingException e) {
                 throw e;
@@ -178,7 +178,7 @@ public final class SuperChunkBootstrapLocator implements IDependencyLocator {
                     ? ModFileDiscoveryAttributes.DEFAULT.withParent(host)
                     : ModFileDiscoveryAttributes.DEFAULT;
             contributeNested(pipeline, coreJar, attributes, "lwjgl-core");
-            LOGGER.info("Dedicated server: contributed bundled lwjgl-core (module org.lwjgl) to satisfy org.lwjgl.opencl.");
+            LOGGER.debug("Dedicated server: contributed bundled lwjgl-core (module org.lwjgl) to satisfy org.lwjgl.opencl.");
         } catch (Throwable t) {
             // Never throw: org.lwjgl.opencl's own requirement produces the canonical resolution
             // error if core is truly needed and missing.
@@ -202,7 +202,7 @@ public final class SuperChunkBootstrapLocator implements IDependencyLocator {
             contents = JarContents.of(jijFs.getPath("/"));
         } catch (Throwable jij) {
             Path extracted = extractToCache(nestedJar, label);
-            LOGGER.info("jij filesystem unavailable for {} ({}); using extracted copy {}.",
+            LOGGER.debug("jij filesystem unavailable for {} ({}); using extracted copy {}.",
                     label, String.valueOf(jij), extracted.getFileName());
             contents = JarContents.of(extracted);
         }

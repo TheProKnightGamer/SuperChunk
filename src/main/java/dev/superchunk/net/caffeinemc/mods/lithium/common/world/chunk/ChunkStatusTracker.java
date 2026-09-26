@@ -49,7 +49,7 @@ public class ChunkStatusTracker {
 
     public static void onChunkAccessible(ServerLevel serverLevel, LevelChunk levelChunk) {
         if (((LevelAccessor) serverLevel).getThread() != Thread.currentThread()
-                && !SkeinCompat.isDimensionTicker(serverLevel)) {
+                && !SkeinCompat.isChunkTaskOwner(serverLevel)) {
             throw new IllegalStateException("ChunkStatusTracker.onChunkAccessible called on wrong thread!");
         }
 
@@ -60,7 +60,7 @@ public class ChunkStatusTracker {
 
     public static void onChunkInaccessible(ServerLevel serverLevel, ChunkPos pos) {
         if (((LevelAccessor) serverLevel).getThread() != Thread.currentThread()
-                && !SkeinCompat.isDimensionTicker(serverLevel)) {
+                && !SkeinCompat.isChunkTaskOwner(serverLevel)) {
             throw new IllegalStateException("ChunkStatusTracker.onChunkInaccessible called on wrong thread!");
         }
 

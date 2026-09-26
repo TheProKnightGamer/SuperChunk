@@ -27,15 +27,23 @@ nested third-party mod jars; everything is one mod id (`superchunk`).
 3. **Upgrading from an older SuperChunk:** delete the old
    `superchunk-*-lwjgl-server-locator.jar` companion if present — it is no longer needed
    (redundant but harmless if left behind).
-4. **Copy `config/lithium.properties` into the server's `config/` folder BEFORE first start.**
-   This disables the Lithium features that overlap C2ME's chunk-system rewrite
-   (`gen.cached_generator_settings`, `chunk.serialization`,
-   `world.tick_scheduler`, `world.chunk_access`) so C2ME owns those paths. (SuperChunk also
-   rewrites this file from `config/superchunk.properties` on every boot, so after the first
-   start it maintains itself.)
-5. (Recommended) Aikar's JVM flags.
-6. Tune `config/c2me.toml` (auto-generated on first boot) for thread counts; C2ME auto-sizes
-   to your CPU by default. ScalableLux parallel lighting: `config/scalablelux.properties`.
+4. Nothing to copy for Lithium: on every start, before Lithium loads, SuperChunk writes
+   `config/lithium.properties` from `config/superchunk.properties`, with the Lithium features
+   that overlap C2ME's chunk-system rewrite switched off (`gen.cached_generator_settings`,
+   `chunk.serialization`, `world.tick_scheduler`, `world.chunk_access`) so C2ME owns those paths.
+5. (Recommended) Generational ZGC instead of G1 or Aikar's G1 flags: `-XX:+UseZGC -XX:+ZGenerational`
+   and at least 8 GB of heap for high render distances. SuperChunk writes the exact flags to
+   `config/superchunk-jvm-args.txt`; it never changes your JVM arguments unless you start it with
+   `-Dsuperchunk.gc.autoConfig=true`.
+6. Settings live in **`config/superchunk.properties`**, created on first start. Every option is
+   described in the file itself, with its default; `dist/config/superchunk.properties` is the same
+   documented file with all defaults. SuperChunk passes the `c2me.*`, `lithium.*` and
+   `lighting.*` options on to C2ME, Lithium and ScalableLux, so edit this file rather than
+   theirs (for example, worldgen threads are `c2me.globalExecutorParallelism`; C2ME auto-sizes
+   them by default). A config file from an older SuperChunk version gets the descriptions added
+   once on the next start. Your values are kept, and the old file is saved as
+   `superchunk.properties.bak`. SuperChunk logs only warnings and errors unless you set
+   `logging.verbose=true` there.
 
 `./gradlew deployBundle` collects the shippable jar into `build/deploy/`.
 
@@ -49,13 +57,13 @@ internals structurally at runtime (no compile-time linkage), so its per-section 
 exact; verified ZERO-divergence over 100M+ blocks against Lithium 0.15.4. If a future Lithium
 rewrites those internals beyond recognition, SuperChunk detects that and automatically falls
 back to the vanilla write path for safety (log: `[SuperChunk-LithiumBridge]`).
-The C2ME-overlap pins in `config/lithium.properties` (step 4) apply to the standalone Lithium
-too — keep that file in place.
+The C2ME-overlap pins SuperChunk writes to `config/lithium.properties` (step 4) apply to the
+standalone Lithium (and Radium) too.
 
 ## Notes
 - **Do NOT also install standalone C2ME / ScalableLux / Noisium / VMP** — they're already
-  inside this jar; running duplicates would conflict. (Standalone **Lithium** is the
-  exception — see above.)
+  inside this jar. C2ME, ScalableLux and Noisium are declared incompatible, so NeoForge shows an
+  error screen naming the jar to remove. (Standalone **Lithium** is the exception — see above.)
 - Source project: this repository (build with `gradlew build`, launch JVM = JDK 17;
   compile toolchain auto-provisions Java 21).
 - **GPU / OpenCL IS included.** The LWJGL OpenCL bindings (`org.lwjgl.opencl`) are embedded in the

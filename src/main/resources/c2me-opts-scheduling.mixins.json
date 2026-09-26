@@ -13,6 +13,8 @@
     "mid_tick_chunk_tasks.MixinServerWorld",
     "mid_tick_chunk_tasks.MixinWorld",
     "ordering.player_move.MixinServerPlayNetworkHandler",
+    "shutdown.MixinPersistentEntitySectionManager",
+    "shutdown.MixinServerLevel",
     "task_scheduling.MixinChunkHolder",
     "task_scheduling.MixinEntityChunkDataAccess",
     "task_scheduling.MixinServerChunkManager"

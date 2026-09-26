@@ -6,6 +6,7 @@ import dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCo
 import dev.superchunk.gpu.aquifer.AquiferGpuVerify;
 import dev.superchunk.gpu.aquifer.BlockIdCensus;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.QuartPos;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.biome.OverworldBiomeBuilder;
@@ -31,7 +32,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Aquifer.NoiseBasedAquifer.class)
-public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.ScCompactAuxSource {
+public abstract class MixinAquiferSamplerImpl implements dev.superchunk.worldgen.AirCells.AirPredicate, dev.superchunk.gpu.dfc.ScCompactAuxSource {
 
     @Shadow
     @Final
@@ -234,23 +235,24 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
     // ============================ SuperChunk aquifer CPU levers ============================
     // Single flag gating THREE parity-safe CPU optimisations (default ON; kill-switch
     // -Dsuperchunk.worldgen.aquiferCellCache=false):
-    //   (1) cross-chunk per-dimension FluidStatus cache  -> getAquiferStatus / scColumnCeiling
+    //   (1) cross-chunk FluidStatus cache                -> getAquiferStatus / scColumnCeiling
     //   (2) adaptive ceiling-scan bound                  -> scColumnCeiling
     //   (3) refreshDistPosIdx candidate memo             -> aquiferExtracted$refreshDistPosIdx
     // All three are pure deterministic memos/bounds: with the flag ON they return byte-identical
     // values to the flag-OFF path (proofs at each use site). With the flag OFF the code below is never
     // entered and every touched method is byte-identical to the current behaviour.
-    // BLEND CAVEAT: lever (1)'s purity claim only holds when this chunk's Blender is EMPTY. On
-    // pre-1.18 upgraded worlds near blend boundaries, computeFluid depends on the per-chunk
-    // preliminarySurfaceLevel -> Blender data, so the same cell can legitimately differ between
-    // chunks; scCellCache() therefore resolves to null for blending chunks and lever (1) falls back
-    // to the per-instance path. Levers (2)/(3) are per-instance and blend-consistent, so they stay on.
+    // CHUNK CAVEAT: vanilla's computeFluid for one cell can differ between the chunks asking — by
+    // whether the cell's jittered (x, z) is in the chunk's flat-cache grid (part of the key, see
+    // ScAquiferCellCache.packCell), through routers whose functions read chunk state in other ways
+    // (no cache for them, see AquiferCellSharing), and through blending (pre-1.18 upgraded worlds
+    // near blend boundaries): scCellCache() resolves to null for blending chunks and lever (1)
+    // falls back to the per-instance path. Levers (2)/(3) are per-instance, so they stay on.
     @Unique
     private static final boolean SC_CELL_CACHE = Boolean.parseBoolean(System.getProperty("superchunk.worldgen.aquiferCellCache", "true"));
 
-    // (1) per-dimension cross-chunk cache, resolved lazily from the registry by the dimension's
-    // globalFluidPicker identity, then held per-instance for a cheap subsequent access.
-    // Resolves to NULL (cache bypassed) when this chunk is blending — see BLEND CAVEAT above.
+    // (1) cross-chunk cache of this chunk's RandomState (via its NoiseChunk), resolved lazily, then
+    // held per-instance for a cheap subsequent access. Resolves to NULL (cache bypassed) when this
+    // chunk is blending or the router cannot share — see CHUNK CAVEAT above.
     @Unique
     private ScAquiferCellCache scCellCache;
     @Unique
@@ -260,11 +262,39 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
     private ScAquiferCellCache scCellCache() {
         if (!this.scCellCacheResolved) {
             this.scCellCacheResolved = true;
-            if (this.noiseChunk.getBlender() == Blender.empty()) {
-                this.scCellCache = ScAquiferCellCache.forDimension(this.globalFluidPicker);
+            if (this.noiseChunk.getBlender() == Blender.empty() && (Object) this.noiseChunk instanceof ScAquiferCellCache.Holder holder
+                    && dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.AquiferCellSharing.unhooked()) {
+                this.scCellCache = holder.superchunk$aquiferCellCache();
             }
         }
         return this.scCellCache;
+    }
+
+    // The statuses the global fluid picker hands out (vanilla's: one below the lava level, one
+    // above), probed once; computeFluid's early returns are these very objects.
+    @Unique
+    private Aquifer.FluidStatus scPickerLow, scPickerHigh;
+
+    @Unique
+    private boolean scPickerStatus(Aquifer.FluidStatus status) {
+        if (this.scPickerLow == null) {
+            this.scPickerLow = this.globalFluidPicker.computeFluid(0, -30_000_000, 0);
+            this.scPickerHigh = this.globalFluidPicker.computeFluid(0, 30_000_000, 0);
+        }
+        return status == this.scPickerLow || status == this.scPickerHigh;
+    }
+
+    // Whether block (x, z) falls in this chunk's flat-cache grid: vanilla NoiseChunk.FlatCache holds
+    // quarts firstNoiseX .. firstNoiseX + noiseSizeXZ (inclusive) in each axis and answers from it
+    // only when both of the position's quarts are inside.
+    @Unique
+    private boolean scInFlatGrid(int x, int z) {
+        dev.superchunk.com.ishland.c2me.base.mixin.access.IChunkNoiseSampler nc =
+                (dev.superchunk.com.ishland.c2me.base.mixin.access.IChunkNoiseSampler) this.noiseChunk;
+        int size = QuartPos.fromBlock(nc.getHorizontalCellCount() * nc.getHorizontalCellBlockCount()) + 1;
+        int qx = QuartPos.fromBlock(x) - nc.getStartBiomeX();
+        int qz = QuartPos.fromBlock(z) - nc.getStartBiomeZ();
+        return qx >= 0 && qz >= 0 && qx < size && qz < size;
     }
 
     // (2) ceiling-scan bound. The margin (=20) is the exact +20 offset of computeFluid's center-cell
@@ -558,6 +588,11 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
 
     // ==================== STAGE-5 COMPACT-IDS aux (worker-side, prefetch seam) ====================
 
+    @Override
+    public DensityFunction superchunk$barrierNoise() {
+        return this.barrierNoise;
+    }
+
     /**
      * COMPACT-IDS ({@code -Dsuperchunk.gpu.compactIds=probe}): packages this aquifer's
      * side of the per-chunk decide-kernel aux — the EXACT mode-A/census upload contract
@@ -571,6 +606,32 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
      * strictly before this chunk's fill consumes the same instance (race-free; it just
      * warms the same caches the fill would). Returns {@code null} on any failure.
      */
+    /**
+     * SuperChunk air-cell skip ({@link dev.superchunk.worldgen.AirCells}): true iff, for every block
+     * of the cell, {@link #computeSubstance} with a non-solid density takes the adaptive air-skip
+     * branch below and returns {@code Blocks.AIR.defaultBlockState()} — the same checks, evaluated
+     * block by block. Only while that branch is live (no census/verify mode forcing the full path).
+     */
+    @Override
+    public boolean superchunk$airCell(int x0, int y0, int z0, int w, int h) {
+        if (!SC_ADAPTIVE || scAdaptiveGateTripped || SC_BLOCKID_CENSUS || SC_AQUIFER_VERIFY || SC_AIR_VERIFY
+                || SC_ADAPTIVE_VERIFY) {
+            return false;
+        }
+        final BlockState air = Blocks.AIR.defaultBlockState();
+        for (int x = x0; x < x0 + w; x++) {
+            for (int z = z0; z < z0 + w; z++) {
+                final int ceiling = scColumnCeiling(x, z) + SC_BARRIER_MARGIN;
+                for (int y = y0; y < y0 + h; y++) {
+                    if (y < ceiling || this.globalFluidPicker.computeFluid(x, y, z).at(y) != air) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     @Override
     public dev.superchunk.gpu.dfc.CompactIds.AquiferAux superchunk$compactAquiferAux() {
         try {
@@ -1055,10 +1116,12 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
             ScAquiferCellCache cache;
             if (SC_CELL_CACHE && (cache = this.scCellCache()) != null) {
                 // Lever 1: consult the per-dimension cross-chunk cache before recomputing. computeFluid
-                // is a pure deterministic function of the cell (l,m,n)+seed when the chunk's Blender is
-                // empty (guaranteed here: scCellCache() is null for blending chunks), so a hit is
-                // byte-identical to a recompute; the returned immutable FluidStatus is safe to share.
-                long cellKey = ScAquiferCellCache.packCell(l, m, n);
+                // is a deterministic function of the cell (l,m,n)+seed and of whether the cell's
+                // jittered (x, z) lies in this chunk's flat-cache grid (ScAquiferCellCache.packCell)
+                // when the chunk's Blender is empty (guaranteed here: scCellCache() is null for
+                // blending chunks), so a hit is byte-identical to a recompute; the returned immutable
+                // FluidStatus is safe to share.
+                long cellKey = ScAquiferCellCache.packCell(l, m, n, this.scInFlatGrid(i, k));
                 Aquifer.FluidStatus hit = cache.get(cellKey);
                 if (hit != null) {
                     this.aquiferCache[o] = hit;
@@ -1066,6 +1129,12 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.gpu.dfc.
                 }
                 fluidLevel2 = this.computeFluid(i, j, k);
                 cache.put(cellKey, fluidLevel2);
+                if (this.scPickerStatus(fluidLevel2)) {
+                    // computeFluid returned early with a status the global picker hands out (the
+                    // other path always builds a new one): that happens before its grid-dependent
+                    // reads, so the chunks of the other variant get the same status.
+                    cache.put(cellKey ^ 1L, fluidLevel2);
+                }
             } else {
                 fluidLevel2 = this.computeFluid(i, j, k);
             }

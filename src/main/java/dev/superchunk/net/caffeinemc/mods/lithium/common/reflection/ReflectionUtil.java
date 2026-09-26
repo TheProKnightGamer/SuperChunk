@@ -25,7 +25,7 @@ public class ReflectionUtil {
             } catch (NoSuchMethodException e) {
                 clazz = clazz.getSuperclass();
             } catch (NoClassDefFoundError error) {
-                Logger logger = LogManager.getLogger("Lithium Class Analysis");
+                Logger logger = LogManager.getLogger("SuperChunk-Lithium Class Analysis");
                 logger.warn("Lithium Class Analysis Error: Class " + clazz.getName() + " cannot be analysed, because" +
                         " getting declared methods crashes with NoClassDefFoundError: " + error.getMessage() +
                         ". This is usually caused by modded" +

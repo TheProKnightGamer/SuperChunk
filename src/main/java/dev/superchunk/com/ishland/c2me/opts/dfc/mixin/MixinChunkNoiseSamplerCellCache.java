@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.Shadow;
 // Yarn fields: field_36602 -> this$0 (NoiseChunk), cache -> values, delegate -> noiseFiller
 // Yarn sample -> Mojmap compute; getHorizontalCellBlockCount -> cellWidth, getVerticalCellBlockCount -> cellHeight
 @Mixin(targets = "net/minecraft/world/level/levelgen/NoiseChunk$CacheAllInCell")
-public abstract class MixinChunkNoiseSamplerCellCache implements IFastCacheLike {
+public abstract class MixinChunkNoiseSamplerCellCache implements IFastCacheLike, dev.superchunk.worldgen.AirCells.CellValues {
 
     @Shadow
     @Final
@@ -31,6 +31,11 @@ public abstract class MixinChunkNoiseSamplerCellCache implements IFastCacheLike 
     @Shadow
     @Final
     DensityFunction noiseFiller;
+
+    @Override
+    public double[] superchunk$cellValues() {
+        return this.values;
+    }
 
     @WrapMethod(method = "compute")
     private double wrapSample(DensityFunction.FunctionContext pos, Operation<Double> original) {

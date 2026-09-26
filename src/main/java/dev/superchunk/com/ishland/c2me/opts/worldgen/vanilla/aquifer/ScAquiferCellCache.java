@@ -2,69 +2,67 @@ package dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import net.minecraft.world.level.levelgen.Aquifer;
-
-import java.util.Collections;
-import java.util.Map;
-import java.util.WeakHashMap;
+import net.minecraft.world.level.levelgen.NoiseRouter;
 
 /**
  * SuperChunk cross-chunk aquifer {@link Aquifer.FluidStatus} cache (worldgen lever 1).
  *
  * <p>Gated ON by default; kill-switch {@code -Dsuperchunk.worldgen.aquiferCellCache=false}. Only
  * reached from {@code MixinAquiferSamplerImpl}, and ONLY for chunks whose {@code Blender} is empty
- * ({@code scCellCache()} resolves to null for blending chunks — pre-1.18 upgraded worlds near blend
- * boundaries — because there {@code computeFluid} is chunk-dependent and must not be shared).
+ * (blending chunks — pre-1.18 upgraded worlds near blend boundaries — read blended functions, so
+ * they keep the per-chunk path).
  *
- * <p>For non-blending chunks {@code computeFluid(cellJitteredPos)} is a pure deterministic function
- * of the grid cell {@code (gx,gy,gz)} + seed ({@code preliminarySurfaceLevel} is a pure function of
- * {@code (x,z)}). Vanilla/C2ME caches it only per-aquifer-INSTANCE, but each grid cell
- * is shared by ~4 neighbouring chunks, so it is recomputed up to ~4x. This cache memoizes the
- * status per cell across every chunk of one dimension, so each cell is computed once.
+ * <p>Vanilla/C2ME caches {@code computeFluid} only per aquifer instance, but each grid cell is
+ * consulted by the 3x3 chunks around it, so it is recomputed up to 9x. This cache memoizes the
+ * status per cell for one {@code RandomState} (one dimension of one seed), so each cell is computed
+ * once — per variant: the status also depends on whether the cell's jittered (x, z) lies in the
+ * asking chunk's flat-cache grid ({@link #packCell}), except when {@code computeFluid} returns
+ * early (every cell well above the surface), which it does before those reads, so such a status is
+ * stored for both variants. For routers where anything else could make it depend on the chunk, or
+ * when another mod hooks the code involved, there is no cache at all ({@link AquiferCellSharing}).
  *
- * <p><b>Per-dimension scoping.</b> The registry is keyed by the identity of the dimension's
- * {@code globalFluidPicker} — a single lambda instance memoized once per {@code NoiseBasedChunkGenerator}
- * (i.e. once per dimension) and shared by every {@code NoiseChunk}/aquifer of that dimension. Distinct
- * dimensions have distinct generators, hence distinct picker instances, so cells never collide across
- * dimensions (which is essential: the same cell {@code (gx,gy,gz)} has a different FluidStatus in a
- * different dimension). Keys are weak so a discarded generator (world reload) drops its cache.
+ * <p><b>Scoping.</b> Each {@code RandomState} owns its cache ({@link Owner}) and hands it to every
+ * {@code NoiseChunk} built from it ({@link Holder}); it goes away with the {@code RandomState}.
  *
- * <p><b>Boundedness.</b> Each per-dimension cache is a set of striped, per-stripe access-ordered
+ * <p><b>Boundedness.</b> Each cache is a set of striped, per-stripe access-ordered
  * (LRU) fastutil primitive-keyed maps with a per-stripe size cap; eviction removes the
  * least-recently-used cell, i.e. the cells trailing the generation frontier. Total memory is capped
  * at {@code superchunk.worldgen.aquiferCellCacheSize} entries (default 262144).
  *
- * <p><b>Thread-safety / determinism.</b> Multiple c2me worker threads share one per-dimension cache
+ * <p><b>Thread-safety / determinism.</b> Multiple c2me worker threads share one cache
  * concurrently; each stripe guards its map with its own monitor. Stored values are the immutable
  * {@link Aquifer.FluidStatus} objects produced by {@code computeFluid}, so a hit returns a
  * byte-identical result to the per-instance path.
  */
 public final class ScAquiferCellCache {
 
-    // Per-dimension registry keyed by the identity of the dimension's memoized globalFluidPicker.
-    // Weak keys: when a generator (and thus its picker) is GC'd on world unload, the cache is dropped.
-    // Lookups are rare (once per aquifer instance; the reference is then cached on the instance).
-    private static final Map<Aquifer.FluidPicker, ScAquiferCellCache> REGISTRY =
-            Collections.synchronizedMap(new WeakHashMap<>());
+    /** Implemented on {@code RandomState}: its cache, or null when its router cannot share. */
+    public interface Owner {
+        /** Called with the vanilla router before DFC compiles it (compiled functions are opaque). */
+        void superchunk$decideCellSharing(NoiseRouter vanillaRouter);
 
-    public static ScAquiferCellCache forDimension(Aquifer.FluidPicker picker) {
-        synchronized (REGISTRY) {
-            ScAquiferCellCache c = REGISTRY.get(picker);
-            if (c == null) {
-                c = new ScAquiferCellCache();
-                REGISTRY.put(picker, c);
-            }
-            return c;
-        }
+        ScAquiferCellCache superchunk$aquiferCellCache();
+    }
+
+    /** Implemented on {@code NoiseChunk}: its {@code RandomState}'s cache, or null. */
+    public interface Holder {
+        ScAquiferCellCache superchunk$aquiferCellCache();
     }
 
     /**
-     * Pack a grid cell {@code (l=gridX, m=gridY, n=gridZ)} into a long with disjoint bit-fields and
-     * no boxing. gridX/gridZ get 26 bits each (|cell| &lt; 2^25 => |block| &lt; ~536M, far beyond the
-     * ±30M world border) and gridY gets 12 bits (±2048 cells => ±24576 blocks, far beyond world
-     * height). Disjoint OR-composed fields => no collision within these ranges.
+     * Pack a grid cell {@code (l=gridX, m=gridY, n=gridZ)} and its flat-cache variant into a long
+     * with disjoint bit-fields and no boxing. gridX/gridZ get 26 bits each (|cell| &lt; 2^25 =>
+     * |block| &lt; ~536M, far beyond the ±30M world border), gridY 11 bits (±1024 cells => ±12288
+     * blocks, beyond any world height) and the variant the low bit.
+     *
+     * <p>The variant: {@code computeFluid} reads erosion, depth and floodedness at the cell's exact
+     * jittered (x, z), and a {@code flat_cache} inside them answers from the calling chunk's own
+     * quart grid (the value at the quart corner, y = 0) when (x, z) falls in that grid, and computes
+     * at (x, z) itself otherwise. So vanilla gives the same cell one of two statuses depending on
+     * the chunk asking; each is chunk-independent, and chunks share only the one they would compute.
      */
-    public static long packCell(int l, int m, int n) {
-        return ((l & 0x3FFFFFFL) << 38) | ((n & 0x3FFFFFFL) << 12) | (m & 0xFFFL);
+    public static long packCell(int l, int m, int n, boolean inFlatGrid) {
+        return ((l & 0x3FFFFFFL) << 38) | ((n & 0x3FFFFFFL) << 12) | ((m & 0x7FFL) << 1) | (inFlatGrid ? 1L : 0L);
     }
 
     private static final int STRIPES = 64;                 // power of two
@@ -77,7 +75,7 @@ public final class ScAquiferCellCache {
     private final Object[] locks;
 
     @SuppressWarnings("unchecked")
-    private ScAquiferCellCache() {
+    public ScAquiferCellCache() {
         this.stripes = new Long2ObjectLinkedOpenHashMap[STRIPES];
         this.locks = new Object[STRIPES];
         for (int i = 0; i < STRIPES; i++) {

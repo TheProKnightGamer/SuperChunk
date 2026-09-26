@@ -24,7 +24,8 @@ import org.spongepowered.asm.mixin.injection.At;
  * block, the very vein DF values the CPU decision consumed, exactly as lazily as
  * vanilla computed them. The ore positional-Xoroshiro seed halves ride along (via the
  * C2ME accessor) so the census kernel/ref can recompute the RNG draws bit-exactly.
- * Flag off (the default): the original call runs with untouched arguments.
+ * Flag off (the default): the original call runs with the density functions untouched and the
+ * ore factory wrapped by {@link dev.superchunk.worldgen.ReusableOreRandom}.
  */
 @Mixin(NoiseChunk.class)
 public abstract class MixinNoiseChunkVeinCensus {
@@ -46,7 +47,9 @@ public abstract class MixinNoiseChunkVeinCensus {
             DensityFunction veinToggle, DensityFunction veinRidged, DensityFunction veinGap,
             PositionalRandomFactory random, Operation<NoiseChunk.BlockStateFiller> original) {
         if (!SUPERCHUNK$CENSUS) {
-            return original.call(veinToggle, veinRidged, veinGap, random);
+            // Not census mode: the unchanged vanilla filler, fed a factory that reuses one
+            // generator on this thread instead of allocating one per vein-band block.
+            return original.call(veinToggle, veinRidged, veinGap, dev.superchunk.worldgen.ReusableOreRandom.wrap(random));
         }
         long lo = 0L, hi = 0L;
         boolean seedOk = false;

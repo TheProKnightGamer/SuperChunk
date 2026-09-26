@@ -106,6 +106,8 @@ public class C2MEStorageThread implements Runnable {
 
     /** How long a worker may sit idle before it exits; {@code <= 0} pins it forever (legacy behaviour). */
     private static final long IDLE_RETIRE_MS = Long.getLong("superchunk.io.storageIdleRetireMillis", 60_000L);
+    /** How long an idle storage thread polls before sleeping ({@code -Dsuperchunk.io.storageSpinMicros}, default 2000). */
+    private static final long SPIN_NANOS = 1000L * Long.getLong("superchunk.io.storageSpinMicros", 2_000L);
     /**
      * Warn once at this many simultaneously-open storages. Three per loaded dimension (chunk / poi /
      * entities) is normal, so a big dimension-heavy pack can legitimately reach a few dozen — the
@@ -253,12 +255,16 @@ public class C2MEStorageThread implements Runnable {
                     }
                     break;
                 } else {
-                    // attempt to spin-wait before sleeping
+                    // Spin briefly before sleeping: within a burst the next task usually arrives in
+                    // well under a millisecond. SuperChunk: bounded to SPIN_NANOS (was 5000 parks,
+                    // ~0.3 s with timer slack, so each of a dimension's three storage threads woke
+                    // ~16k times a second after every burst). Producers wake us through sync anyway.
                     if (!pollTasks()) {
                         Thread.interrupted(); // clear interrupt flag
-                        for (int i = 0; i < 5000; i ++) {
+                        final long spinUntil = System.nanoTime() + SPIN_NANOS;
+                        while (System.nanoTime() - spinUntil < 0L) {
                             if (pollTasks() || this.closing.get()) continue main_loop;
-                            LockSupport.parkNanos("Spin-waiting for tasks", 10_000); // 100us
+                            LockSupport.parkNanos("Spin-waiting for tasks", 10_000);
                         }
                     }
                     synchronized (sync) {

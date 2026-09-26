@@ -24,4 +24,7 @@ public interface ScCompactAuxSource {
 
     /** Builds the aquifer-side aux snapshot for the CURRENT chunk, or {@code null} on any failure. */
     CompactIds.AquiferAux superchunk$compactAquiferAux();
+
+    /** This aquifer's barrier-noise DF: the per-dimension route key, without building any aux. */
+    net.minecraft.world.level.levelgen.DensityFunction superchunk$barrierNoise();
 }

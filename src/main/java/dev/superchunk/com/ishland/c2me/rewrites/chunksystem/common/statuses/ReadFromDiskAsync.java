@@ -208,6 +208,16 @@ public class ReadFromDiskAsync extends ReadFromDisk {
                 })
                 .doOnError((throwable) -> {
                     try {
+                        // SuperChunk: a late cancel (wanted again before the unload finished) puts
+                        // the holder back at this status with its partial chunk, so a broken one must
+                        // stay broken. Clearing the flag revived it with its failed status's
+                        // dependency slot still set by clearDependencies0: the next upgrade to that
+                        // status tripped "Duplicate setDependencies call" and the chunk wedged,
+                        // neither loading nor broken, hanging any getChunk on it or its neighbours.
+                        // It recovers when a later unload completes and the holder is recreated.
+                        if (cancellable.isCancelled() && throwable instanceof CancellationException) {
+                            return;
+                        }
                         if ((context.holder().getFlags() & ItemHolder.FLAG_BROKEN) != 0) {
                             LOGGER.warn("Broken chunk {} was unloaded", context.holder().getKey());
                             context.holder().clearFlag(ItemHolder.FLAG_BROKEN);

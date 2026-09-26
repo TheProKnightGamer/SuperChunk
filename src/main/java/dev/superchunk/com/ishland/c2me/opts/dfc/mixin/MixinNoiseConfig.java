@@ -34,6 +34,10 @@ public class MixinNoiseConfig {
         // grid -- noise-free proof of bit-equivalence (no parallel-gen variance).
         // Enable with -Dsuperchunk.dfc.paritytest=true . Off by default.
         final NoiseRouter c2me$vanillaRouter = Boolean.getBoolean("superchunk.dfc.paritytest") ? this.router : null;
+        // SuperChunk: the aquifer cell cache decides from the vanilla router whether chunks can share.
+        if ((Object) this instanceof dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCellCache.Owner owner) {
+            owner.superchunk$decideCellSharing(this.router);
+        }
         Reference2ReferenceMap<DensityFunction, DensityFunction> tempCache = new Reference2ReferenceOpenHashMap<>();
         // SuperChunk GPU (kernel merge): batch THIS router's DF kernels so they emit into ONE
         // OpenCL program (shared headers compiled once) built at endBatch, instead of one program
@@ -71,7 +75,7 @@ public class MixinNoiseConfig {
             dev.superchunk.gpu.dfc.GpuDfcHook.endBatch();
         }
         stopwatch.stop();
-        System.out.println(String.format("Density function compilation finished in %s", stopwatch));
+        org.slf4j.LoggerFactory.getLogger("SuperChunk-DFC").info("Density function compilation finished in {}", stopwatch);
 
         // SuperChunk GPU: biome-climate offload. Capture this dimension's UNCACHED climate
         // DFs (temperature/vegetation/depth) compiled GPU forms and fuse them into ONE
@@ -188,11 +192,15 @@ public class MixinNoiseConfig {
         boolean pass = total > 0 && mism == 0 && asymThrew == 0;
         String verdict = pass ? "PASS (bit-identical to vanilla)"
                 : (total == 0 ? "FAIL (no samples compared -- every sample threw)" : "DIFF");
-        System.out.println(String.format(
+        final String line = String.format(
                 "SuperChunk DFC parity self-test: total=%d EXACT=%d MISMATCH=%d THREW=%d (asym=%d) maxAbsErr=%.3e -> %s",
-                total, exact, mism, threw, asymThrew, maxAbsErr, verdict));
-        if (!pass) {
-            System.out.println("SuperChunk DFC parity self-test examples: " + examples);
+                total, exact, mism, threw, asymThrew, maxAbsErr, verdict);
+        final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger("SuperChunk-DFC");
+        if (pass) {
+            log.info(line);
+        } else {
+            log.warn(line);
+            log.warn("SuperChunk DFC parity self-test examples: {}", examples);
         }
     }
 
