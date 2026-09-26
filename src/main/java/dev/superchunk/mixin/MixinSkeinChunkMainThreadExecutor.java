@@ -28,7 +28,7 @@ public abstract class MixinSkeinChunkMainThreadExecutor {
                     target = "Lnet/minecraft/server/level/ServerChunkCache;mainThread:Ljava/lang/Thread;"),
             require = 1)
     private Thread superchunk$dimensionOwnerThread(ServerChunkCache chunkSource, Operation<Thread> original) {
-        return SkeinCompat.isDimensionTicker(chunkSource.getLevel())
+        return SkeinCompat.isChunkTaskOwner(chunkSource.getLevel())
                 ? Thread.currentThread()
                 : original.call(chunkSource);
     }
