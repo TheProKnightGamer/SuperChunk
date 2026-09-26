@@ -10,15 +10,26 @@ import java.util.concurrent.Executor;
 
 public class ChunkSystemExecutors {
 
-    public static final ThreadLocal<Queue<Runnable>> CONSOLIDATING_QUEUE = new ThreadLocal<>();
+    /**
+     * Per-thread consolidation state. The entry is created once per thread and never removed:
+     * the previous set/remove pairs allocated a map entry (and a deque) for every root task,
+     * and every submission from outside a root allocated an entry just to remove it again.
+     */
+    public static final class Consolidation {
+        /** The queue being drained on this thread, or {@code null} outside a consolidating root. */
+        public Queue<Runnable> current;
+        /** A drained deque kept for this thread's next root; never shared with another thread. */
+        private ArrayDeque<Runnable> spare;
+    }
+
+    public static final ThreadLocal<Consolidation> CONSOLIDATION = ThreadLocal.withInitial(Consolidation::new);
 
     public static final Executor backingBackgroundExecutor = GlobalExecutors.prioritizedScheduler.executor(15);
     public static final Scheduler backgroundScheduler = Schedulers.from(backingBackgroundExecutor);
     public static final Executor consolidatingBackgroundExecutor = command -> {
-        Queue<Runnable> runnables = CONSOLIDATING_QUEUE.get();
+        Queue<Runnable> runnables = CONSOLIDATION.get().current;
         if (runnables == null) { // first entry
             consolidatingRoot(command);
-            CONSOLIDATING_QUEUE.remove(); // get() initielizes threadlocal
             return;
         }
         runnables.add(command);
@@ -27,8 +38,8 @@ public class ChunkSystemExecutors {
 
     private static void consolidatingRoot(Runnable initialCommand) {
         backingBackgroundExecutor.execute(() -> {
-            Queue<Runnable> runnables = CONSOLIDATING_QUEUE.get();
-            if (runnables != null) {
+            Consolidation state = CONSOLIDATION.get();
+            if (state.current != null) {
                 new Throwable("CONSOLIDATING_QUEUE leak").printStackTrace();
                 try {
                     initialCommand.run();
@@ -38,7 +49,9 @@ public class ChunkSystemExecutors {
                 return;
             }
 
-            CONSOLIDATING_QUEUE.set(runnables = new ArrayDeque<>());
+            ArrayDeque<Runnable> runnables = state.spare != null ? state.spare : new ArrayDeque<>();
+            state.spare = null;
+            state.current = runnables;
             runnables.add(initialCommand);
             try {
                 while (!runnables.isEmpty()) {
@@ -51,8 +64,10 @@ public class ChunkSystemExecutors {
             } finally {
                 if (!runnables.isEmpty()) {
                     new Throwable("runnable leak").printStackTrace();
+                    runnables.clear();
                 }
-                CONSOLIDATING_QUEUE.remove();
+                state.current = null;
+                state.spare = runnables;
             }
         });
     }

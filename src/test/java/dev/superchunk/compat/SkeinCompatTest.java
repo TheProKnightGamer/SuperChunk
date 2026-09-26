@@ -52,14 +52,14 @@ public final class SkeinCompatTest {
                 Object.class), "Missing command barrier queue API must fail closed");
 
         setFlags(31);
-        check(bridge.pinDimensionOnly(), "Enabled phases must be pinned before dispatch");
+        check(bridge.pinSupportedPhases(), "Enabled phases must be pinned before dispatch");
         check(flags() == 0, "Every unsafe phase, including saving, must be disabled");
         check(Live.enabled && Live.dimensions, "General/dimension settings must remain enabled");
-        check(!bridge.pinDimensionOnly(), "Unchanged settings must not produce repeated warnings");
+        check(!bridge.pinSupportedPhases(), "Unchanged settings must not produce repeated warnings");
         Live.enabled = false;
         Live.dimensions = false;
         setFlags(31); // Skein refresh() rewrites its Live snapshot on config reload.
-        check(bridge.pinDimensionOnly(), "Config reload must be pinned again");
+        check(bridge.pinSupportedPhases(), "Config reload must be pinned again");
         check(flags() == 0 && !Live.enabled && !Live.dimensions, "Pins must preserve disabled user settings");
         Live.enabled = true;
         Live.dimensions = true;
@@ -68,7 +68,7 @@ public final class SkeinCompatTest {
         DimensionTicker.active = true;
         check(bridge.isDimensionPhaseActive(), "Active dimension barrier must be visible to whole-server tasks");
         setFlags(31);
-        fails(bridge::pinDimensionOnly, "Settings must never be changed inside the barrier");
+        fails(bridge::pinSupportedPhases, "Settings must never be changed inside the barrier");
         check(flags() == 31, "Rejected in-phase pin must not partially change live flags");
         setFlags(0);
 
@@ -121,10 +121,66 @@ public final class SkeinCompatTest {
         check(!bridge.deferConfigMutation(), "The next server Pre hook must be allowed to apply the reload");
         Config.stale = false; // refresh() consumes the same flag set by markStale().
         setFlags(31); // Newly loaded user settings before the refresh RETURN hook.
-        check(bridge.pinDimensionOnly() && flags() == 0, "Refresh RETURN must pin new settings before any level dispatch");
+        check(bridge.pinSupportedPhases() && flags() == 0, "Refresh RETURN must pin new settings before any level dispatch");
         check(!bridge.deferConfigMutation(), "Registry rebuild must be allowed after the barrier");
         checkDeferredCommands(bridge, legacyBridge);
+        checkCellBridge(lookup);
         System.out.println("SkeinCompatTest passed " + checks + " checks");
+    }
+
+    private static void checkCellBridge(SkeinCompat.ClassLookup legacy) throws InterruptedException {
+        SkeinCompat.Bridge modern = SkeinCompat.discover(name -> name.endsWith(".core.SuperChunkBridge")
+                ? CellBridge.class : legacy.find(name), Object.class);
+        Object level = new Object();
+        Object other = new Object();
+        setFlags(31);
+        check(modern.pinSupportedPhases() && flags() == 15, "Cell-capable Skein must retain all tick phases and disable saving");
+        check(!modern.pinSupportedPhases(), "Repeated cell-policy pin must be stable");
+        check(!modern.isChunkTaskOwner(level), "Server thread without cell context must not claim a chunk task");
+        DimensionTicker.active = true;
+        runThread(new Worker(() -> {
+            Context.owner.set(level);
+            check(modern.isDimensionTicker(level), "Nested phases must not revoke the outer dimension owner");
+            check(modern.isChunkTaskOwner(level), "Dimension owner must retain chunk access");
+            check(!modern.isChunkTaskOwner(other), "Dimension owner must not drive another level's executor");
+            Context.deferred.set(true);
+            check(!modern.isDimensionTicker(level), "Cell worker must not masquerade as dimension owner");
+            check(!modern.isChunkTaskOwner(level), "Cell worker without lock must not drive chunk callbacks");
+            CellBridge.locked.set(true);
+            check(modern.isChunkTaskOwner(level), "Locked cell must drive its own chunk callbacks");
+            check(!modern.isChunkTaskOwner(other), "Locked cell must not drive another level's callbacks");
+            CellBridge.locked.set(false);
+            check(!modern.isChunkTaskOwner(level), "Releasing lock must revoke callback ownership");
+            Config.stale = false;
+            check(modern.deferConfigMutation() && Config.stale, "Nested cell reload must defer");
+            fails(modern::pinSupportedPhases, "Cell work must not mutate live phase settings");
+            Context.deferred.set(false);
+            Live.parallelSaving = true;
+            check(!modern.isDimensionTicker(level), "Save phase must still veto dimension ownership");
+            Live.parallelSaving = false;
+            Context.owner.remove();
+            Context.deferred.remove();
+        }));
+        DimensionTicker.active = false;
+        List<String> commands = new ArrayList<>();
+        runThread(new Worker(() -> {
+            Context.owner.set(level);
+            Context.deferred.set(true);
+            check(modern.isParallelPhaseActive(), "Cells without dimension threading must open a command barrier");
+            check(modern.deferConfigMutation(), "Cells without dimension threading must defer reloads");
+            check(modern.deferCommand(level, false, () -> commands.add("cell")), "Cell command must enter its deferred buffer");
+            check(commands.isEmpty(), "Cell command must not execute early");
+            Context.deferred.set(false);
+            for (Runnable command; (command = CellBridge.commands.poll()) != null;) command.run();
+            Context.owner.remove();
+            Context.deferred.remove();
+        }));
+        check(commands.equals(List.of("cell")), "Cell-only barrier must execute a command exactly once");
+        check(!modern.isParallelPhaseActive(), "Closed cell barrier must not stay active");
+        Live.threadSafeRandom = false;
+        check(modern.pinSupportedPhases() && flags() == 0, "Missing random isolation must disable cell phases");
+        Live.threadSafeRandom = true;
+        Config.stale = false;
     }
 
     private static void checkDeferredCommands(SkeinCompat.Bridge bridge, SkeinCompat.Bridge legacyBridge)
@@ -278,6 +334,7 @@ public final class SkeinCompatTest {
     }
 
     public static final class Live {
+        public static volatile boolean threadSafeRandom = true;
         public static volatile boolean enabled = true;
         public static volatile boolean dimensions = true;
         public static volatile boolean entities;
@@ -285,6 +342,22 @@ public final class SkeinCompatTest {
         public static volatile boolean blockEntities;
         public static volatile boolean scheduledTicks;
         public static volatile boolean parallelSaving;
+    }
+
+    public static final class CellBridge {
+        static final ThreadLocal<Boolean> locked = ThreadLocal.withInitial(() -> false);
+        static final ConcurrentLinkedQueue<Runnable> commands = new ConcurrentLinkedQueue<>();
+        public static int apiVersion() { return 1; }
+        public static boolean supportsParallelTicks() { return Live.threadSafeRandom; }
+        public static boolean phaseActive() { return DimensionTicker.active || Context.deferring(); }
+        public static boolean ownsChunkTasks(Object level) {
+            return Live.enabled && Context.owns(level) && Context.deferring() && locked.get();
+        }
+        public static boolean deferCommand(Object level, Runnable action) {
+            if (level == null || !Context.owns(level) || !Context.deferring()) return false;
+            commands.add(() -> { if (!DimensionTicker.deferPastBarrier(action)) action.run(); });
+            return true;
+        }
     }
 
     public static final class Config {

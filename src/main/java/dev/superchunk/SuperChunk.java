@@ -36,6 +36,8 @@ public final class SuperChunk {
     public static final Logger LOGGER = LogUtils.getLogger();
 
     public SuperChunk(IEventBus modEventBus) {
+        // Again here: NeoForge replaces the early logging configuration before mods construct.
+        dev.superchunk.diag.LogQuieter.install();
         LOGGER.info("[SuperChunk] initializing — unified worldgen/chunk super-mod.");
         // Diagnostic: periodic chunk census (leak-vs-plateau); daemon self-idles when no server runs.
         // Off by default — enable with -Dsuperchunk.diag.chunkCensus=true.
@@ -102,6 +104,15 @@ public final class SuperChunk {
                     dev.superchunk.worldgen.BiomeQuartCache.reportVerify();
                 }
                 dev.superchunk.worldgen.FirstPositionalFloat.reportVerify();
+                dev.superchunk.worldgen.ReusableOreRandom.reportVerify();
+                dev.superchunk.worldgen.LerpTables.reportVerify();
+                dev.superchunk.worldgen.AirCells.reportVerify();
+                if (Boolean.getBoolean("superchunk.worldgen.biomeFiddleCache.verify")) {
+                    dev.superchunk.worldgen.BiomeFiddleCache.reportVerify();
+                }
+                if (Boolean.getBoolean("superchunk.worldgen.flatClimateSearch.verify")) {
+                    dev.superchunk.worldgen.FlatClimateIndex.reportVerify();
+                }
                 try {
                     GpuFillStats.logSummary("server stopping");
                 } catch (Throwable ignored) {

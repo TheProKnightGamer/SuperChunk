@@ -111,7 +111,8 @@ public class ModuleEntryPoint {
             final int cpuTerm = tryEvaluateExpression("max(1, if(is_windows,(cpus/1.6),(cpus/1.3)) - if(is_client,1,0))");
             final int heapTerm = tryEvaluateExpression("max(1, ( mem_gb - (if(is_client,1.2,0.6)) ) / 0.6 )");
             if (heapTerm < cpuTerm - 1) {
-                ConfigSystem.LOGGER.warn(
+                // A tuning tip, not a fault: SuperChunk shows it with logging.verbose=true.
+                ConfigSystem.LOGGER.info(
                         "C2ME worldgen is heap-limited to {} worker threads; this CPU supports up to {}. " +
                         "To unlock ~+25% chunks/sec during pre-generation, raise -Xmx (each +0.6 GiB heap = +1 worker up to {}) " +
                         "or set -Dc2me.base.config.override.globalExecutorParallelism={} (survives config-version wipes).",

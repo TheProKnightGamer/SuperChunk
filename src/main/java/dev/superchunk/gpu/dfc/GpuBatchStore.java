@@ -272,18 +272,27 @@ public final class GpuBatchStore {
          * the ids exist only to prove the chained readback arrived (plumbing-tax probe).
          */
         final byte[] ids;
+        /**
+         * The per-dimension decide route ({@link CompactIds.Route}) {@link #ids} were decided for,
+         * or {@code null} without ids. The store key is position plus lattice geometry, which two
+         * dimensions can share (a datapack dimension with overworld-shaped noise), and ids depend
+         * on the dimension's router, structures and blending: the consumer only takes ids whose
+         * route is its own chunk's.
+         */
+        final Object route;
 
         public Stored(GpuFusedInterpolator fused, Extent ext, double[] grids, OnDeviceFieldPool.Holder field) {
-            this(fused, ext, grids, field, null);
+            this(fused, ext, grids, field, null, null);
         }
 
         public Stored(GpuFusedInterpolator fused, Extent ext, double[] grids, OnDeviceFieldPool.Holder field,
-                      byte[] ids) {
+                      byte[] ids, Object route) {
             this.fused = fused;
             this.ext = ext;
             this.grids = grids;
             this.field = field;
             this.ids = ids;
+            this.route = ids == null ? null : route;
         }
     }
 

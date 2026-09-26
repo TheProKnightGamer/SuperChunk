@@ -369,6 +369,10 @@ public final class CompactIds {
         if (!PROBE || nc == null) {
             return null;
         }
+        if (!blockFillUnhooked()) {
+            auxFailForeign.increment();
+            return null;
+        }
         try {
             // fp64-only feature (aq_decide is vanilla-double): don't waste the
             // 315-cell FluidStatus capture when the decide chain can never build.
@@ -419,6 +423,11 @@ public final class CompactIds {
             DensityFunctions.BeardifierOrMarker beard = ((IChunkNoiseSampler) nc).getBeardifier();
             if (beard instanceof ScBeardBoxAccess bb) {
                 hasBeard = bb.superchunk$beardBox(box);
+            } else if (beard != DensityFunctions.BeardifierMarker.INSTANCE) {
+                // A modded beardifier type: its density cannot be bounded here, and deciding
+                // without it would drop that mod's terrain adaptation.
+                auxFailOther.increment();
+                return null;
             }
             // CPU-ASSIST heterogeneous split (-Dsuperchunk.gpu.cpuAssistNth=N, default
             // 0 = off; CONSUME mode only), gated LAST so only otherwise-decidable
@@ -442,6 +451,18 @@ public final class CompactIds {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("[compact-ids] aux capture threw — corner-only for this chunk.", t);
             }
+            return null;
+        }
+    }
+
+    /**
+     * The decide route of {@code nc}'s dimension, or {@code null} (no noise-based aquifer / no
+     * route): what {@link CompactConsume} compares a stored entry's route against.
+     */
+    static Route routeFor(NoiseChunk nc) {
+        try {
+            return nc.aquifer() instanceof ScCompactAuxSource src ? routeOf(src.superchunk$barrierNoise()) : null;
+        } catch (Throwable t) {
             return null;
         }
     }
@@ -544,17 +565,17 @@ public final class CompactIds {
                     members.size(), nodeToRoot.size());
             return null;
         }
-        // Compact slot assignment (distinct roots only), stable first-use order.
+        // Compact slot assignment (distinct roots only), numbered in ascending root order so the
+        // emitted source — and with it the program-cache key — is the same on every boot.
+        // (First-use order over this IdentityHashMap followed identity hash codes, which differ
+        // per JVM: the decide program was recompiled and re-cached on every start.)
         Map<Integer, Integer> slotOfRoot = new LinkedHashMap<>();
+        for (int root : new java.util.TreeSet<>(nodeToRoot.values())) {
+            slotOfRoot.put(root, slotOfRoot.size());
+        }
         IdentityHashMap<AstNode, Integer> gridSlots = new IdentityHashMap<>();
         for (Map.Entry<AstNode, Integer> e : nodeToRoot.entrySet()) {
-            int root = e.getValue();
-            Integer slot = slotOfRoot.get(root);
-            if (slot == null) {
-                slot = slotOfRoot.size();
-                slotOfRoot.put(root, slot);
-            }
-            gridSlots.put(e.getKey(), slot);
+            gridSlots.put(e.getKey(), slotOfRoot.get(e.getValue()));
         }
         int tailSlots = slotOfRoot.size();
 
@@ -601,14 +622,11 @@ public final class CompactIds {
         // slots (the same root may legitimately hold BOTH a lerp3 and a value slot).
         Map<Integer, Integer> veinSlotOfRoot = new LinkedHashMap<>();
         if (veins) {
+            for (int root : new java.util.TreeSet<>(veinNodeToRoot.values())) {
+                veinSlotOfRoot.put(root, tailSlots + veinSlotOfRoot.size());
+            }
             for (Map.Entry<AstNode, Integer> e : veinNodeToRoot.entrySet()) {
-                int root = e.getValue();
-                Integer slot = veinSlotOfRoot.get(root);
-                if (slot == null) {
-                    slot = tailSlots + veinSlotOfRoot.size();
-                    veinSlotOfRoot.put(root, slot);
-                }
-                gridSlots.put(e.getKey(), slot);
+                gridSlots.put(e.getKey(), veinSlotOfRoot.get(e.getValue()));
             }
         }
 
@@ -967,6 +985,18 @@ public final class CompactIds {
     private static final LongAdder auxFailVeinSeed = new LongAdder();
     private static final LongAdder auxFailFluidType = new LongAdder();
     private static final LongAdder auxFailOther = new LongAdder();
+    private static final LongAdder auxFailForeign = new LongAdder();
+
+    /**
+     * Compact ids stand in for the whole per-block fill: the fast path writes decided ids without
+     * calling {@code NoiseChunk.getInterpolatedState}, the beardifier, the aquifer or the material
+     * rules, and the hybrid path calls the rule list directly. While another mod hooks any of these
+     * (YUNG's API does, to bury its structures), no chunk is decided and every chunk takes the
+     * ordinary per-block path, where its code runs ({@link dev.superchunk.worldgen.BlockFillHooks}).
+     */
+    private static boolean blockFillUnhooked() {
+        return dev.superchunk.worldgen.BlockFillHooks.unhooked();
+    }
 
     /**
      * A chunk's aquifer FluidStatus table contained a fluid state that is not exactly
@@ -1123,13 +1153,13 @@ public final class CompactIds {
         LOG.info("[compact-ids] ({}) chunks with ids={} / without={} | id bytes read back={} ({} KB) | "
                         + "decide dispatches={} (chunks decided={}, skipped veinless-plan={}), decide kernel mean={} ms/chunk, "
                         + "ids slice mean={} ms/dispatch | aux: captured={} failures: noAquifer={} blending={} "
-                        + "noRoute={} veinSeed={} fluidType={} other={} | decide faults={}{}",
+                        + "noRoute={} veinSeed={} fluidType={} other={} foreignHook={} | decide faults={}{}",
                 reason, with, without, idBytes.sum(), idBytes.sum() / 1024,
                 disp, dChunks, decideSkipVeinless.sum(),
                 kernelMsPerChunk, String.format("%.3f", wallMsPerDispatch),
                 auxCaptured.sum(), auxFailNoAquifer.sum(), auxFailBlending.sum(),
                 auxFailNoRoute.sum(), auxFailVeinSeed.sum(), auxFailFluidType.sum(), auxFailOther.sum(),
-                decideFaults.sum(),
+                auxFailForeign.sum(), decideFaults.sum(),
                 (planFailReason == null ? "" : " | plan: " + planFailReason) + timelineLine());
     }
 

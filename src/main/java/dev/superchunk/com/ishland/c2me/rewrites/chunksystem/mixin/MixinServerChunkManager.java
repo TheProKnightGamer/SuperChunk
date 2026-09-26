@@ -2,10 +2,13 @@ package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.mixin;
 
 import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.Config;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.UnreachableChunkWait;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ducks.IChunkSystemAccess;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.structs.ChunkSystemExecutors;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Local;
+import com.llamalad7.mixinextras.sugar.ref.LocalRef;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.GenerationChunkHolder;
 import net.minecraft.server.level.DistanceManager;
@@ -32,6 +35,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BooleanSupplier;
 
 @Mixin(ServerChunkCache.class)
 public abstract class MixinServerChunkManager {
@@ -75,7 +79,8 @@ public abstract class MixinServerChunkManager {
      * then {@code mainThreadProcessor.managedBlock(future::isDone)}. With {@code create == false} no
      * UNKNOWN ticket is added, so nothing bounds that wait. The primary cause of an unbounded one --
      * a MARK_BROKEN holder whose futures were abandoned -- is fixed at its source in
-     * {@code ItemHolder#failPendingFuturesAbove}. This timeout is disabled by default so healthy
+     * {@code ItemHolder#failPendingFuturesAbove}, and the neighbours stuck waiting on such a holder by
+     * {@link #superchunk$abandonUnreachableChunkWait}. This timeout is disabled by default so healthy
      * chunks keep vanilla's completion semantics, even when loading takes longer than expected.
      *
      * <p>When explicitly enabled, it uses a bounded wait. {@code chunkAbsent} goes false as
@@ -118,6 +123,47 @@ public abstract class MixinServerChunkManager {
             }
         }
         return GenerationChunkHolder.UNLOADED_CHUNK_FUTURE;
+    }
+
+    /**
+     * SuperChunk: end the server thread's {@code getChunk} wait for a chunk that can never load.
+     *
+     * <p>A chunk whose generation threw is MARK_BROKEN and its own futures are failed
+     * ({@code ItemHolder#failPendingFuturesAbove}), but its neighbours that still need it at a later
+     * status wait on it through dependency tickets that will never fire, and nothing fails their
+     * futures. So the moment anything on the server thread asks for one of them —
+     * Lithium's collision sweep for a player flying toward the hole, {@code /forceload},
+     * {@code Level.getBlockState} — {@code managedBlock} parks forever: no watchdog in
+     * singleplayer, and on a dedicated server a 60s kill with a thread dump that points at
+     * collision code. (Vanilla hangs the same way on the chunk itself; reproduced with a JJThunder
+     * To The Max world, whose large_dripstone reads 9 chunks from its origin.)
+     *
+     * <p>{@link UnreachableChunkWait} adds "provably stuck behind a broken chunk" to the stop condition
+     * and, when that is what ended the wait, swaps the method's future local for
+     * {@code UNLOADED_CHUNK_FUTURE} so the {@code join()} that follows returns at once. That gives
+     * the neighbour what the broken chunk itself gets: {@code null} for a non-creating call, and
+     * "Chunk not there when requested" for a creating one. Only the local is replaced; the shared
+     * holder future is never completed from here. A chunk that is merely slow is never abandoned,
+     * because the walk follows only unsatisfied dependencies of upgrades in flight.
+     */
+    @WrapOperation(
+            method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerChunkCache$MainThreadExecutor;managedBlock(Ljava/util/function/BooleanSupplier;)V"))
+    private void superchunk$abandonUnreachableChunkWait(
+            ServerChunkCache.MainThreadExecutor instance, BooleanSupplier isDone, Operation<Void> original,
+            int x, int z, ChunkStatus leastStatus, boolean create,
+            @Local LocalRef<CompletableFuture<ChunkResult<ChunkAccess>>> future) {
+        if (!UnreachableChunkWait.ENABLED || isDone.getAsBoolean()) {
+            original.call(instance, isDone);
+            return;
+        }
+        final UnreachableChunkWait wait = new UnreachableChunkWait(
+                ((IChunkSystemAccess) this.chunkMap).c2me$getTheChunkSystem(), x, z, leastStatus);
+        original.call(instance, (BooleanSupplier) () -> isDone.getAsBoolean() || wait.isUnreachable());
+        if (!isDone.getAsBoolean() && wait.isUnreachable()) {
+            wait.log(create);
+            future.set(GenerationChunkHolder.UNLOADED_CHUNK_FUTURE);
+        }
     }
 
     /**
@@ -178,13 +224,15 @@ public abstract class MixinServerChunkManager {
 
     @WrapOperation(method = "runDistanceManagerUpdates", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/DistanceManager;runAllUpdates(Lnet/minecraft/server/level/ChunkMap;)Z"))
     private boolean consolidateSchedules(DistanceManager instance, ChunkMap completablefuture, Operation<Boolean> original) {
-        Queue<Runnable> runnables = ChunkSystemExecutors.CONSOLIDATING_QUEUE.get();
+        ChunkSystemExecutors.Consolidation state = ChunkSystemExecutors.CONSOLIDATION.get();
+        Queue<Runnable> runnables = state.current;
         if (runnables != null) {
             new Throwable("CONSOLIDATING_QUEUE leak").printStackTrace();
             return original.call(instance, chunkMap);
         }
 
-        ChunkSystemExecutors.CONSOLIDATING_QUEUE.set(runnables = new ArrayDeque<>());
+        // A fresh queue: it is handed to a background task below, so it is never reused.
+        state.current = runnables = new ArrayDeque<>();
         try {
             return original.call(instance, chunkMap);
         } finally {
@@ -200,7 +248,7 @@ public abstract class MixinServerChunkManager {
                     }
                 });
             }
-            ChunkSystemExecutors.CONSOLIDATING_QUEUE.remove();
+            state.current = null;
         }
     }
 

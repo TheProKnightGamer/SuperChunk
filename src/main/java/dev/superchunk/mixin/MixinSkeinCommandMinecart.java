@@ -13,7 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class MixinSkeinCommandMinecart {
     @Inject(method = "activateMinecart", at = @At("HEAD"), cancellable = true, require = 1)
     private void superchunk$deferCommandActivation(int x, int y, int z, boolean receivingPower, CallbackInfo ci) {
-        if (!receivingPower || !SkeinCompat.isDimensionPhaseActive()) {
+        if (!receivingPower || !SkeinCompat.isParallelPhaseActive()) {
             return;
         }
         MinecartCommandBlock self = (MinecartCommandBlock) (Object) this;

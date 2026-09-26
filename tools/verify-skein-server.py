@@ -29,6 +29,7 @@ import time
 
 
 DIMENSIONS = ('overworld', 'the_nether', 'the_end')
+EXPECTED_PHASES = {'dimensions'}
 SKEIN_CONFIG = """[general]
 threadCount=3
 adaptive=false
@@ -83,7 +84,7 @@ def setup_commands():
 def console_health(console):
     phases = re.findall(r'\bphases:\s*([^\r\n]*)', console)
     return {
-        'dimension_only': bool(phases) and all(p.strip() == 'dimensions' for p in phases),
+        'expected_phases': bool(phases) and all(set(p.strip().split(', ')) == EXPECTED_PHASES for p in phases),
         'saved': 'Saved the game' in console,
         'no_errors': not any(FAILED.search(line) for line in console.splitlines()),
     }
@@ -309,14 +310,18 @@ def run_fresh(args, server, config):
 
 
 def main():
+    global EXPECTED_PHASES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server-template', type=Path, required=True)
     parser.add_argument('--jar', type=Path, required=True)
     parser.add_argument('--skein-jar', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True, help='New directory; must not exist')
+    parser.add_argument('--parallel-phases', action='store_true', help='Require the versioned Skein bridge to retain all tick phases')
     parser.add_argument('--timeout', type=int, default=180,
                         help='Maximum active seconds per server phase (1..180); cleanup has a short grace period')
     args = parser.parse_args()
+    if args.parallel_phases:
+        EXPECTED_PHASES = {'dimensions', 'scheduledTicks', 'randomTicks', 'entities', 'blockEntities'}
     if not 1 <= args.timeout <= 180:
         parser.error('--timeout must be between 1 and 180 seconds')
     for name in ('server_template', 'jar', 'skein_jar', 'output'):

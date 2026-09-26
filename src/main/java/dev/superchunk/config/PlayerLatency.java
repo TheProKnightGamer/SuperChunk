@@ -77,7 +77,7 @@ public final class PlayerLatency {
         }
         SEND_AT_CHUNK_SENDING = sendAtChunkSending;
         PRIORITY_BIAS = priorityBias;
-        LATENCY_METRICS = latencyMetrics;
+        LATENCY_METRICS = latencyMetrics && dev.superchunk.diag.LogQuieter.verbose(); // metrics are log-only
     }
 
     private PlayerLatency() {

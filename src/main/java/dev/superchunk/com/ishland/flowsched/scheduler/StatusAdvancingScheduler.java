@@ -5,8 +5,10 @@ import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import it.unimi.dsi.fastutil.objects.Object2ReferenceOpenHashMap;
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 
 import java.lang.invoke.VarHandle;
+import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
@@ -430,6 +432,57 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
         }
     }
 
+    /**
+     * SuperChunk: the key of a {@link ItemHolder#FLAG_BROKEN} item that keeps {@code key} from ever
+     * reaching {@code wanted}, or {@code null} if none turns up within {@code nodeBudget} items.
+     *
+     * <p>A broken item never upgrades again ({@code tickHandle0} fails its futures instead), and it
+     * cannot unload while a dependent's ticket holds it, so a dependency on it at a status it has not
+     * reached is never satisfied: {@code getDependencyFuture0} completes only through ticket
+     * callbacks, which fire on upgrade. The dependent is not broken itself, so its futures stay
+     * pending with nothing left to complete them. For a chunk whose features step threw, that is the
+     * ring of neighbours whose LIGHT step needs it at INITIALIZE_LIGHT: they park at INITIALIZE_LIGHT.
+     *
+     * <p>Only unsatisfied dependencies of upgrades in flight are followed, and an upgrade in flight
+     * is always the next status on the way to what its dependent needs, so a non-null answer means
+     * stuck, never merely slow. An item with no upgrade in flight is not followed (the scheduler is
+     * about to start one), so a transient state answers null and the caller asks again later.
+     */
+    public K findBrokenBlocker(K key, ItemStatus<K, V, Ctx> wanted, int nodeBudget) {
+        final ItemHolder<K, V, Ctx, UserData> start = this.getHolder(key);
+        if (start == null || !start.isOpen() || start.getStatus().ordinal() >= wanted.ordinal()) {
+            return null;
+        }
+        if ((start.getFlags() & ItemHolder.FLAG_BROKEN) != 0) {
+            return key;
+        }
+        final ArrayDeque<ItemHolder<K, V, Ctx, UserData>> queue = new ArrayDeque<>();
+        final ObjectOpenHashSet<K> seen = new ObjectOpenHashSet<>();
+        queue.add(start);
+        seen.add(key);
+        ItemHolder<K, V, Ctx, UserData> holder;
+        while (nodeBudget-- > 0 && (holder = queue.poll()) != null) {
+            final ItemStatus<K, V, Ctx> upgrading = holder.peekUpgradingStatus();
+            final KeyStatusPair<K, V, Ctx>[] dependencies = upgrading != null ? holder.peekDependencies(upgrading) : null;
+            if (dependencies == null) {
+                continue;
+            }
+            for (KeyStatusPair<K, V, Ctx> dependency : dependencies) {
+                final ItemHolder<K, V, Ctx, UserData> other = this.getHolder(dependency.key());
+                if (other == null || !other.isOpen() || other.getStatus().ordinal() >= dependency.status().ordinal()) {
+                    continue; // satisfied, or not an item we can reason about
+                }
+                if ((other.getFlags() & ItemHolder.FLAG_BROKEN) != 0) {
+                    return dependency.key();
+                }
+                if (seen.add(dependency.key())) {
+                    queue.add(other);
+                }
+            }
+        }
+        return null;
+    }
+
     private ItemHolder<K, V, Ctx, UserData> getOrCreateHolder(K key) {
         final ItemHolder<K, V, Ctx, UserData> holder = getHolder(key);
         if (holder != null) {
@@ -468,19 +521,20 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
             }
         });
         try {
-            final KeyStatusPair<K, V, Ctx> keyStatusPair = new KeyStatusPair<>(holder.getKey(), nextStatus);
+            // One callback serves every dependency: it captures nothing per dependency, and each
+            // registration still runs it exactly once (callbacks are only listed and run).
+            final Runnable onSatisfied = () -> {
+                final int incrementAndGet = satisfied.incrementAndGet();
+                Assertions.assertTrue(incrementAndGet <= size, "Satisfied more than expected");
+                if (incrementAndGet == size) {
+                    if (finished.compareAndSet(false, true)) {
+                        holder.getCriticalSectionExecutor().execute(() -> signaller.fireComplete(null));
+                    }
+                }
+            };
             for (KeyStatusPair<K, V, Ctx> dependency : dependencies) {
                 Assertions.assertTrue(!dependency.key().equals(holder.getKey()));
-                holder.addDependencyTicket(this, dependency.key(), dependency.status(), () -> {
-//                    Assertions.assertTrue(this.getHolder(dependency.key()).getStatus().ordinal() >= dependency.status().ordinal());
-                    final int incrementAndGet = satisfied.incrementAndGet();
-                    Assertions.assertTrue(incrementAndGet <= size, "Satisfied more than expected");
-                    if (incrementAndGet == size) {
-                        if (finished.compareAndSet(false, true)) {
-                            holder.getCriticalSectionExecutor().execute(() -> signaller.fireComplete(null));
-                        }
-                    }
-                });
+                holder.addDependencyTicket(this, dependency.key(), dependency.status(), onSatisfied);
             }
         } catch (Throwable t) {
             signaller.fireComplete(t);

@@ -265,21 +265,6 @@ public final class GpuClimatePrefetch {
             if (batcher == null || denFused == null || denDisp == null || plan.chainRoots() == null) {
                 return null;
             }
-            // Attach once per dispatcher (idempotent; sticky-fail). The identity is the
-            // dimension's climate fused group — a chunk from another dimension resolves a
-            // different group and simply doesn't chain (its dedicated path stays).
-            Object climIdentity = plan.key().fused();
-            if (!denDisp.climateChainReadyFor(climIdentity)) {
-                if (!denDisp.attachClimateChain(climIdentity, plan.chainRoots(),
-                        plan.oy(), plan.dimX(), plan.dimY(), plan.dimZ())) {
-                    return null;
-                }
-            } else if (!denDisp.climateChainGeometryMatches(plan.oy(), plan.dimX(), plan.dimY(), plan.dimZ())) {
-                return null;
-            }
-            if (denDisp.climateSliceLen() != plan.expectLen()) {
-                return null;
-            }
             // Canonical density extent for this chunk (pre-NoiseChunk). The chain derives
             // climate origins from the density origins, so the horizontal origins must agree.
             final net.minecraft.world.level.ChunkPos pos = chunk.getPos();
@@ -293,7 +278,23 @@ public final class GpuClimatePrefetch {
             // Without this, the FIRST dimension to reach the seam could attach its climate
             // roots to another dimension's density dispatcher (e.g. nether-first) and lock
             // the real dimension out of the chain. A mismatched chunk rides the split path.
+            // It must run BEFORE the one-time attach below, or that attach is what locks it out.
             if (ext.oy != plan.oy() || (ext.dimY - 1) * ext.sy != plan.dimY() * 4) {
+                return null;
+            }
+            // Attach once per dispatcher (idempotent; sticky-fail). The identity is the
+            // dimension's climate fused group — a chunk from another dimension resolves a
+            // different group and simply doesn't chain (its dedicated path stays).
+            Object climIdentity = plan.key().fused();
+            if (!denDisp.climateChainReadyFor(climIdentity)) {
+                if (!denDisp.attachClimateChain(climIdentity, plan.chainRoots(),
+                        plan.oy(), plan.dimX(), plan.dimY(), plan.dimZ())) {
+                    return null;
+                }
+            } else if (!denDisp.climateChainGeometryMatches(plan.oy(), plan.dimX(), plan.dimY(), plan.dimZ())) {
+                return null;
+            }
+            if (denDisp.climateSliceLen() != plan.expectLen()) {
                 return null;
             }
             dkey = GpuBatchStore.key(pos, ext.ox, ext.oy, ext.oz, ext.sx, ext.sy, ext.sz,

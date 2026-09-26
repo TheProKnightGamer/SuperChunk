@@ -100,7 +100,7 @@ public final class PredictiveGen {
         int corridorWidthChunks = 5;
         int recomputeIntervalTicks = 10;
         double hitWindowSeconds = 10.0;
-        boolean logMetrics = true;
+        boolean logMetrics = false;
         try {
             Properties p = SuperChunkConfig.get();
             enabled = parseBoolean(p, KEY_ENABLED, true);
@@ -111,7 +111,7 @@ public final class PredictiveGen {
             corridorWidthChunks = parseIntClamped(p, KEY_CORRIDOR_WIDTH_CHUNKS, 5, 1, 15);
             recomputeIntervalTicks = parseIntClamped(p, KEY_RECOMPUTE_INTERVAL_TICKS, 10, 1, 100);
             hitWindowSeconds = parseDoubleClamped(p, KEY_HIT_WINDOW_SECONDS, 10.0, 1.0, 120.0);
-            logMetrics = parseBoolean(p, KEY_LOG_METRICS, true);
+            logMetrics = parseBoolean(p, KEY_LOG_METRICS, false);
         } catch (Throwable t) {
             // Never let config trouble take down class init (would poison every hook site with
             // NoClassDefFoundError). Fall back to the built-in defaults (toggle defaults ON).
@@ -125,7 +125,7 @@ public final class PredictiveGen {
         CORRIDOR_WIDTH_CHUNKS = corridorWidthChunks;
         RECOMPUTE_INTERVAL_TICKS = recomputeIntervalTicks;
         HIT_WINDOW_SECONDS = hitWindowSeconds;
-        LOG_METRICS = logMetrics;
+        LOG_METRICS = logMetrics && dev.superchunk.diag.LogQuieter.verbose(); // metrics are log-only
     }
 
     private PredictiveGen() {

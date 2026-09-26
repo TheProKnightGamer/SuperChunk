@@ -30,11 +30,26 @@ import org.spongepowered.asm.mixin.Unique;
  * {@code -Dsuperchunk.worldgen.xoroshiroReseed=false}.
  */
 @Mixin(XoroshiroRandomSource.class)
-public abstract class MixinXoroshiroReseedInPlace {
+public abstract class MixinXoroshiroReseedInPlace implements dev.superchunk.worldgen.ReusableOreRandom.Resettable {
 
     @Unique
     private static final boolean SUPERCHUNK$ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.xoroshiroReseed", "true"));
+
+    /** Stand down when another mod hooks the replaced method ({@link dev.superchunk.worldgen.ForeignHooks}). */
+    @Unique
+    private static byte superchunk$hooks;
+
+    @Unique
+    private static boolean superchunk$unhooked() {
+        byte state = superchunk$hooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The in-place Xoroshiro reseed (XoroshiroRandomSource.setSeed)",
+                    "net.minecraft.world.level.levelgen.XoroshiroRandomSource#setSeed");
+            superchunk$hooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
 
     // Exact zero-guard constants from Xoroshiro128PlusPlus(long, long).
     @Unique
@@ -52,7 +67,7 @@ public abstract class MixinXoroshiroReseedInPlace {
     @WrapMethod(method = "setSeed", require = 0)
     private void superchunk$reseedInPlace(long seed, Operation<Void> original) {
         Xoroshiro128PlusPlus gen = this.randomNumberGenerator;
-        if (!SUPERCHUNK$ENABLED || gen == null) {
+        if (!SUPERCHUNK$ENABLED || gen == null || !superchunk$unhooked()) {
             original.call(seed);
             return;
         }
@@ -64,6 +79,19 @@ public abstract class MixinXoroshiroReseedInPlace {
             hi = SUPERCHUNK$GUARD_HI;
         }
         IXoroshiro128PlusPlusRandomImpl impl = (IXoroshiro128PlusPlusRandomImpl) (Object) gen;
+        impl.setSeedLo(lo);
+        impl.setSeedHi(hi);
+        this.gaussianSource.reset();
+    }
+
+    /** Exactly the state {@code new XoroshiroRandomSource(lo, hi)} starts in. */
+    @Override
+    public void superchunk$resetState(long lo, long hi) {
+        if ((lo | hi) == 0L) {
+            lo = SUPERCHUNK$GUARD_LO;
+            hi = SUPERCHUNK$GUARD_HI;
+        }
+        IXoroshiro128PlusPlusRandomImpl impl = (IXoroshiro128PlusPlusRandomImpl) (Object) this.randomNumberGenerator;
         impl.setSeedLo(lo);
         impl.setSeedHi(hi);
         this.gaussianSource.reset();
