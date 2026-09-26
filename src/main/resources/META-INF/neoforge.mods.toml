@@ -124,6 +124,15 @@ type = "optional"
 ordering = "BEFORE"
 side = "BOTH"
 
+# Same pin for Radium, the Lithium port LithiumMixinPlugin treats as equivalent: it reads
+# config/lithium.properties too, and without the pin FML may sort it first (ties go by discovery
+# order, and SuperChunk's core jar is discovered after mods-folder jars).
+[[dependencies.superchunk]]
+modId = "radium"
+type = "optional"
+ordering = "BEFORE"
+side = "BOTH"
+
 # ---------------------------------------------------------------------------------------------
 # HARD INCOMPATIBILITIES
 #
@@ -154,6 +163,39 @@ modId = "betterchunkloading"
 type = "incompatible"
 versionRange = "*"
 reason = "betterchunkloading breaks superchunks optimized chunk loading."
+ordering = "NONE"
+side = "BOTH"
+
+# ScalableLux, C2ME and Noisium are bundled inside SuperChunk. Installed next to it, each one kills
+# the launch before the mod list with a raw Mixin error (reproduced 2026-09-25 on a dedicated server
+# with ScalableLux 0.1.0.1, C2ME 0.4.0-alpha.0.106 and Noisium 2.7.0 for 1.21.1):
+#   scalablelux, c2me: FML decorates every mixin config with its owner's mod id, and both mods ship
+#     configs under the names SuperChunk registers (scalablelux.mixins.json, c2me-base.mixins.json)
+#     -> "Decoration with key 'fabric-modId' already exists".
+#   noisium: its populateNoise redirect collides with the bundled copy's -> "Critical injection
+#     failure: Redirector noisium$populateNoiseWrapSetBlockStateOperation".
+# Declaring them turns that into NeoForge's error screen naming the mod to remove.
+[[dependencies.superchunk]]
+modId = "scalablelux"
+type = "incompatible"
+versionRange = "*"
+reason = "ScalableLux is already built into SuperChunk; remove the separate ScalableLux jar."
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.superchunk]]
+modId = "c2me"
+type = "incompatible"
+versionRange = "*"
+reason = "C2ME is already built into SuperChunk; remove the separate C2ME jar."
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.superchunk]]
+modId = "noisium"
+type = "incompatible"
+versionRange = "*"
+reason = "Noisium is already built into SuperChunk; remove the separate Noisium jar."
 ordering = "NONE"
 side = "BOTH"
 

@@ -77,115 +77,196 @@ public final class SuperChunkConfig {
             "world.tick_scheduler",
             "world.chunk_access");
 
+    /** Mutable caches that assume a single ticking thread in each level. */
+    private static final java.util.Set<String> SKEIN_LITHIUM_DISABLED = java.util.Set.of(
+            "alloc.chunk_random", "util.world_border_listener",
+            "world.block_entity_ticking.world_border", "world.chunk_access", "block.hopper",
+            "chunk.entity_class_groups", "entity.inactive_navigations",
+            "entity.collisions.unpushable_cramming", "util.block_entity_retrieval");
+
+    private static boolean skeinInstalled() {
+        var mods = net.neoforged.fml.loading.LoadingModList.get();
+        return mods != null && mods.getMods().stream().anyMatch(mod -> "skein".equals(mod.getModId()));
+    }
+
     /** Ordered key -> default value. Order drives the written file layout (see {@link #SECTIONS}). */
     private static final Map<String, String> DEFAULTS = new LinkedHashMap<>();
-    /** key -> section header emitted just before it when writing the default file. */
+    /** key -> section title emitted just before it when writing the file. */
     private static final Map<String, String> SECTIONS = new LinkedHashMap<>();
+    /** key -> optional section introduction printed under the title. */
+    private static final Map<String, String> SECTION_INTROS = new LinkedHashMap<>();
+    /** key -> plain-language description printed above the option in the file. */
+    private static final Map<String, String> DESCRIPTIONS = new LinkedHashMap<>();
 
     static {
-        section("gpu.enabled", "GPU / OpenCL worldgen offload (master switch + precision + features)");
-        def("gpu.enabled", "false");
-        def("gpu.platformIndex", "-1");
-        def("gpu.deviceIndex", "-1");
-        def("gpu.desiredFp", "fp64");            // auto | fp64 | fp32
-        def("gpu.coalesce", "true");
-        def("gpu.fuseInterpolated", "true");
-        def("gpu.asyncReadback", "true");
+        section("gpu.enabled", "GPU worldgen offload (OpenCL)",
+                "Moves terrain density math to the graphics card. Off by default. It needs an OpenCL GPU "
+                        + "with double-precision (fp64) support; without one, SuperChunk uses the CPU.");
+        def("gpu.enabled", "false",
+                "Master switch for GPU worldgen. true = compute terrain noise on the GPU; false = CPU only. "
+                        + "If no usable device is found, the server logs why and uses the CPU.");
+        def("gpu.platformIndex", "-1",
+                "OpenCL platform (driver) to use, by its number in the startup log's 'Platform[n]' lines. "
+                        + "-1 = choose automatically.");
+        def("gpu.deviceIndex", "-1",
+                "GPU within that platform, by its number in the startup log. -1 = choose automatically.");
+        def("gpu.desiredFp", "fp64",
+                "Precision of the GPU terrain math. fp64 = double precision, terrain identical to vanilla; "
+                        + "devices without fp64 are not used. auto = fp64 if the device supports it, otherwise "
+                        + "fp32 (terrain may differ slightly from vanilla). fp32 = always single precision "
+                        + "(testing only).");
+        def("gpu.coalesce", "true",
+                "Compute each density function for a whole chunk in one GPU call instead of one call per "
+                        + "column. Same results, far fewer GPU calls. Needed by fuseInterpolated, "
+                        + "asyncReadback and batchChunks.");
+        def("gpu.fuseInterpolated", "true",
+                "Compute all of a chunk's interpolated density grids in a single GPU call. Same results. "
+                        + "Needs coalesce.");
+        def("gpu.asyncReadback", "true",
+                "Start a chunk's GPU work early and collect the results later, so the worker thread keeps "
+                        + "doing CPU work meanwhile. Same results. Needs fuseInterpolated.");
         // false (2026-07-16, round 8): with the compact-ids decide chain default-on the GPU
         // is the scarce resource — biome-on measured -22% at 24 workers (805.5 vs 1032 cps).
         // Biomes are bit-identical either way (the CPU path IS vanilla).
-        def("gpu.offloadBiome", "false");
+        def("gpu.offloadBiome", "false",
+                "Also compute biome climate noise on the GPU. Biomes are identical either way. Off because "
+                        + "the GPU is usually the busier side: this measured 11-22% slower overall. Try it "
+                        + "only if your GPU is mostly idle.");
         // true (2026-07-16, round 8): the batcher pipeline is the validated fast path
         // (rounds 6-8 smoke/parity/census-gated) and the compact-ids chain requires it.
-        def("gpu.batchChunks", "true");
-        def("gpu.batchLimit", "32");
-        def("gpu.batchWindowMicros", "500");
+        def("gpu.batchChunks", "true",
+                "Combine several chunks into one GPU call and free the worker thread while it runs. This is "
+                        + "the fast path and is required for GPU block decisions (see decideFp32). "
+                        + "false = one GPU call per chunk.");
+        def("gpu.batchLimit", "32",
+                "Maximum number of chunks combined into one GPU call (1 or more).");
+        def("gpu.batchWindowMicros", "500",
+                "How long, in microseconds, a chunk waits for others to join its batch before the batch is "
+                        + "sent anyway (0 or more). Longer = bigger batches but more waiting.");
         // In-flight batched dispatches (slot ring in GpuBatchDispatcher). 2 = the measured
         // sweet spot: restores the overlap the chained climate+density batches need (free
         // climate offload) at zero cost to biome-off; 1 serializes the chain (~8% loss
         // when biome is on); 4 shrinks batches (~5% loss everywhere on a strong CPU).
-        def("gpu.batchPipelineDepth", "2");
-        def("gpu.mergeKernels", "false");
+        def("gpu.batchPipelineDepth", "2",
+                "How many batches may be on the GPU at the same time (1-16). 2 measured best on an "
+                        + "i7-14700K with an RTX 3070; a weak CPU with a strong GPU may gain from 3 or 4.");
+        def("gpu.mergeKernels", "false",
+                "Compile all density functions into a single OpenCL program. Same results, but the "
+                        + "first-time compile becomes far slower for normal worlds. Leave false.");
         // false (2026-07-07): structure-probe column samplers take the CPU bytecode path —
         // the GPU probe path was ~11.4k worker-side parked dispatches per r2048 pregen;
         // CPU routing measured +18% cps at 21 workers. Parity-free (GPU is FP64 bit-exact).
-        def("gpu.subLatticeGpu", "false");
+        def("gpu.subLatticeGpu", "false",
+                "Also send the small terrain-height probes used for structure placement to the GPU. "
+                        + "Measured 18% slower, because each probe waits for its own GPU round trip. "
+                        + "Leave false.");
         // fp32 decision math for the compact-ids DECIDE kernel (corner buffer + aq_decide
         // comparisons stay fp64). Auto-falls-back to the fp64 program if the fp32 build
         // fails. The compact-ids chain itself is DEFAULT ON since round 8
         // (-Dsuperchunk.gpu.compactIds=off restores strict mode); its output envelope is
         // census-measured — zero deviations across every census run (455.9M + 4x460M blocks).
-        def("gpu.decideFp32", "true");
+        def("gpu.decideFp32", "true",
+                "Precision of the GPU's per-block decisions (stone, air, water, lava, ore veins); the "
+                        + "density grids stay fp64. true = single precision, faster; very rarely a block can "
+                        + "differ from vanilla (one stone/air difference in 143 million blocks on one tested "
+                        + "seed). false = double precision, no known differences. Falls back to fp64 "
+                        + "automatically if the fp32 program fails to build. To keep block decisions on the "
+                        + "CPU entirely, start the server with -Dsuperchunk.gpu.compactIds=off.");
         // FMA contraction for the fp32 decide program. Census-zero but measured
         // throughput-NEUTRAL on GA104 (the kernel is latency-bound) — experiment flag.
-        def("gpu.decideFmaContract", "false");
+        def("gpu.decideFmaContract", "false",
+                "Allow fused multiply-add in the fp32 decision program. Experimental: no speed gain was "
+                        + "measured on an RTX 3070.");
         // fp32 climate kernel experiment. MEASURED-REFUTED on vanilla noise (domain-warp
         // amplifies fp32 drift to ~0.47 quantized units; the boot gate auto-refuses and
         // falls back to fp64 — zero behavior change). Kept for un-warped datapack noise.
-        def("gpu.climateFp32", "false");
-        def("gpu.latticeCoords", "true");
-        def("gpu.mappedBuffers", "true");
-        def("gpu.profile", "false");
-        def("gpu.selftest.noise", "false");
-        def("gpu.selftest.dfc", "false");
-        def("gpu.selftest.gpu_parity", "false");
+        def("gpu.climateFp32", "false",
+                "Single precision for the GPU climate program (only used with offloadBiome=true). "
+                        + "Experimental: on vanilla terrain a startup check rejects it and keeps fp64. Only "
+                        + "useful for datapacks whose climate noise is not domain-warped.");
+        def("gpu.latticeCoords", "true",
+                "Generate grid coordinates on the GPU instead of uploading them. Same results. Needed by "
+                        + "coalesce; leave true.");
+        def("gpu.mappedBuffers", "true",
+                "Use pinned host memory for GPU transfers (zero-copy on integrated GPUs, faster copies on "
+                        + "discrete ones). Leave true unless a driver has problems with it.");
+        def("gpu.profile", "false",
+                "Record GPU timings (upload, kernel, readback) and log a breakdown when the server stops. "
+                        + "Diagnostics; small overhead.");
+        def("gpu.selftest.noise", "false",
+                "Diagnostics: at startup, compare GPU noise with the CPU implementation and log the result.");
+        def("gpu.selftest.dfc", "false",
+                "Diagnostics: at startup, compare the GPU density-function compiler's output with the CPU "
+                        + "and log the result.");
+        def("gpu.selftest.gpu_parity", "false",
+                "Diagnostics: at startup, compare GPU density values with vanilla's. On fp64 devices they "
+                        + "are expected to match exactly.");
 
-        section("c2me.globalExecutorParallelism",
-                "C2ME multithreaded chunk gen. Applied as -Dc2me.base.config.override.<key>.\n"
-                        + "# 'default' = C2ME auto-sizes min(cpu/1.3, heap-based); set e.g. 21 to use more cores\n"
-                        + "# (watch heap/GC). Any c2me.<key> here maps to that C2ME config key.\n"
-                        + "# The keys below are the useful subset seeded for discoverability ('default' = C2ME's\n"
-                        + "# own default governs):\n"
-                        + "#   noTickViewDistance.enabled (true)         - no-tick chunk ring beyond simulation distance\n"
-                        + "#   noTickViewDistance.maxConcurrentChunkLoads (workers+1) - no-tick ring load rate\n"
-                        + "#   noTickViewDistance.enableExtRenderDistanceProtocol (true) - >127-chunk client requests\n"
-                        + "#   generalOptimizations.autoSave.mode (ENHANCED) - ENHANCED|PERIODIC|VANILLA autosave\n"
-                        + "#   generalOptimizations.midTickChunkTasksInterval (100) - us between mid-tick chunk tasks\n"
-                        + "#   ioSystem.gcFreeChunkSerializer (false)    - EXPERIMENTAL; corruption-risk, needs a\n"
-                        + "#                                               round-trip parity check before enabling\n"
-                        + "#   chunkSystem.recoverFromErrors (false)     - true = salvage worldgen exceptions instead of\n"
-                        + "#                                               crashing (good for play; keep false for parity R&D)\n"
-                        + "#   chunkSystem.lowMemoryMode (false)         - trade throughput for heap headroom\n"
-                        + "#   chunkSystem.suppressGhostMushrooms        - SuperChunk defaults this TRUE: with\n"
-                        + "#                                               player.sendAtChunkSending on, the outer no-tick\n"
-                        + "#                                               ring reaches the client before post-processing,\n"
-                        + "#                                               which would briefly show MC-276863 ghost\n"
-                        + "#                                               mushrooms; this suppresses them (no other\n"
-                        + "#                                               worldgen effect). Set false to restore.");
-        def("c2me.globalExecutorParallelism", DEFAULT_PLACEHOLDER);
-        def("c2me.noTickViewDistance.enabled", DEFAULT_PLACEHOLDER);
-        def("c2me.noTickViewDistance.maxConcurrentChunkLoads", DEFAULT_PLACEHOLDER);
-        def("c2me.noTickViewDistance.enableExtRenderDistanceProtocol", DEFAULT_PLACEHOLDER);
-        def("c2me.generalOptimizations.autoSave.mode", DEFAULT_PLACEHOLDER);
-        def("c2me.generalOptimizations.midTickChunkTasksInterval", DEFAULT_PLACEHOLDER);
-        def("c2me.ioSystem.gcFreeChunkSerializer", DEFAULT_PLACEHOLDER);
-        def("c2me.chunkSystem.recoverFromErrors", DEFAULT_PLACEHOLDER);
-        def("c2me.chunkSystem.lowMemoryMode", DEFAULT_PLACEHOLDER);
+        section("c2me.globalExecutorParallelism", "C2ME multithreaded chunk system",
+                "Each c2me.<key> is passed to C2ME as -Dc2me.base.config.override.<key> and takes precedence "
+                        + "over config/c2me.toml. 'default' = C2ME's own default applies. Any other C2ME "
+                        + "option can be added here as c2me.<key>=<value>. A -D option given on the command "
+                        + "line always wins.");
+        def("c2me.globalExecutorParallelism", DEFAULT_PLACEHOLDER,
+                "Number of worldgen worker threads. default = chosen by C2ME from CPU cores and heap size "
+                        + "(the startup log says when the heap is the limit). A number sets it directly; each "
+                        + "extra thread needs roughly 0.6 GB more heap.");
+        def("c2me.noTickViewDistance.enabled", DEFAULT_PLACEHOLDER,
+                "Load and send chunks beyond the simulation distance without ticking them, so the view "
+                        + "distance can be larger than the simulation distance cheaply. C2ME default: true.");
+        def("c2me.noTickViewDistance.maxConcurrentChunkLoads", DEFAULT_PLACEHOLDER,
+                "How many of those no-tick chunk loads run at once. Lower = lower latency, higher = faster "
+                        + "loading. C2ME default: worker threads + 1 (player.fullSpeedLoading can raise it).");
+        def("c2me.noTickViewDistance.enableExtRenderDistanceProtocol", DEFAULT_PLACEHOLDER,
+                "Let clients request render distances above 127 chunks through C2ME's extended protocol, "
+                        + "which SuperChunk clients use automatically. C2ME default: true.");
+        def("c2me.generalOptimizations.autoSave.mode", DEFAULT_PLACEHOLDER,
+                "How autosave runs. ENHANCED = when the server has spare time after a tick; VANILLA = every "
+                        + "tick during ticking; PERIODIC = every 6000 ticks (the pre-1.18 behavior). "
+                        + "C2ME default: ENHANCED.");
+        def("c2me.generalOptimizations.midTickChunkTasksInterval", DEFAULT_PLACEHOLDER,
+                "Interval, in nanoseconds, for running chunk tasks in the middle of a server tick. This "
+                        + "speeds up chunk loading while the server is busy, but can raise tick time while "
+                        + "chunks load. -1 disables it. C2ME default: 100000 (0.1 ms). Leave it unless you "
+                        + "know you need it.");
+        def("c2me.ioSystem.gcFreeChunkSerializer", DEFAULT_PLACEHOLDER,
+                "Experimental C2ME chunk saver with fewer memory allocations. Always off in SuperChunk: it "
+                        + "does not write NeoForge's per-chunk mod data (data attachments, ChunkDataEvent.Save), "
+                        + "so other mods would lose data on every save. Setting it to true only logs a warning.");
+        def("c2me.chunkSystem.recoverFromErrors", DEFAULT_PLACEHOLDER,
+                "If a chunk fails to load, regenerate it from scratch instead of failing. Whatever was built "
+                        + "in that chunk is lost. C2ME default: false.");
+        def("c2me.chunkSystem.lowMemoryMode", DEFAULT_PLACEHOLDER,
+                "Unload unused chunks aggressively to save memory. Only has an effect together with "
+                        + "c2me.chunkSystem.useLegacyScheduling=false (C2ME's default is true). "
+                        + "C2ME default: false.");
         // TRUE by default (companion to player.sendAtChunkSending, below): sending the no-tick ring
         // at CHUNK_SENDING exposes non-post-processed chunks, so mushrooms could briefly appear
         // (MC-276863). This C2ME workaround suppresses them with no other worldgen effect.
-        def("c2me.chunkSystem.suppressGhostMushrooms", "true");
+        def("c2me.chunkSystem.suppressGhostMushrooms", "true",
+                "Work around MC-276863, where mushrooms can briefly appear in chunks that are not "
+                        + "post-processed yet. On because player.sendAtChunkSending shows such chunks to "
+                        + "players earlier. No other effect on worldgen; false = vanilla behavior.");
 
-        section("client.maxRenderDistance",
-                "Extended render distance (client). Raises the vanilla render-distance slider cap (32)\n"
-                        + "# up to this value; terrain past simulation distance is served by C2ME's no-tick view\n"
-                        + "# distance (works on the integrated server too). >127 additionally needs the\n"
-                        + "# c2me ext_render_distance channel (vanilla's own packet caps at 127) - sent\n"
-                        + "# automatically on login. This is the slider CAP, not a forced value: raising it to\n"
-                        + "# 64 lets the client select up to 64 (the server still clamps to what its own no-tick\n"
-                        + "# view distance allows), and a linear 2..64 slider puts the vanilla-32 point at the\n"
-                        + "# midpoint (the bar 'reads' half-scale). 32 = vanilla, exact no-op. Memory note: client\n"
-                        + "# chunk storage grows O(r^2) - a client that actually picks 64 uses ~4x the 32 footprint.");
-        def("client.maxRenderDistance", "64");
+        section("client.maxRenderDistance", "Client render distance", null);
+        def("client.maxRenderDistance", "64",
+                "Highest render distance the client's video-settings slider allows (32-512; vanilla is 32). "
+                        + "This only sets the slider limit: the server still decides how far it sends. On "
+                        + "joining a server, a distance above 32 is requested through C2ME's extended protocol "
+                        + "(the only way above 127), so a slider change takes effect the next time you join. "
+                        + "Client memory for chunks grows with the square of the distance (64 uses about 4x as "
+                        + "much as 32). Read by clients only.");
 
-        section("lithium.gen.cached_generator_settings",
-                "Lithium game-logic opts. The =false ones below overlap C2ME's chunk-system/serializer\n"
-                        + "# rewrites and MUST stay disabled (double-application corrupts/crashes) — they are\n"
-                        + "# hard-pinned regardless of what you set here. chunk.no_locking does NOT overlap and is\n"
-                        + "# a live toggle. Written to config/lithium.properties as mixin.<key>. Other\n"
-                        + "# lithium.<key>=true/false also pass through.");
-        def("lithium.gen.cached_generator_settings", "false");
-        def("lithium.chunk.serialization", "false");
+        section("lithium.gen.cached_generator_settings", "Lithium",
+                "Written to config/lithium.properties as mixin.<rule>. The four rules set to false below "
+                        + "overlap C2ME's chunk system and are always forced off, whatever this file says. "
+                        + "Other Lithium rules can be added here as lithium.<rule>=true|false. When Skein is "
+                        + "installed, SuperChunk also turns off Lithium caches that assume one ticking thread "
+                        + "per world.");
+        def("lithium.gen.cached_generator_settings", "false",
+                "Overlaps C2ME's world generation; always forced to false.");
+        def("lithium.chunk.serialization", "false",
+                "Overlaps C2ME's chunk saving; always forced to false.");
         // TRUE since round 9 (2026-07-16): removes vanilla's ThreadingDetector
         // ReentrantLock on EVERY PalettedContainer get/set — measured 4.8% of worker
         // CPU at 24 workers (JFR), +2.3% cps interleaved A/B. Detection-only removal
@@ -200,90 +281,86 @@ public final class SuperChunkConfig {
         // 3.68% -> 1.45%. Wall clock was NEUTRAL there (4 interleaved A/B rounds, 97.25 s mean
         // both legs) — that box is not bound by the freed CPU, so treat the round-9 "+2.3% cps"
         // as hardware-specific. 5 clean r2048 pregens, zero ThreadingDetector trips.
-        def("lithium.chunk.no_locking", "true");
-        def("lithium.world.tick_scheduler", "false");
-        def("lithium.world.chunk_access", "false");
+        def("lithium.chunk.no_locking", "true",
+                "Remove vanilla's concurrent-access check, a lock taken on every block write in a chunk "
+                        + "section (about 3% of worldgen CPU). Safe alongside C2ME.");
+        def("lithium.world.tick_scheduler", "false",
+                "Overlaps C2ME's chunk system; always forced to false.");
+        def("lithium.world.chunk_access", "false",
+                "Overlaps C2ME's chunk system; always forced to false.");
 
-        section("lighting.parallelism",
-                "ScalableLux lighting. Note: lighting is externally managed by C2ME, so this is\n"
-                        + "# effectively inert today (-1 = auto). Kept for completeness.");
-        def("lighting.parallelism", "-1");
+        section("lighting.parallelism", "Lighting (ScalableLux)", null);
+        def("lighting.parallelism", "-1",
+                "Threads for ScalableLux lighting (-1 = automatic). Currently has no effect, because C2ME "
+                        + "runs the lighting itself. Written to scalablelux.properties for completeness.");
 
-        section("pregen.chunkyWorkingCount",
-                "Chunky pregen: how many chunks Chunky keeps IN FLIGHT (its own default is 50).\n"
-                        + "# Chunky's generation loop is a semaphore of this many permits, so it is a hard cap\n"
-                        + "# on the whole pipeline: throughput can never exceed workingCount / per-chunk\n"
-                        + "# latency, and SuperChunk's async chunk system runs a much deeper pipeline than\n"
-                        + "# Chunky's default was sized for. Written to the -Dchunky.maxWorkingCount system\n"
-                        + "# property at startup, and NEVER over an explicit -D you passed yourself.\n"
-                        + "# 'auto' scales with the heap (192 per GB, clamped to 256..3072) because every\n"
-                        + "# in-flight chunk is retained; 'default' leaves Chunky's own value alone; a plain\n"
-                        + "# number is used as-is. Measured on a 16 GB heap: 3072 was the best value, 768 was\n"
-                        + "# ~6% slower, and 6144 was slower again.");
-        def("pregen.chunkyWorkingCount", "auto");
+        section("pregen.chunkyWorkingCount", "Chunky pre-generation", null);
+        def("pregen.chunkyWorkingCount", "auto",
+                "How many chunks Chunky keeps generating at once. Chunky's own default of 50 holds this "
+                        + "mod's pipeline back badly. auto = 192 per GB of maximum heap, between 256 and 3072. "
+                        + "default = leave Chunky's setting alone. A number is used as given. "
+                        + "-Dchunky.maxWorkingCount on the command line always wins. Measured with a 16 GB "
+                        + "heap: 3072 was fastest, 768 about 6% slower, 6144 slower again.");
 
-        section("player.fullSpeedLoading",
-                "Full-throttle chunk loading (\"no radius shrink\"). false = vanilla behavior.\n"
-                        + "# When true, SuperChunk lifts the SERVER-side self-throttles that make the effective\n"
-                        + "# loaded ring shrink around a fast-moving player:\n"
-                        + "#   - vanilla PlayerChunkSender: the per-tick chunk-send budget is pinned to\n"
-                        + "#     chunksPerTick (vanilla max 64) instead of shrinking to the client-reported\n"
-                        + "#     desired batch size on slow acks; the post-drain quota slow-start is neutralized;\n"
-                        + "#     maxUnackedBatches widens the in-flight batch window (vanilla 10; raise-only).\n"
-                        + "#   - C2ME notickvd: the concurrent chunk-load cap is raised to at least\n"
-                        + "#     noTickVdMaxConcurrentLoads (C2ME default: executor parallelism + 1), so the\n"
-                        + "#     no-tick ring refills at generation speed instead of a handful at a time.\n"
-                        + "# HONESTY NOTE: these are server-side lifts only. A slow client still decodes,\n"
-                        + "# renders and acks chunk batches at its own pace; the server merely stops\n"
-                        + "# throttling itself below what the pipeline can produce.");
-        def("player.fullSpeedLoading", "false");
-        def("player.fullSpeedLoading.chunksPerTick", "64");
-        def("player.fullSpeedLoading.maxUnackedBatches", "10");
-        def("player.fullSpeedLoading.noTickVdMaxConcurrentLoads", "128");
+        section("player.fullSpeedLoading", "Fast chunk loading for moving players",
+                "Server-side only: a slow client still receives, builds and acknowledges chunks at its own "
+                        + "pace.");
+        def("player.fullSpeedLoading", "false",
+                "true = stop the server from throttling chunk sending to fast-moving players (see the three "
+                        + "options below). false = vanilla behavior.");
+        def("player.fullSpeedLoading.chunksPerTick", "64",
+                "With fullSpeedLoading on: chunks sent to each player per tick, instead of the smaller rate "
+                        + "a busy client asks for (1-512; vanilla never sends more than 64).");
+        def("player.fullSpeedLoading.maxUnackedBatches", "10",
+                "With fullSpeedLoading on: chunk batches that may be waiting for a client's acknowledgement "
+                        + "(up to 1000). Vanilla's 10 is the minimum; lower values are ignored.");
+        def("player.fullSpeedLoading.noTickVdMaxConcurrentLoads", "128",
+                "With fullSpeedLoading on: minimum number of no-tick chunk loads that may run at once "
+                        + "(1-65536). It raises c2me.noTickViewDistance.maxConcurrentChunkLoads and never "
+                        + "lowers it.");
 
-        section("player.sendAtChunkSending",
-                "Player chunk-arrival fixes + proof metrics. sendAtChunkSending defaults TRUE (the port-defect\n"
-                        + "# fix below); priorityBias/latencyMetrics default false.\n"
-                        + "# sendAtChunkSending: 1.21.1 port-defect fix — the C2ME chunk holder never overrode vanilla\n"
-                        + "#   ChunkHolder.getChunkToSend(), so chunks only became client-sendable at BLOCK_TICKING\n"
-                        + "#   (and with view distance > simulation distance the outer no-tick rings NEVER sent).\n"
-                        + "#   When true, chunks are exposed to PlayerChunkSender at the earlier\n"
-                        + "#   SERVER_ACCESSIBLE_CHUNK_SENDING status; vanilla sendSync (light-send deps) still gates.\n"
-                        + "# priorityBias: chunk-system tasks within (view distance + 8) chebyshev of a player run in\n"
-                        + "#   priority band 18..32 (control-plane 15 / saves 16 / light 17 stay ahead), live-updated on\n"
-                        + "#   player movement. Pure reordering of the existing work queue — no budget, no new work.\n"
-                        + "# latencyMetrics: 1s [player-latency] log lines — per-player collect-miss counter, work-queue\n"
-                        + "#   depth buckets {<=17, 18-32, 33, 34+}, send-latency p50/p99 (now - CHUNK_SENDING completion).");
-        def("player.sendAtChunkSending", "true");
-        def("player.priorityBias", "false");
-        def("player.latencyMetrics", "false");
+        section("player.sendAtChunkSending", "Chunk delivery to players", null);
+        def("player.sendAtChunkSending", "true",
+                "Send chunks to players as soon as they are ready to be sent, instead of waiting until they "
+                        + "tick. Without it, when the view distance is larger than the simulation distance, the "
+                        + "outer chunks never arrive. Recommended: true.");
+        def("player.priorityBias", "false",
+                "Do chunk work near players (within view distance + 8 chunks) before other chunk work. It "
+                        + "only reorders existing work; nothing extra is generated.");
+        def("player.latencyMetrics", "false",
+                "Log a [player-latency] line every second with per-player chunk-delivery statistics. "
+                        + "Diagnostics; shown only when logging.verbose=true.");
 
-        section("player.predictiveGen",
-                "Predictive chunk generation along a fast player's projected path (default true; set false to disable).\n"
-                        + "# When true, a per-player velocity tracker (EMA of the per-tick horizontal position\n"
-                        + "# delta, measured server-side) activates at >= minSpeedBps blocks/second and projects\n"
-                        + "# the position lookaheadSeconds ahead; the chunk corridor from here to there — width\n"
-                        + "# min(view distance, corridorWidthChunks), <= maxPredictedChunks per player,\n"
-                        + "# nearest-first — is pre-generated/loaded through the EXISTING C2ME notickvd pipeline\n"
-                        + "# (same SERVER_ACCESSIBLE_CHUNK_SENDING target + vanilla level-33 ticket as the no-tick\n"
-                        + "# loader, own ticket type) instead of raising the whole view radius. Predicted loads run\n"
-                        + "# under their own small maxConcurrentPredictedLoads budget so the no-tick loader's\n"
-                        + "# maxConcurrentChunkLoads accounting is untouched; with player.priorityBias=true the\n"
-                        + "# predicted positions also join the P2 priority band. Corridors recompute every\n"
-                        + "# recomputeIntervalTicks; tickets retract when the player turns, slows below the\n"
-                        + "# threshold, disconnects or changes dimension. logMetrics=true emits a 1s\n"
-                        + "# [predictive-gen] line with ticket counters and the hit rate (predicted chunk entered\n"
-                        + "# the player's real view within hitWindowSeconds = HIT; misses = wasted generation).\n"
-                        + "# On by default; set false for zero effect. Zero effect on pregen either way (real players only).");
-        def("player.predictiveGen", "true");
-        def("player.predictiveGen.lookaheadSeconds", "4");
-        def("player.predictiveGen.maxPredictedChunks", "64");
-        def("player.predictiveGen.minSpeedBps", "8");
-        def("player.predictiveGen.maxConcurrentPredictedLoads", "8");
-        def("player.predictiveGen.corridorWidthChunks", "5");
-        def("player.predictiveGen.recomputeIntervalTicks", "10");
-        def("player.predictiveGen.hitWindowSeconds", "10");
-        def("player.predictiveGen.logMetrics", "true");
+        section("player.predictiveGen", "Predictive generation ahead of fast-moving players",
+                "Generates the chunks along the path a fast player is heading, instead of enlarging the "
+                        + "whole loaded area. Affects real players only; no effect on pre-generation.");
+        def("player.predictiveGen", "true",
+                "Master switch. false = no effect at all.");
+        def("player.predictiveGen.lookaheadSeconds", "4",
+                "How far ahead to predict, in seconds of travel (0.5-30).");
+        def("player.predictiveGen.maxPredictedChunks", "64",
+                "Most chunks predicted per player at a time, nearest first (1-1024).");
+        def("player.predictiveGen.minSpeedBps", "8",
+                "Horizontal speed, in blocks per second, at which prediction starts (0.5-500).");
+        def("player.predictiveGen.maxConcurrentPredictedLoads", "8",
+                "Most predicted chunk loads in progress at once (1-256). Separate from the no-tick "
+                        + "loader's own limit.");
+        def("player.predictiveGen.corridorWidthChunks", "5",
+                "Width of the predicted path, in chunks (1-15, and never wider than the view distance).");
+        def("player.predictiveGen.recomputeIntervalTicks", "10",
+                "How often the predicted path is recalculated, in ticks (1-100).");
+        def("player.predictiveGen.hitWindowSeconds", "10",
+                "For the metrics: a predicted chunk that enters the player's view within this many seconds "
+                        + "counts as a hit (1-120).");
+        def("player.predictiveGen.logMetrics", "false",
+                "Log a [predictive-gen] line every second with prediction counts and the hit rate. "
+                        + "Diagnostics; shown only when logging.verbose=true.");
+
+        section("logging.verbose", "Logging", null);
+        def("logging.verbose", "false",
+                "false = SuperChunk writes only warnings and errors to the log. true = also its "
+                        + "informational lines: startup summaries, feature status, and the metrics and "
+                        + "verify diagnostics you enable. Turn on when reporting a problem.");
     }
 
     static {
@@ -301,12 +378,17 @@ public final class SuperChunkConfig {
         }
     }
 
-    private static void def(String k, String v) {
+    private static void def(String k, String v, String description) {
         DEFAULTS.put(k, v);
+        DESCRIPTIONS.put(k, description);
     }
 
-    private static void section(String firstKey, String header) {
-        SECTIONS.put(firstKey, header);
+    /** {@code intro} (optional) is printed under the section title, before its first option. */
+    private static void section(String firstKey, String title, String intro) {
+        SECTIONS.put(firstKey, title);
+        if (intro != null) {
+            SECTION_INTROS.put(firstKey, intro);
+        }
     }
 
     private static volatile Properties unified;
@@ -336,11 +418,13 @@ public final class SuperChunkConfig {
                     onDisk.load(in);
                 }
                 onDisk.forEach((k, v) -> props.setProperty(String.valueOf(k), String.valueOf(v)));
-                LOGGER.info("[SuperChunk-Config] Loaded unified config {}", file);
+                LOGGER.debug("[SuperChunk-Config] Loaded unified config {}", file);
+                upgradeDocumentation(file, props);
             } else {
                 migrateLegacy(dir, props);
-                writeDefaults(file, props);
-                LOGGER.info("[SuperChunk-Config] Created unified config {} (one file for GPU + C2ME + Lithium + lighting).", file);
+                if (writeDefaults(file, props)) {
+                    LOGGER.info("[SuperChunk-Config] Created unified config {} with a description of every option.", file);
+                }
             }
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-Config] Failed to load {} — using built-in defaults.", FILE_NAME, t);
@@ -417,49 +501,109 @@ public final class SuperChunkConfig {
         }
     }
 
-    private static void writeDefaults(Path file, Properties values) {
+    /**
+     * Marks a file written in the current documented layout; files without it are regenerated once.
+     * Bump it when options are added, so existing files show them. 2: per-option descriptions.
+     * 3: {@code logging.verbose}.
+     */
+    private static final String FORMAT_MARKER = "# superchunk-config-format: 3";
+    private static final int WRAP = 96;
+
+    /**
+     * A file written in an older layout (before options carried descriptions, or before the newest
+     * options existed) is regenerated once in the documented layout. Every value already present is
+     * kept (including keys SuperChunk does not know), so behavior is unchanged; the previous file is
+     * saved as {@code superchunk.properties.bak}.
+     */
+    private static void upgradeDocumentation(Path file, Properties values) {
+        try {
+            if (Files.readString(file, java.nio.charset.StandardCharsets.ISO_8859_1).contains(FORMAT_MARKER)) {
+                return;
+            }
+            // A symlinked or read-only file is managed deliberately: leave it exactly as it is.
+            if (Files.isSymbolicLink(file) || !Files.isWritable(file)) {
+                return;
+            }
+            Path backup = file.resolveSibling(FILE_NAME + ".bak");
+            Files.copy(file, backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            if (writeDefaults(file, values)) {
+                LOGGER.info("[SuperChunk-Config] Updated {} to the current layout and option descriptions (values unchanged; previous file saved as {}).",
+                        file, backup.getFileName());
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[SuperChunk-Config] Could not add option descriptions to {} — leaving it as is.", file, t);
+        }
+    }
+
+    /** The documented file for {@code values}: every known option with its description, then any others. */
+    static String render(Properties values) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# SuperChunk configuration (single source of truth).\n");
+        sb.append("#\n");
+        sb.append("# SuperChunk passes these settings on to the engines it contains:\n");
+        sb.append("#   gpu.*      -> the OpenCL GPU worldgen offload\n");
+        sb.append("#   c2me.*     -> C2ME, as -Dc2me.base.config.override.<key> (wins over c2me.toml)\n");
+        sb.append("#   lithium.*  -> config/lithium.properties, as mixin.<key>\n");
+        sb.append("#   lighting.* -> config/scalablelux.properties\n");
+        sb.append("#   pregen.*   -> Chunky, as the -Dchunky.maxWorkingCount system property\n");
+        sb.append("#   player.*   -> read by SuperChunk on the server\n");
+        sb.append("#   client.*   -> read by SuperChunk on the client\n");
+        sb.append("#   logging.*  -> SuperChunk's own log output\n");
+        sb.append("# Edit this file, not the per-engine files: those are rewritten from it at startup.\n");
+        sb.append("# Changes take effect after a restart. Use the values each description lists.\n");
+        sb.append(FORMAT_MARKER).append('\n');
+        for (Map.Entry<String, String> e : DEFAULTS.entrySet()) {
+            String key = e.getKey();
+            String title = SECTIONS.get(key);
+            if (title != null) {
+                sb.append("\n# ===== ").append(title).append(" =====\n");
+                String intro = SECTION_INTROS.get(key);
+                if (intro != null) {
+                    appendComment(sb, intro);
+                }
+            }
+            sb.append('\n');
+            String description = DESCRIPTIONS.get(key);
+            if (description != null) {
+                appendComment(sb, description);
+            }
+            sb.append("# Default: ").append(e.getValue())
+                    .append(DEFAULT_PLACEHOLDER.equals(e.getValue()) ? " (C2ME's own default applies)" : "").append('\n');
+            sb.append(escape(key, true)).append('=').append(escape(values.getProperty(key, e.getValue()), false)).append('\n');
+        }
+        // Persist any keys folded in by migrateLegacy (or otherwise present) that are NOT part of
+        // DEFAULTS — e.g. migrated lithium.*/gpu.* customizations — so they survive to the next run.
+        // Sorted for deterministic output.
+        java.util.List<String> extras = new java.util.ArrayList<>();
+        for (String name : values.stringPropertyNames()) {
+            if (!DEFAULTS.containsKey(name)) {
+                extras.add(name);
+            }
+        }
+        if (!extras.isEmpty()) {
+            java.util.Collections.sort(extras);
+            sb.append("\n# ===== Other settings =====\n");
+            appendComment(sb, "Options SuperChunk has no built-in description for, such as extra c2me.* or "
+                    + "lithium.* rules and migrated settings. They are passed on unchanged.");
+            for (String name : extras) {
+                sb.append(escape(name, true)).append('=').append(escape(values.getProperty(name), false)).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Writes the documented file atomically; false (after logging) if it could not be written. */
+    private static boolean writeDefaults(Path file, Properties values) {
         try {
             Files.createDirectories(file.getParent());
-            StringBuilder sb = new StringBuilder();
-            sb.append("# SuperChunk — unified configuration (single source of truth).\n");
-            sb.append("# SuperChunk applies these to the underlying engines at load:\n");
-            sb.append("#   gpu.*      -> the OpenCL worldgen offload (GpuConfig)\n");
-            sb.append("#   c2me.*     -> -Dc2me.base.config.override.<key> (overrides c2me.toml)\n");
-            sb.append("#   lithium.*  -> config/lithium.properties as mixin.<key>\n");
-            sb.append("#   lighting.* -> scalablelux.properties\n");
-            sb.append("#   player.*   -> read directly by SuperChunk at runtime (no write-through)\n");
-            sb.append("#   client.*   -> read directly by SuperChunk on the client (no write-through)\n");
-            sb.append("# Edit THIS file; the per-engine files are written from it and may be overwritten.\n");
-            for (Map.Entry<String, String> e : DEFAULTS.entrySet()) {
-                String header = SECTIONS.get(e.getKey());
-                if (header != null) {
-                    sb.append("\n# ===== ").append(header).append(" =====\n");
-                }
-                sb.append(e.getKey()).append('=').append(values.getProperty(e.getKey(), e.getValue())).append('\n');
-            }
-            // Persist any keys folded in by migrateLegacy (or otherwise present) that are NOT part of
-            // DEFAULTS — e.g. migrated lithium.*/gpu.* customizations — so they survive to the next run.
-            // Sorted for deterministic output.
-            java.util.List<String> extras = new java.util.ArrayList<>();
-            for (String name : values.stringPropertyNames()) {
-                if (!DEFAULTS.containsKey(name)) {
-                    extras.add(name);
-                }
-            }
-            if (!extras.isEmpty()) {
-                java.util.Collections.sort(extras);
-                sb.append("\n# ===== migrated / custom =====\n");
-                for (String name : extras) {
-                    sb.append(name).append('=').append(values.getProperty(name)).append('\n');
-                }
-            }
-            // Atomic write: superchunk.properties is the source of truth and is written
-            // ONLY on first run (when absent). A crash mid-write would otherwise leave a
+            String text = render(values);
+            // Atomic write: superchunk.properties is the source of truth and is written only on
+            // first run and once to add descriptions (upgradeDocumentation). A crash mid-write would leave a
             // partial file that loadOrCreate() silently overlays on defaults and never
             // repairs (it now "exists"). Write to a sibling temp file then atomically move
             // it into place so the destination is either the old (absent) or the complete
             // file — never a truncated one.
-            byte[] bytes = sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
             Path tmp = file.resolveSibling(FILE_NAME + ".tmp");
             Files.write(tmp, bytes);
             try {
@@ -468,8 +612,15 @@ public final class SuperChunkConfig {
                 // Some filesystems don't support ATOMIC_MOVE — fall back to a plain replace.
                 Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
+            return true;
         } catch (Throwable t) {
-            LOGGER.warn("[SuperChunk-Config] Could not write default unified config.", t);
+            LOGGER.warn("[SuperChunk-Config] Could not write {}.", file, t);
+            try {
+                Files.deleteIfExists(file.resolveSibling(FILE_NAME + ".tmp"));
+            } catch (Throwable ignored) {
+                // best effort: a stale temp file is harmless
+            }
+            return false;
         }
     }
 
@@ -484,6 +635,7 @@ public final class SuperChunkConfig {
         }
         appliedEarly = true;
         Properties p = get();
+        dev.superchunk.diag.LogQuieter.install(); // first, so the lines below obey logging.verbose
         try {
             applyC2me(p);
             applyChunky(p);
@@ -568,6 +720,9 @@ public final class SuperChunkConfig {
             if (val == null || val.isBlank()) {
                 continue;
             }
+            // Properties keeps trailing spaces, and C2ME parses the value strictly: "true " or "8 "
+            // would be rejected with a WARN and silently replaced by C2ME's own default.
+            val = val.trim();
             if (val.equalsIgnoreCase(DEFAULT_PLACEHOLDER)) {
                 val = DEFAULT_PLACEHOLDER; // normalize: ConfigSystem matches "default" exactly
             }
@@ -611,6 +766,13 @@ public final class SuperChunkConfig {
                 out.setProperty("mixin." + suffix, pinLithium(suffix, p.getProperty(name), "write-through"));
             }
         }
+        if (skeinInstalled()) {
+            // Applied before either bundled or standalone Lithium selects its mixins.
+            // Changing Skein's phase settings later must not reactivate these caches.
+            for (String suffix : SKEIN_LITHIUM_DISABLED) out.setProperty("mixin." + suffix, "false");
+            LOGGER.info("[SuperChunk-Config] Skein detected: disabled shared Lithium tick caches: {}",
+                    String.join(", ", SKEIN_LITHIUM_DISABLED));
+        }
         if (out.isEmpty()) {
             return;
         }
@@ -648,6 +810,53 @@ public final class SuperChunkConfig {
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-Config] Could not write scalablelux.properties.", t);
         }
+    }
+
+    /** Appends {@code text} as "# " comment lines wrapped at {@link #WRAP} columns. */
+    private static void appendComment(StringBuilder sb, String text) {
+        StringBuilder line = new StringBuilder("#");
+        for (String word : text.split(" ")) {
+            if (word.isEmpty()) {
+                continue;
+            }
+            if (line.length() > 1 && line.length() + 1 + word.length() > WRAP) {
+                sb.append(line).append('\n');
+                line.setLength(0);
+                line.append('#');
+            }
+            line.append(' ').append(word);
+        }
+        if (line.length() > 1) {
+            sb.append(line).append('\n');
+        }
+    }
+
+    /**
+     * Escapes a key or value for {@link Properties#load(InputStream)}, which reads ISO-8859-1:
+     * backslashes, line breaks, leading spaces, key separators and non-Latin-1 characters.
+     */
+    static String escape(String text, boolean key) {
+        StringBuilder out = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            switch (c) {
+                case '\\' -> out.append("\\\\");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                case '\f' -> out.append("\\f");
+                case ' ' -> out.append(key || i == 0 ? "\\ " : " ");
+                case '=', ':', '#', '!' -> out.append(key || i == 0 ? "\\" + c : String.valueOf(c));
+                default -> {
+                    if (c < 0x20 || c > 0x7e) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.toString();
     }
 
     /**

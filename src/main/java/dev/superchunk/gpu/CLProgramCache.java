@@ -48,6 +48,11 @@ public final class CLProgramCache {
 
     private static volatile Path cacheDir;       // resolved lazily
     private static volatile String deviceTag;    // deviceName|openclVersion|driverVersion
+    /**
+     * Bumped by {@link #clearMemory()}. A build that straddles a bump was made for the context
+     * being torn down, so it must not be cached for the next session (singleplayer world reload).
+     */
+    private static final java.util.concurrent.atomic.AtomicLong EPOCH = new java.util.concurrent.atomic.AtomicLong();
     private static volatile boolean diskEnabled = true;
 
     /** Prune binaries untouched for longer than this (orphaned driver/source generations). */
@@ -72,6 +77,7 @@ public final class CLProgramCache {
      * Returns {@code null} on build failure (caller falls back to CPU).
      */
     public static CLProgram getOrBuild(String source, String options) {
+        final long epoch = EPOCH.get();
         ensureDeviceTag();
         // Normalize to the EFFECTIVE build options (appends the device-gated
         // -cl-fp32-correctly-rounded-divide-sqrt flag when in effect) BEFORE hashing, so
@@ -136,6 +142,15 @@ public final class CLProgramCache {
             // getOrBuild of the same source. Now: refcount 2 (cache + caller).
             program.markShared(1);   // cache's own reference (released in clearMemory)
             MEM.put(key, program);
+            if (EPOCH.get() != epoch) {
+                // clearMemory() ran during this build: the program belongs to the context being
+                // released. Drop the cache's reference (and, if clearMemory already dropped it,
+                // nothing is left to use) and report a miss; the caller falls back to the CPU.
+                if (MEM.remove(key, program)) {
+                    program.close();
+                }
+                return null;
+            }
             // Honor retain()'s result, exactly like both fast paths above: if a racing
             // clearMemory() (shutdown) snapshotted+close()d this program between the
             // MEM.put and here, refcount has already hit 0 and the cl_program is freed —
@@ -157,6 +172,7 @@ public final class CLProgramCache {
      * cache reference and the last external owner have closed.
      */
     public static void clearMemory() {
+        EPOCH.incrementAndGet();
         // Remove every entry from the maps BEFORE releasing the programs. close() may
         // run clReleaseProgram (dropping the cl_program to refcount 0); if the entry
         // were still reachable in MEM, a concurrent worldgen fast-path lookup could

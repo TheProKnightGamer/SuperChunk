@@ -46,12 +46,27 @@ public abstract class MixinHeightmapPrimeFast {
     private static final boolean SUPERCHUNK$ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.primeHeightmapsFast", "true"));
 
+    /** Stand down when another mod hooks the replaced method ({@link dev.superchunk.worldgen.ForeignHooks}). */
+    @Unique
+    private static byte superchunk$hooks;
+
+    @Unique
+    private static boolean superchunk$unhooked() {
+        byte state = superchunk$hooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The heightmap priming replica (Heightmap.primeHeightmaps)",
+                    "net.minecraft.world.level.levelgen.Heightmap#primeHeightmaps");
+            superchunk$hooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
+
     // @WrapMethod rather than a HEAD-cancel @Inject: same fast-path effect, but the
     // fallthrough paths compose with other mods' wraps/overwrites of primeHeightmaps
     // instead of pre-empting them at HEAD.
     @WrapMethod(method = "primeHeightmaps", require = 0)
     private static void superchunk$primeFast(ChunkAccess chunk, Set<Heightmap.Types> types, Operation<Void> original) {
-        if (!SUPERCHUNK$ENABLED || chunk.getClass() != ProtoChunk.class) {
+        if (!SUPERCHUNK$ENABLED || chunk.getClass() != ProtoChunk.class || !superchunk$unhooked()) {
             original.call(chunk, types);
             return;
         }

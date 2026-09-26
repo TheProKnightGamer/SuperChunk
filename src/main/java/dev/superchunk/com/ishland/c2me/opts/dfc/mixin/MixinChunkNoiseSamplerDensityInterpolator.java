@@ -6,6 +6,7 @@ import dev.superchunk.com.ishland.c2me.opts.dfc.common.ducks.IFastCacheLike;
 import dev.superchunk.com.ishland.c2me.opts.dfc.common.ducks.IOnDeviceInterpCache;
 import dev.superchunk.com.ishland.c2me.opts.dfc.common.vif.NoisePosVanillaInterface;
 import dev.superchunk.gpu.dfc.OnDeviceInterp;
+import dev.superchunk.worldgen.LerpTables;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import net.minecraft.util.Mth;
@@ -16,6 +17,9 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Mutable;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 // Yarn ChunkNoiseSampler.DensityInterpolator -> Mojmap NoiseChunk.NoiseInterpolator
 // Yarn fields: field_34622 -> this$0 (NoiseChunk), delegate -> noiseFiller,
@@ -78,12 +82,9 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
             int cellBlockY = pos.blockY() - startBlockY;
             int cellBlockZ = pos.blockZ() - startBlockZ;
             return isSamplingForCaches
-                    ? superchunk$lerp3(
-                    (double) cellBlockX / (double) horizontalCellBlockCount,
-                    (double) cellBlockY / (double) verticalCellBlockCount,
-                    (double) cellBlockZ / (double) horizontalCellBlockCount,
-                    pos.blockX(), pos.blockY(), pos.blockZ()
-            ) : this.value;
+                    ? superchunk$cellRead(cellBlockX, cellBlockY, cellBlockZ,
+                    horizontalCellBlockCount, verticalCellBlockCount, pos.blockX(), pos.blockY(), pos.blockZ())
+                    : this.value;
         }
         return original.call(pos);
     }
@@ -102,12 +103,8 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
                     int cellBlockX = x - startBlockX;
                     int cellBlockY = y - startBlockY;
                     int cellBlockZ = z - startBlockZ;
-                    return superchunk$lerp3(
-                            (double) cellBlockX / (double) horizontalCellBlockCount,
-                            (double) cellBlockY / (double) verticalCellBlockCount,
-                            (double) cellBlockZ / (double) horizontalCellBlockCount,
-                            x, y, z
-                    );
+                    return superchunk$cellRead(cellBlockX, cellBlockY, cellBlockZ,
+                            horizontalCellBlockCount, verticalCellBlockCount, x, y, z);
                 } else {
                     return this.value;
                 }
@@ -120,6 +117,29 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
     }
 
     @Override
+    public boolean c2me$getCachedPointwise(double[] res, int[] x, int[] y, int[] z, EvalType evalType) {
+        // Element-wise twin of the single-point c2me$getCached above, minus its throw (left to the
+        // caller's per-element path): the in-cell read while sampling for caches, else the value.
+        if (evalType != EvalType.INTERPOLATION || !((IChunkNoiseSampler) this.this$0).getIsInInterpolationLoop()) {
+            return false;
+        }
+        if (!((IChunkNoiseSampler) this.this$0).getIsSamplingForCaches()) {
+            java.util.Arrays.fill(res, this.value);
+            return true;
+        }
+        int startBlockX = ((IChunkNoiseSampler) this.this$0).getStartBlockX();
+        int startBlockY = ((IChunkNoiseSampler) this.this$0).getStartBlockY();
+        int startBlockZ = ((IChunkNoiseSampler) this.this$0).getStartBlockZ();
+        int horizontalCellBlockCount = ((IChunkNoiseSampler) this.this$0).getHorizontalCellBlockCount();
+        int verticalCellBlockCount = ((IChunkNoiseSampler) this.this$0).getVerticalCellBlockCount();
+        for (int i = 0; i < res.length; i++) {
+            res[i] = superchunk$cellRead(x[i] - startBlockX, y[i] - startBlockY, z[i] - startBlockZ,
+                    horizontalCellBlockCount, verticalCellBlockCount, x[i], y[i], z[i]);
+        }
+        return true;
+    }
+
+    @Override
     public boolean c2me$getCached(double[] res, int[] x, int[] y, int[] z, EvalType evalType) {
         if (evalType == EvalType.INTERPOLATION) {
             boolean isInInterpolationLoop = ((IChunkNoiseSampler) this.this$0).getIsInInterpolationLoop();
@@ -128,8 +148,8 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
                     int startBlockX = ((IChunkNoiseSampler) this.this$0).getStartBlockX();
                     int startBlockY = ((IChunkNoiseSampler) this.this$0).getStartBlockY();
                     int startBlockZ = ((IChunkNoiseSampler) this.this$0).getStartBlockZ();
-                    double horizontalCellBlockCount = ((IChunkNoiseSampler) this.this$0).getHorizontalCellBlockCount();
-                    double verticalCellBlockCount = ((IChunkNoiseSampler) this.this$0).getVerticalCellBlockCount();
+                    int horizontalCellBlockCount = ((IChunkNoiseSampler) this.this$0).getHorizontalCellBlockCount();
+                    int verticalCellBlockCount = ((IChunkNoiseSampler) this.this$0).getVerticalCellBlockCount();
                     // SuperChunk GPU — STAGE 2: TRUE bulk-fill from the device-resident lerp3 field.
                     // Resolves once, then a tight served loop (no per-index CTX.get / map lookup /
                     // dispatch). When OnDeviceInterp is off (static final false) this short-circuits
@@ -142,15 +162,8 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
                         return true;
                     }
                     for (int i = 0; i < res.length; i ++) {
-                        int cellBlockX = x[i] - startBlockX;
-                        int cellBlockY = y[i] - startBlockY;
-                        int cellBlockZ = z[i] - startBlockZ;
-                        res[i] = superchunk$lerp3(
-                                (double) cellBlockX / horizontalCellBlockCount,
-                                (double) cellBlockY / verticalCellBlockCount,
-                                (double) cellBlockZ / horizontalCellBlockCount,
-                                x[i], y[i], z[i]
-                        );
+                        res[i] = superchunk$cellRead(x[i] - startBlockX, y[i] - startBlockY, z[i] - startBlockZ,
+                                horizontalCellBlockCount, verticalCellBlockCount, x[i], y[i], z[i]);
                     }
                     return true;
                 } else {
@@ -160,6 +173,70 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
         }
 
         return false;
+    }
+
+    // ---- SuperChunk: per-cell lerp tables (dev.superchunk.worldgen.LerpTables) ----
+    // x-lerps per in-cell column cx, y-lerps per in-cell row (cx, cy), each stamped with the cell
+    // generation they were built in; selectCellYZ (the only writer of noise000..noise111) bumps it.
+    @Unique private int superchunk$cellGen = 1;
+    @Unique private int superchunk$tableW;
+    @Unique private int superchunk$tableH;
+    @Unique private double[] superchunk$xLerps;
+    @Unique private double[] superchunk$yLerps;
+    @Unique private int[] superchunk$xGen;
+    @Unique private int[] superchunk$yGen;
+
+    @Inject(method = "selectCellYZ", at = @At("RETURN"))
+    private void superchunk$newCell(int cellY, int cellZ, CallbackInfo ci) {
+        this.superchunk$cellGen++;
+    }
+
+    /**
+     * The in-cell read at cell-relative (cx, cy, cz): exactly {@link #superchunk$lerp3} with the
+     * vanilla deltas {@code cx / w, cy / h, cz / w}, but sharing the x- and y-lerps between the
+     * blocks of the cell (see {@link dev.superchunk.worldgen.LerpTables}). The GPU on-device path,
+     * the kill switch and any out-of-cell coordinate take the per-block lerp3 as before.
+     */
+    @Unique
+    private double superchunk$cellRead(int cx, int cy, int cz, int w, int h, int blockX, int blockY, int blockZ) {
+        if (OnDeviceInterp.ENABLED || !LerpTables.ENABLED
+                || cx < 0 || cx >= w || cy < 0 || cy >= h || cz < 0 || cz >= w) {
+            return superchunk$lerp3((double) cx / (double) w, (double) cy / (double) h, (double) cz / (double) w,
+                    blockX, blockY, blockZ);
+        }
+        if (w != this.superchunk$tableW || h != this.superchunk$tableH) {
+            this.superchunk$tableW = w;
+            this.superchunk$tableH = h;
+            this.superchunk$xLerps = new double[w * 4];
+            this.superchunk$yLerps = new double[w * h * 2];
+            this.superchunk$xGen = new int[w];
+            this.superchunk$yGen = new int[w * h];
+        }
+        final int gen = this.superchunk$cellGen;
+        final int row = cx * h + cy;
+        final double[] yl = this.superchunk$yLerps;
+        if (this.superchunk$yGen[row] != gen) {
+            final double[] xl = this.superchunk$xLerps;
+            final int xb = cx * 4;
+            if (this.superchunk$xGen[cx] != gen) {
+                final double tx = (double) cx / (double) w;
+                xl[xb] = Mth.lerp(tx, this.noise000, this.noise100);
+                xl[xb + 1] = Mth.lerp(tx, this.noise010, this.noise110);
+                xl[xb + 2] = Mth.lerp(tx, this.noise001, this.noise101);
+                xl[xb + 3] = Mth.lerp(tx, this.noise011, this.noise111);
+                this.superchunk$xGen[cx] = gen;
+            }
+            final double ty = (double) cy / (double) h;
+            yl[row * 2] = Mth.lerp(ty, xl[xb], xl[xb + 1]);
+            yl[row * 2 + 1] = Mth.lerp(ty, xl[xb + 2], xl[xb + 3]);
+            this.superchunk$yGen[row] = gen;
+        }
+        final double value = Mth.lerp((double) cz / (double) w, yl[row * 2], yl[row * 2 + 1]);
+        if (LerpTables.VERIFY) {
+            return LerpTables.verify(value,
+                    superchunk$vanillaLerp3((double) cx / (double) w, (double) cy / (double) h, (double) cz / (double) w));
+        }
+        return value;
     }
 
     /**

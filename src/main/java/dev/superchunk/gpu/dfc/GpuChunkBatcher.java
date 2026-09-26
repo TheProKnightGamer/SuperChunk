@@ -554,10 +554,7 @@ public final class GpuChunkBatcher implements AutoCloseable {
         RuntimeException ex = new RuntimeException("GpuChunkBatcher shut down");
         Req r;
         while ((r = queue.poll()) != null) {
-            try {
-                r.future.completeExceptionally(ex);
-            } catch (Throwable ignored) {
-            }
+            failReq(r, r.future, ex); // also the climate future a chained request waits on
         }
         // Stop the completer: poison AFTER the drainer stopped enqueueing, so every
         // in-flight batch is drained + served first (each bounded by one GPU round
@@ -664,10 +661,7 @@ public final class GpuChunkBatcher implements AutoCloseable {
         try {
             addToBucket(r, buckets, deadlineNanos);
         } catch (Throwable t) {
-            try {
-                r.future.completeExceptionally(new RuntimeException("GpuChunkBatcher bucket insert failed", t));
-            } catch (Throwable ignored) {
-            }
+            failReq(r, r.future, new RuntimeException("GpuChunkBatcher bucket insert failed", t));
         }
     }
 
@@ -896,7 +890,7 @@ public final class GpuChunkBatcher implements AutoCloseable {
         boolean ok;
         long t0 = System.nanoTime();
         try {
-            ok = p.inf.await();
+            ok = p.inf.awaitParked();
         } catch (Throwable t) {
             ok = false;
         }
@@ -926,14 +920,14 @@ public final class GpuChunkBatcher implements AutoCloseable {
                     // Completable gates on it, and its consumer runs a stage EARLIER
                     // than the density consumer.
                     if (r.climFuture != null) {
-                        if (climOk) {
-                            double[] cs = new double[climLen];
-                            p.inf.readClimSlice(c, cs);
+                        double[] cs = climOk ? new double[climLen] : null;
+                        if (cs != null && p.inf.readClimSlice(c, cs)) {
                             r.climFuture.complete(cs);
                         } else {
                             try {
-                                r.climFuture.completeExceptionally(new IllegalStateException(
-                                        "climate chain unavailable for this batch"));
+                                r.climFuture.completeExceptionally(new IllegalStateException(climOk
+                                        ? "batch staging released (dispatcher closed)"
+                                        : "climate chain unavailable for this batch"));
                             } catch (Throwable ignored) {
                             }
                         }
@@ -947,8 +941,11 @@ public final class GpuChunkBatcher implements AutoCloseable {
                     // thread, inside the slot-held window.
                     if (!gridsAreDead(r)) {
                         double[] s = new double[p.sliceLen];
-                        p.inf.readSlice(c, s);
-                        r.future.complete(s); // no-op if the future was cancelled meanwhile
+                        if (p.inf.readSlice(c, s)) {
+                            r.future.complete(s); // no-op if the future was cancelled meanwhile
+                        } else {
+                            failReq(r, r.future, new RuntimeException("GPU batch staging released (dispatcher closed)"));
+                        }
                     } else {
                         deadGridsSkipped.incrementAndGet();
                         r.future.complete(EMPTY_GRIDS);

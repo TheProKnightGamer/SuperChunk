@@ -86,6 +86,8 @@ public class PredictiveChunkLoader {
     /** chunk -> number of players holding a predictor ref; a ticket exists iff the chunk is a key here. */
     private final Long2IntOpenHashMap ticketRefCounts = new Long2IntOpenHashMap();
     private final ReferenceArrayList<CompletableFuture<Void>> chunkLoadFutures = new ReferenceArrayList<>();
+    private final dev.superchunk.com.ishland.c2me.notickvd.common.StuckLoadSweeper stuckLoads =
+            new dev.superchunk.com.ishland.c2me.notickvd.common.StuckLoadSweeper();
     private final ObjectArrayList<PendingHit> pendingHits = new ObjectArrayList<>();
     private final AtomicBoolean closing = new AtomicBoolean(false);
 
@@ -222,6 +224,7 @@ public class PredictiveChunkLoader {
     // ===== ticket plumbing (mirrors PlayerNoTickLoader.tickFutures/addOneTicket/loadChunk*) =====
 
     private void tickFutures() {
+        this.stuckLoads.sweep(((IChunkSystemAccess) this.tacs).c2me$getTheChunkSystem());
         this.chunkLoadFutures.removeIf(CompletableFuture::isDone);
         if (this.closing.get()) return;
         while (this.chunkLoadFutures.size() < PredictiveGen.MAX_CONCURRENT_PREDICTED_LOADS && this.addOneTicket()) ;
@@ -268,7 +271,7 @@ public class PredictiveChunkLoader {
     }
 
     private CompletableFuture<Void> loadChunk(int x, int z) {
-        final CompletableFuture<Void> future = this.loadChunk0(x, z);
+        final CompletableFuture<Void> future = this.stuckLoads.track(this.loadChunk0(x, z), new ChunkPos(x, z));
         future.thenRunAsync(() -> {
             try {
                 this.chunkLoadFutures.remove(future);

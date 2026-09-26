@@ -5,6 +5,8 @@
   "plugin": "dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.MixinPlugin",
   "mixins": [
     "aquifer.MixinAquiferSamplerImpl",
+    "aquifer.MixinNoiseChunkCellCache",
+    "aquifer.MixinRandomStateCellCache",
     "jigsaw.MixinJigsawPlacement",
     "jigsaw.MixinJigsawPlacementPlacer",
     "jigsaw.MixinJigsawPlacementPlacerSkipBlocked",

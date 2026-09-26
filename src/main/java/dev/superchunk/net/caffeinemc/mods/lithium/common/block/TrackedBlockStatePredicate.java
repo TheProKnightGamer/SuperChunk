@@ -10,7 +10,7 @@ public abstract class TrackedBlockStatePredicate implements Predicate<BlockState
     static {
         FULLY_INITIALIZED = new AtomicBoolean(false);
         if (!BlockStateFlags.ENABLED) { //classload the BlockStateFlags class which initializes the content of ALL_FLAGS
-            System.out.println("Lithium Cached BlockState Flags are disabled!");
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Lithium").info("Lithium Cached BlockState Flags are disabled!");
         }
     }
 

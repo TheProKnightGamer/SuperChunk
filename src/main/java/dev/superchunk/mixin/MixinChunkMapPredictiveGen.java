@@ -6,6 +6,8 @@ import dev.superchunk.config.PredictiveGen;
 import dev.superchunk.predictive.PredictiveGenTracker;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.GameRules;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -13,6 +15,9 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * SuperChunk {@code player.predictiveGen} — the once-per-tick server hook that drives the
@@ -51,6 +56,31 @@ public abstract class MixinChunkMapPredictiveGen {
                     ((IVanillaChunkManager) this).c2me$getSchedulingManager());
             this.superchunk$predictiveTracker = tracker;
         }
-        tracker.tick(this.level.players());
+        tracker.tick(superchunk$chunkLoadingPlayers(this.level));
+    }
+
+    /**
+     * The players vanilla loads chunks for: spectators only while the spectatorsGenerateChunks
+     * gamerule is on (vanilla {@code ChunkMap.skipPlayer}). A player filtered out here is swept
+     * by the tracker like a departed one, so its predicted tickets are withdrawn.
+     */
+    @Unique
+    private static List<ServerPlayer> superchunk$chunkLoadingPlayers(ServerLevel level) {
+        List<ServerPlayer> players = level.players();
+        if (level.getGameRules().getBoolean(GameRules.RULE_SPECTATORSGENERATECHUNKS)) {
+            return players;
+        }
+        for (ServerPlayer player : players) {
+            if (player.isSpectator()) {
+                List<ServerPlayer> loading = new ArrayList<>(players.size());
+                for (ServerPlayer candidate : players) {
+                    if (!candidate.isSpectator()) {
+                        loading.add(candidate);
+                    }
+                }
+                return loading;
+            }
+        }
+        return players;
     }
 }

@@ -17,7 +17,7 @@ public class LithiumMixinPlugin implements IMixinConfigPlugin {
     private static final String[] MIXIN_PACKAGE_ROOTS = {"dev.superchunk.net.caffeinemc.mods.lithium.mixin.", "dev.superchunk.net.caffeinemc.mods.lithium.fabric.mixin.", "dev.superchunk.net.caffeinemc.mods.lithium.neoforge.mixin."};
     private static final Boolean DEBUG = false;
 
-    private final Logger logger = LogManager.getLogger("Lithium");
+    private final Logger logger = LogManager.getLogger("SuperChunk-Lithium");
 
     private static LithiumConfig CONFIG;
 
