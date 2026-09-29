@@ -1,196 +1,128 @@
-# SuperChunk GPU backend — RTX 3070 validation guide
+# SuperChunk GPU backend — validation guide (RTX 3070 reference box)
 
-This is the **accuracy + performance acceptance procedure** for SuperChunk's
-OpenCL density-function offload, to be run on the **RTX 3070 PC** (the dev laptop's
-Intel Iris Xe has **no fp64**, so it can only validate the fp32 *structural* path —
-not vanilla accuracy or real perf).
-
-The GPU offload accelerates the **parallel chunk-noise density-function** fills
-that C2ME's density-function compiler (DFC) produces. It is gated so that it
-**never** runs in an accuracy-unsafe configuration: with `requireFp64=true` (the
-default) the GPU only engages on hardware that advertises `cl_khr_fp64`.
+How to check that SuperChunk's OpenCL worldgen path is accurate and worth running on a machine:
+the boot parity gate, the strict block-for-block check, the optional flip census, and a GPU-on vs
+GPU-off benchmark. What the path does and what it has measured so far: `../GPU-AHEAD-PLAN.md`.
+Reference numbers below are from an RTX 3070 with an i7-14700K.
 
 ---
 
 ## 0. Prerequisites
 
-- **GPU driver with OpenCL 1.2+ and `cl_khr_fp64`.** NVIDIA's standard
-  Game Ready / Studio driver ships an OpenCL ICD that supports doubles on the
-  3070. Verify with any OpenCL info tool (e.g. `clinfo`, GPU-Z's "OpenCL" line,
-  or the SuperChunk boot log, see step 2):
-  - `Device: NVIDIA GeForce RTX 3070 ... fp64=yes`
-  - extensions list contains `cl_khr_fp64`.
-- **Java 21** (the mod's runtime). No native/CMake build is needed — OpenCL
-  kernels compile at runtime via the driver.
-- A working SuperChunk install (the `superchunk-*.jar` from `dist/`, plus its
-  embedded libs — LWJGL OpenCL is bundled in the jar via jarJar).
+- An OpenCL 1.2+ GPU driver whose device advertises `cl_khr_fp64`. NVIDIA's standard driver
+  does on the 3070 (fp64 runs at 1/64 of the fp32 rate there; the path is built around that).
+- Java 21, NeoForge 1.21.1, and the SuperChunk jar. LWJGL's OpenCL bindings ship inside the jar;
+  no native build is needed, and kernels compile at runtime through the driver.
+- For the benchmark: a NeoForge server template directory with an accepted `eula.txt`, its
+  `libraries/`, and exactly one Chunky jar in `mods/` (see `tools/run-worldgen-benchmark.py`).
 
-> If `fp64=no` appears for the 3070, you are on a broken/old ICD — update the
-> NVIDIA driver. Do **not** proceed with `requireFp64=false` for an accuracy run;
-> fp32 will not be bit-exact.
+The startup log names the device: look for the `[SuperChunk-GPU]` lines with `fp64=yes`.
 
 ---
 
-## 1. Configure for the accuracy run
+## 1. Configuration
 
-Edit `config/superchunk-gpu.properties`:
+Everything is in the `gpu.*` section of `config/superchunk.properties` (the documented defaults
+are in `dist/config/superchunk.properties`):
 
 ```properties
-enabled=true
-requireFp64=true
-selftest.gpu_parity=true
-platformIndex=-1
-deviceIndex=-1
+gpu.enabled=true
+gpu.desiredFp=fp64        # default; devices without fp64 are not used
+gpu.platformIndex=-1      # auto
+gpu.deviceIndex=-1        # auto
 ```
 
-Also ensure the density-function compiler is ON (it is the live route the GPU
-rides on) — `config/c2me.toml`:
+With `gpu.desiredFp=fp64` a device without fp64 is refused and terrain stays on the bit-exact CPU
+path. With the GPU on, compact block ids are on too (`-Dsuperchunk.gpu.compactIds`, default `on`);
+their decision math runs in fp32 unless `gpu.decideFp32=false`.
 
-```toml
-useDensityFunctionCompiler = true
-```
-
-(`requireFp64=true` + an fp64 GPU is the **only** accuracy-valid combination. If
-the chosen device lacks fp64 the backend logs a warning and the GPU does **not**
-engage — terrain falls back to the bit-exact CPU path.)
+The first start compiles every kernel (several minutes with a cold cache); binaries are cached on
+disk and reused until the GPU driver changes (warm start ~11–13 s).
 
 ---
 
-## 2. Run the GPU parity self-test (bit-exact gate)
+## 2. Boot parity gate (bit-exact, fp64)
 
-Boot the server (or a single-player world) once. At startup the
-`selftest.gpu_parity=true` flag runs **`GpuVanillaParityTest`**, which compiles a
-set of representative overworld density functions (y-gradient, noise+arith,
-shifted noise, the shift family, range-choice+clamp, weird-scaled, spline, and a
-deep overworld composite) to OpenCL and compares the GPU output against the
-**vanilla** `DensityFunction.compute()` ground truth over a deterministic ~3072-
-point grid.
-
-In the log (logger `SuperChunk-GPU`), look for:
+Set `gpu.selftest.gpu_parity=true` and start once. `GpuVanillaParityTest` compiles representative
+overworld density functions (gradient, noise arithmetic, shifted noise, the shift family, range
+choice and clamp, weird-scaled sampler, splines, a deep overworld composite, and the biome climate
+path) and compares GPU output with vanilla's `DensityFunction.compute()` on a fixed point grid.
+Expected, in the `[SuperChunk-GPU]` log:
 
 ```
 ===== GPU-vs-VANILLA parity test (Stage 3) =====
-Device: NVIDIA GeForce RTX 3070 [...] | fp64=yes
-Precision mode: FP64 (double) — expect BIT-EXACT vs vanilla
-[y_clamped_gradient] (GPU vs vanilla) n=3072 EXACT=3072 ... -> PASS (bit-identical)
-[noise+arith]        ... -> PASS (bit-identical)
 ...
-[overworld_composite] ... -> PASS (bit-identical)
 ===== GPU-vs-VANILLA parity test PASS (FP64 bit-exact) =====
 ```
 
-**Expected result: every case `PASS (bit-identical)`**, i.e. `EXACT == n`,
-`DIFF == 0`. A handful of `near (<= 1e-12)` values (instead of EXACT) on one or
-two cases is acceptable — that is the GPU contracting a multiply-add (FMA) and
-reordering one ULP; it still reports `PASS (within FMA epsilon)`. Any `FAIL` /
-`DIFF > 0` is a real accuracy regression — **report it**.
-
-> What to report from this step:
-> - The `Device:` line (confirms fp64=yes).
-> - The final `===== ... PASS/FAIL =====` line.
-> - For each case: `EXACT`/`near`/`DIFF` counts (copy the 8 case lines).
-
-Turn `selftest.gpu_parity=false` again before the perf run (you don't want the
-boot self-test in the timed run).
+Every case must be bit-identical. Any `FAIL` is an accuracy regression: report the device line
+and the case lines. Set the flag back to `false` for benchmark runs. (Independently of this flag,
+every density function is checked when it registers for the GPU and stays on the CPU if it does
+not match.)
 
 ---
 
-## 3. Performance bench — GPU on vs off
+## 3. Strict block check (compact ids)
 
-Use the included bench harness, which pregens a fixed-seed region with Chunky and
-reports chunks/sec. **Measure at radius >= 512** (smaller radii under-report due
-to DFC JIT warmup; the warm/amortized ceiling shows up past ~512).
+Runs the vanilla fill and ships its result, and compares the GPU's block ids and every side effect
+against it:
 
-From the repo root, with the server's `run/` configured as above:
-
-```powershell
-# GPU ON  (enabled=true, requireFp64=true, DFC on)
-pwsh -File bench\run-bench.ps1 -Radius 512
-
-# GPU OFF (set enabled=false in config/superchunk-gpu.properties, DFC still on)
-pwsh -File bench\run-bench.ps1 -Radius 512
+```sh
+python3 tools/run-worldgen-benchmark.py --server-template <template> --jar <superchunk.jar> \
+  --output <new-dir> --radius 256 --seed -987654321 --workers 12 --heap 8G --gpu \
+  --config gpu.decideFp32=false --jvm-arg=-Dsuperchunk.gpu.compactIds=verify
 ```
 
-Each run prints:
+At shutdown, `[compact-consume-verify]` reports blocks compared and mismatches by class (block,
+both heightmaps, section counters, Lithium flags, post-processing marks). Expected with
+`gpu.decideFp32=false`: `MISMATCHES total=0` and `ZERO DIVERGENCE` (143,200,256 blocks on the
+reference box, 2026-09-21). Repeat without the `--config` to see the default fp32 decisions: the
+reference box shows one stone/air difference on that seed, which is the known fp32 envelope.
 
-```
-CHUNKS=<n> SECONDS=<s> CHUNKS_PER_SEC=<r> PARALLELISM=<n>
-```
-
-Run each config **twice** (discard the first, JIT/cache warmup) and report the
-second. Keep everything else identical between the two runs (same machine state,
-same seed 8675309, same radius).
-
-To confirm the GPU actually carried the bulk of the density fills during the ON
-run, check the log for the periodic and shutdown summary lines:
-
-```
-density-fill stats (running): GPU batches=… (NN.N%), CPU batches=…; GPU values=… (NN.N%) …
-density-fill stats (server stopping): GPU batches=… …
-```
-
-The CPU batches that remain are mostly `CacheLikeNode` router-cache markers (a
-known, expected non-GPU-compilable node family) — see "What's still CPU" below.
-
-> What to report from this step:
-> - `CHUNKS_PER_SEC` for GPU **ON** and GPU **OFF** (radius 512, 2nd run each).
-> - The `PARALLELISM` value (C2ME global executor parallelism).
-> - The final `density-fill stats (server stopping)` line from the ON run
->   (GPU % of batches and of values).
-> - CPU model + core count, GPU driver version.
+Optional, heavier: the flip census (`-Dsuperchunk.gpu.blockIdVerify=true`, `[blockid-census]`
+lines) recomputes every block with the GPU's own density and a Java reference of the kernel, and
+classifies any difference, including GPU-vs-reference corruption, which must be 0.
 
 ---
 
-## 4. Interpreting the perf result
+## 4. Benchmark — GPU on vs off
 
-- The 3070 has fp64 but at a **rate-limited** ratio versus fp32 (consumer Ampere
-  doubles run ~1/32 of fp32 throughput). Density-function math is double-precision,
-  so the uplift depends on **how CPU-bound** worldgen is on your box: the GPU
-  offloads the parallel noise/DF arithmetic off the c2me-worker threads, which
-  helps most when those workers are the bottleneck (many cores saturated). If your
-  CPU already keeps the serial server-thread finalization fed, the win is smaller.
-- A correct outcome is: **GPU ON >= GPU OFF chunks/sec, and bit-exact terrain**
-  (proven in step 2). Even a neutral perf result is a *success for accuracy*: it
-  proves the GPU path is a safe, vanilla-accurate, toggleable option.
-- If GPU ON is **slower**, that tells us this machine is serial-bound, not
-  worker-bound — report the numbers and we tune (batch sizing, fewer host
-  round-trips, or restrict GPU to the heaviest DFs).
+Use the same harness, fresh world per run, radius ≥ 1024 (smaller runs are dominated by warm-up):
 
----
+```sh
+python3 tools/run-worldgen-benchmark.py --server-template <template> --jar <superchunk.jar> \
+  --output <new-dir-gpu> --radius 1024 --workers 12 --heap 8G --gpu
+python3 tools/run-worldgen-benchmark.py --server-template <template> --jar <superchunk.jar> \
+  --output <new-dir-cpu> --radius 1024 --workers 12 --heap 8G
+```
 
-## 5. Safety check (do this once)
+Each writes `result.json` (`chunks_per_second`, `cpu_ms_per_chunk`, health checks). Warm the
+template's GPU program cache first with one GPU run (radius 768 or more): with a cold cache a short
+pregen can finish before the batcher is built, and the GPU run then measures little. On a shared
+or busy machine, alternate the two configurations over several rounds and compare means.
 
-Confirm the guard that protects non-fp64 machines:
+Confirm the GPU carried the work: `[compact-consume]` at shutdown (chunks consumed from GPU ids)
+and the `density-fill stats` lines (GPU share of density batches).
 
-1. Temporarily set `requireFp64=true` and (if you have an fp32-only device, e.g.
-   an iGPU) `platformIndex/deviceIndex` to point at it.
-2. Boot. The log must show the device selected but a warning that fp64 is absent,
-   and the GPU must **not** route gen (DFs stay CPU; terrain is bit-exact).
-
-On the 3070 (fp64 present) this guard is a no-op — the GPU engages normally.
+Reference, RTX 3070 + i7-14700K, radius 1024, 12 workers: GPU 903–959 chunks/s (2026-09-25),
+CPU only 464–480 (2026-09-21).
 
 ---
 
-## What's still CPU (known, expected)
+## 5. Interpreting the result
 
-- **`CacheLikeNode`** (DFC cache/interpolation markers) and `DelegateNode` are not
-  GPU-compiled — they hold per-cell cache state. These are the bulk of the
-  remaining CPU density-fill batches and are *correct* to leave on CPU.
-- **Biome/climate (MultiNoise) sampler** density functions: covered by the same
-  compiler path where they reduce to supported nodes; some climate DFs fall back.
-- The offload targets the **compilable overworld density functions** (~11 of the
-  router/sampler entries on this build). Everything not GPU-compiled falls back
-  cleanly to the bit-exact CPU bytecode path per density function.
+- The GPU takes the noise-stage density and block decisions off the worker threads; surface
+  rules, carvers, features and lighting stay on the CPU. The more a machine is bound by worker
+  CPU, the larger the gain.
+- At high worker counts the GPU becomes the scarce resource; that is why the biome climate offload
+  is off by default (`gpu.offloadBiome`).
+- If GPU on is slower, report both results, the worker count, the CPU and GPU models and the
+  driver version.
 
 ---
 
-## TL;DR for the 3070 owner
+## 6. Safety check (once per machine)
 
-1. Update NVIDIA driver; confirm OpenCL `cl_khr_fp64`.
-2. `enabled=true`, `requireFp64=true`, `selftest.gpu_parity=true`, DFC on.
-3. Boot once -> copy the **GPU-vs-VANILLA parity** result (expect all
-   `PASS (bit-identical)`).
-4. `selftest.gpu_parity=false`; run `bench\run-bench.ps1 -Radius 512` with
-   `enabled=true`, then again with `enabled=false`. Report both
-   `CHUNKS_PER_SEC`, the parallelism, and the `density-fill stats` GPU%.
-5. Report CPU/GPU/driver details so we can interpret the uplift.
+With `gpu.desiredFp=fp64`, point `gpu.platformIndex`/`gpu.deviceIndex` at a device without fp64
+(for example an integrated GPU). The log must show the device refused and generation must stay on
+the CPU. On a device with fp64 this check is a no-op.

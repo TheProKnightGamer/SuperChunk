@@ -1,11 +1,14 @@
 package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common;
 
 import dev.superchunk.com.ishland.flowsched.scheduler.ItemHolder;
+import net.minecraft.server.level.ChunkResult;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -64,6 +67,19 @@ public final class UnreachableChunkWait {
     }
 
     /**
+     * The result the abandoned {@code getChunk} gets: an error naming the broken chunk, which a
+     * creating call reports as "Chunk not there when requested: ..." (vanilla's own message there
+     * is just "Unloaded chunk").
+     */
+    public CompletableFuture<ChunkResult<ChunkAccess>> abandonedResult() {
+        final String reason = this.blocker.equals(this.pos)
+                ? "chunk " + this.pos + " failed to generate (see the \"Error upgrading chunk\" error for it in the log)"
+                : "chunk " + this.pos + " can never reach " + this.vanillaStatus + " because it waits on chunk "
+                        + this.blocker + ", which failed to generate (see the \"Error upgrading chunk\" error for it in the log)";
+        return CompletableFuture.completedFuture(ChunkResult.error(reason));
+    }
+
+    /**
      * Called once the wait was abandoned. At most one line per chunk per {@link #LOG_INTERVAL_NANOS}:
      * a collision sweep asks for the same chunk every tick, but each distinct chunk is reported.
      */
@@ -78,7 +94,7 @@ public final class UnreachableChunkWait {
         }
         LAST_LOGGED.put(this.pos.toLong(), now);
         final String consequence = "Treating it as not loaded instead of blocking the server thread forever"
-                + (create ? "; the caller required it and gets \"Chunk not there when requested\"." : ".");
+                + (create ? "; the caller required it, so it fails with \"Chunk not there when requested\"." : ".");
         if (this.blocker.equals(this.pos)) {
             LOGGER.warn("Chunk {} can never reach {}: it failed to generate (see the \"Error upgrading chunk\" "
                     + "error for it). {}", this.pos, this.vanillaStatus, consequence);
