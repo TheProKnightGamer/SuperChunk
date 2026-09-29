@@ -42,6 +42,8 @@
     "MixinNoiseChunkGeneratorCompactIds",
     "MixinNoiseFillAirCells",
     "MixinNoiseFillHash",
+    "MixinFeatureOutsideRegion",
+    "MixinWorldGenRegionFarWrites",
     "MixinNoiseChunkVeinCensus",
     "MixinPalettedContainerGetAll",
     "MixinPalettedContainerPack",
