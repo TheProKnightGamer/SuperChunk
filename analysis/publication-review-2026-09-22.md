@@ -1,5 +1,10 @@
 # Publication review — 2026-09-22
 
+> Later: the Skein policy below (dimension threading only, in-level phases pinned off) was
+> superseded by the versioned Skein cell bridge (commit `7b0f6c1`, 2026-09-26), which supports
+> parallel entities, random ticks, block entities and opted-in scheduled ticks. Current behaviour:
+> the README's Skein paragraph and `compatibility.txt`.
+
 The review covers all pending source changes after `3199d19`, including the earlier
 compatibility/storage work and both optimization passes. Independent reviewers
 examined CPU world generation and serialization, scheduler/cache/storage behavior,

@@ -1,5 +1,32 @@
 # SuperChunk — merge notes / architecture / status
 
+## Current state (2026-09-28)
+
+Everything from "Goal" down is the merge log as it was written (June–August 2026). Where it
+disagrees with this section, this section is current.
+
+- **One Mojmap source tree.** All five mods and FlowSched are translated source under
+  `dev.superchunk.*`: C2ME (`com.ishland.c2me`), FlowSched (`com.ishland.flowsched`), VMP
+  (`com.ishland.vmp`), Lithium (`net.caffeinemc.mods.lithium`), ScalableLux/Starlight
+  (`ca.spottedleaf.starlight`) and Noisium (`io.github.steveplays28.noisium`). The plans below to
+  embed C2ME and Noisium as their own Yarn-built jars were superseded by that translation
+  (0.1.0, 2026-07-17).
+- **One shippable jar.** A thin bootstrap shell carrying the mod as
+  `META-INF/jarjar/superchunk-core.jar`, with its libraries (RxJava, reactive-streams, LWJGL
+  OpenCL, ...) nested in it; on a dedicated server it also supplies LWJGL core. One merged
+  `accesstransformer.cfg`; one mixin config per domain.
+- **Configuration.** `config/superchunk.properties` is the single documented config; SuperChunk
+  writes the C2ME, Lithium and ScalableLux settings from it on every start.
+- **Standalone copies.** A standalone Lithium (or Radium) is supported: the bundled one stands
+  down. Standalone C2ME, ScalableLux and Noisium are declared incompatible (their mixin configs
+  collide with the bundled ones; see `compatibility.txt`).
+- **GPU.** The GPU path is SuperChunk's own (`dev.superchunk.gpu`), built on the merged C2ME
+  density-function compiler — the "custom one" of the forward constraint below. C2ME's separately
+  licensed OpenCL module is not used and will not be. Status: `GPU-AHEAD-PLAN.md`.
+- **"TODO carried forward"** below is done: nested libraries, the merged access transformer,
+  per-domain mixin configs, and Lithium's config-driven mixin plugin (fed from the unified config).
+- Build: ModDevGradle 2.0.119, NeoForge 21.1.215, Parchment 2024.11.17, Java 21, version 0.4.0.
+
 **Goal:** literal from-source merge of C2ME + ScalableLux + NoisiumForked + Lithium
 into ONE NeoForge 1.21.1 mod, single Mojmap source tree, hotspot conflicts
 hand-fused. (User chose the "pure literal blend" path with eyes open: multi-week,
@@ -11,6 +38,8 @@ fragile, frozen at today's upstream — no upstream bug-fix pulls.)
   OpenCL noise path (or a custom one) can slot in later. When merging C2ME's
   `*NoiseSampler` / `DensityFunctionTypes$*` overwrites, preserve a clear
   boundary between "where noise is computed" and "how chunks consume it".
+  *(Outcome: the custom one — SuperChunk's own `dev.superchunk.gpu` pipeline. C2ME's
+  separately licensed OpenCL module was never used and will not be.)*
 - **Boot-test via the dedicated SERVER run config** (`gradlew :runServer` /
   the `server` run), not the client. These are server-side worldgen mods anyway.
 - Target: a fully functional merged mod.
