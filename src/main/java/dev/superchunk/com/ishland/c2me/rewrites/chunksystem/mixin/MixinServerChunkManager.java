@@ -139,10 +139,10 @@ public abstract class MixinServerChunkManager {
      * To The Max world, whose large_dripstone reads 9 chunks from its origin.)
      *
      * <p>{@link UnreachableChunkWait} adds "provably stuck behind a broken chunk" to the stop condition
-     * and, when that is what ended the wait, swaps the method's future local for
-     * {@code UNLOADED_CHUNK_FUTURE} so the {@code join()} that follows returns at once. That gives
+     * and, when that is what ended the wait, swaps the method's future local for a completed error
+     * result naming the broken chunk, so the {@code join()} that follows returns at once. That gives
      * the neighbour what the broken chunk itself gets: {@code null} for a non-creating call, and
-     * "Chunk not there when requested" for a creating one. Only the local is replaced; the shared
+     * "Chunk not there when requested: ..." for a creating one. Only the local is replaced; the shared
      * holder future is never completed from here. A chunk that is merely slow is never abandoned,
      * because the walk follows only unsatisfied dependencies of upgrades in flight.
      */
@@ -162,7 +162,7 @@ public abstract class MixinServerChunkManager {
         original.call(instance, (BooleanSupplier) () -> isDone.getAsBoolean() || wait.isUnreachable());
         if (!isDone.getAsBoolean() && wait.isUnreachable()) {
             wait.log(create);
-            future.set(GenerationChunkHolder.UNLOADED_CHUNK_FUTURE);
+            future.set(wait.abandonedResult());
         }
     }
 
