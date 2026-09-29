@@ -2,8 +2,8 @@
 
 **Extremely fast chunk generation for Minecraft.** A server-side worldgen
 performance mod for NeoForge 1.21.1. It merges C2ME, ScalableLux, Lithium,
-Noisium, and VMP into a single jar, adds ~20 original worldgen optimizations,
-and offloads terrain generation to the GPU via OpenCL.
+Noisium, and VMP into a single jar, adds its own exact worldgen optimizations
+(written up in `analysis/`), and offloads terrain generation to the GPU via OpenCL.
 
 ## 11× vanilla
 
@@ -58,13 +58,10 @@ provable rather than tuned:
 3. GPU offload is off by default. Turn it on with `gpu.enabled=true` in
    `config/superchunk.properties`; it needs an OpenCL GPU with double-precision
    (fp64) support, and falls back to the CPU path cleanly when none is usable.
-4. Optional tuning — worker count and heap are the only machine-specific knobs
-   (C2ME auto-scales by default):
-
-   ```
-   -Dc2me.base.config.override.globalExecutorParallelism=22
-   -Xmx16G
-   ```
+4. Optional tuning — worker count and heap are the only machine-specific knobs.
+   Worldgen threads are `c2me.globalExecutorParallelism` in
+   `config/superchunk.properties` (C2ME sizes them automatically by default);
+   heap is the usual JVM flag, e.g. `-Xmx16G`.
 
    **Pregenerating with Chunky?** You no longer need `-Dchunky.maxWorkingCount`.
    Chunky caps in-flight chunks with a semaphore whose size defaults to **50** —
@@ -110,9 +107,13 @@ for the tested versions and limitations.
 Worker threads hand chunks off at the noise-status seam and are immediately
 freed. A drainer thread batches those requests and dispatches fused multi-chunk
 kernels — all ~104 density functions are compiled to OpenCL by a custom AST
-emitter — then a completer thread slices the results per chunk. Compiled program
+emitter — then a completer thread slices the results per chunk. A decide kernel
+chained after them picks every block of the batch (terrain, aquifer water and
+lava, ore veins) and reads back one byte per block, which the chunk is written
+from directly ("compact IDs", on by default with the GPU). Compiled program
 binaries are cached to disk, so the one-time JIT only recurs when your driver
-changes (warm boot is ~11–13 s).
+changes (warm boot is ~11–13 s; a cold cache takes several minutes). What
+shipped, the measurements, and what is next: [`GPU-AHEAD-PLAN.md`](GPU-AHEAD-PLAN.md).
 
 Main files live in `src/main/java/dev/superchunk/gpu/dfc/`.
 
@@ -171,6 +172,13 @@ cache let the first chunk to compute an aquifer cell decide it for its neighbour
 computes it per chunk (5–7 chunks per 4,882 differed); fixed 2026-09-25, see
 [`analysis/worldgen-big-2026-09-25.md`](analysis/worldgen-big-2026-09-25.md).
 
+One deliberate difference from vanilla: when a datapack or mod feature reads a chunk
+farther away than world generation allows, vanilla fails the whole chunk (and the
+chunks around it can then never load); SuperChunk skips that feature in that chunk
+and logs it once. Chunks vanilla can generate are unaffected.
+`-Dsuperchunk.worldgen.skipOutOfRegionFeatures=false` restores vanilla's behaviour.
+See `compatibility.txt` (DATAPACKS).
+
 ## Building
 
 ```bash
@@ -182,7 +190,8 @@ Install the plain jar, not the `-core` one — that rides inside it.
 
 ## Docs
 
-- `GPU-AHEAD-PLAN.md` — GPU decide-chain design and parity gates
+- `GPU-AHEAD-PLAN.md` — the GPU path: what shipped, measurements, parity envelope, next steps
+- `compatibility.txt` — tested mods and datapacks, fixes, and incompatibilities
 - `MERGE_NOTES.md` — how the five upstream mods were merged
 - `analysis/` — per-engine merge analyses
 - `analysis/optimization-2026-09-21.md` — CPU/GPU consumer optimizations, regression checks, and fresh-world benchmarks
@@ -190,7 +199,7 @@ Install the plain jar, not the `-core` one — that rides inside it.
 - `analysis/publication-review-2026-09-22.md` — independent review, Skein compatibility, and publication checks
 - `analysis/optimization-2026-09-24.md` — exact biome-lookup (climate R-tree, zoom jitter) and allocation optimizations, with live parity and compatibility checks
 - `analysis/review-2026-09-25.md` — code and performance review: chunk-save, hang and compatibility fixes, quiet logging, remaining backlog
-- `analysis/jjthunder-freeze-2026-09-25.md` — diagnosis of a world freeze with the JJThunder To The Max datapack
+- `analysis/jjthunder-freeze-2026-09-25.md` — diagnosis of a world freeze with the JJThunder To The Max datapack, and the 2026-09-26 follow-up (features reading too far are skipped instead of failing the chunk)
 - `analysis/worldgen-big-2026-09-25.md` — noise-fill CPU pass (lerp tables, bulk multiply, air-cell skip), the pregen hash check, and the aquifer cell cache exactness fix
 - `dist/README.md` — end-user install notes
 

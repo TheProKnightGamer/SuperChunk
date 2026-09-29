@@ -21,11 +21,17 @@ SUMMARY
   Server-relevant mods tested ......... 17
     PASS out of the box ............... 16
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
-    Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for one
+    Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 3  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 7  (ModernFix, singleplayer only — FIXED;
                                           Twilight Forest — FIXED;
-                                          Better Chunk Loading — INCOMPATIBLE, by design)
+                                          Distant Horizons chunk-IO thread leak — FIXED;
+                                          Skein parallel tick phases — FIXED;
+                                          YUNG's Better Caves — CLEARED;
+                                          Better Chunk Loading — INCOMPATIBLE, by design;
+                                          standalone ScalableLux / C2ME / Noisium — INCOMPATIBLE,
+                                          by design: they are bundled)
+  Worldgen datapacks ................. see DATAPACKS
   Client-only (N/A on a server) ....... 33
 
 =============================================================
@@ -70,6 +76,18 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
   Those optimizations stand down automatically whenever another mod's mixin is merged into the
   classes they replace (BiomeManager, the Climate R-tree, the Xoroshiro random classes). None of
   these nine do so, so all of the optimizations stayed on.
+
+  Same nine mods, 2026-09-25 (the noise-fill pass in analysis/worldgen-big-2026-09-25.md), CPU,
+  every verify flag on, radius 512: zero mismatches, including 1.13B lerp-table reads. Two of the
+  newer shortcuts stood down, as designed, each with one log line:
+   - YUNG's API mixes into NoiseChunk, so the air-cell skip and the GPU compact block ids stay off
+     ("Noise-fill shortcuts are off ... changed by com.yungnickyoung.minecraft.yungsapi.mixin.
+     NoiseChunkMixin"). Its code runs for every block, as without SuperChunk.
+   - Deeper Oceans adds its own density-function type (DepthMultiplier) to the overworld's
+     initial_density_without_jaggedness, so the cross-chunk aquifer cell cache is off in that
+     dimension ("Aquifer cell sharing is off for a dimension: ..."). The cache can only share a
+     result when the router provably computes it the same way for every chunk; a type SuperChunk
+     cannot see into fails that check. Aquifers are then computed per chunk, exactly as vanilla.
 
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
@@ -475,6 +493,32 @@ INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
     "loaderCommon.neoforge...AbstractWorldGenStep was not found". That is the DH 2.x class name; the
     mixin lists both DH layouts (2.x package-prefixed, 3.x class-suffixed) and only the installed
     one resolves. Harmless; the other target applies.
+
+=============================================================
+DATAPACKS  (worldgen datapacks)
+=============================================================
+  Worldgen datapacks load as in vanilla; SuperChunk's shortcuts check what a datapack's density
+  functions do before relying on them (the aquifer cell cache above; the GPU path gates every
+  density function at registration). One vanilla limit behaves differently:
+
+  jjthunder ............. JJThunder To The Max 0.9.0 .............. PASS (vanilla fails chunks)
+
+    Its large_dripstone searches 512 blocks with wind drift and can read a chunk 9 away from the
+    chunk being decorated; world generation allows 8. Vanilla throws ("Requested chunk unavailable
+    during world generation") and the whole chunk fails, only once the terrain around it has been
+    generated, so it shows up in explored worlds, not fresh pregens. Its neighbours then can never
+    finish loading: vanilla hangs on them, and SuperChunk 0.4.0 before 2026-09-26 failed the load
+    instead, which crashed the game when the player walked into one.
+    SuperChunk now skips that one feature in that chunk and generates the chunk (one WARN per
+    feature, then a count at most every 10 minutes; nothing changes for chunks vanilla can
+    generate). The pack's far block writes, which vanilla drops and logs one line each (185,000
+    lines in half an hour of play), are still dropped; the log gets one line per feature and a
+    count. Replayed on copies of both affected worlds: every chunk that failed in play generated
+    and saved as minecraft:full. Details: analysis/jjthunder-freeze-2026-09-25.md.
+    Switches: -Dsuperchunk.worldgen.skipOutOfRegionFeatures=false (vanilla: fail the chunk),
+    -Dsuperchunk.worldgen.logEveryFarWrite=true (vanilla's per-block lines).
+    Pack-side fix: setting the pack's large_dripstone wind_speed to 0 keeps every probe within
+    reach, and the feature then generates in full.
 
 =============================================================
 INCOMPATIBLE  (unfixable)
