@@ -32,8 +32,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * SuperChunk GPU — <b>COMPACT-READBACK block ids</b>, STAGE 5 of the GPU-AHEAD plan
- * ({@code -Dsuperchunk.gpu.compactIds}, values {@code off|probe}, default {@code off}).
+ * SuperChunk GPU — <b>COMPACT-READBACK block ids</b>, stages 5–6 of the GPU-AHEAD plan
+ * ({@code -Dsuperchunk.gpu.compactIds}, values {@code off|probe|verify|on}, default {@code on}
+ * since round 8; see {@link #MODE}).
  *
  * <p><b>What PROBE does.</b> The PRODUCTION per-block decide kernel
  * ({@code sc_decide_multichunk}) is chained inside the EXISTING batched dispatch

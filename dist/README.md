@@ -1,7 +1,7 @@
 # SuperChunk 0.4.0 — standalone merged worldgen/chunk super-mod (NeoForge 1.21.1)
 
 **One mod, one source tree** — the optimizations of five mods merged into a single
-NeoForge 1.21.1 jar (Mojmap, ~200 mixins, ~990 source files):
+NeoForge 1.21.1 jar (Mojmap, ~500 mixins, ~1,160 source files):
 
 | Engine | What it brings |
 |--------|----------------|
@@ -12,9 +12,11 @@ NeoForge 1.21.1 jar (Mojmap, ~200 mixins, ~990 source files):
 | **VMP** | Area-based player-watching / chunk-sending ("very many players") |
 | **FlowSched** | The async scheduler C2ME/ScalableLux build on |
 
-Verified: boots a dedicated server clean, generates the world on **C2ME's `c2me-worker`
-threads** (`Global Executor Parallelism: 7`), zero runtime errors. Built from source — no
-nested third-party mod jars; everything is one mod id (`superchunk`).
+Built from source — no nested third-party mod jars; everything is one mod id (`superchunk`).
+World generation runs on C2ME's `c2me-worker` threads. Its own worldgen optimizations are exact
+(each has a kill switch and a verify mode that checks it against vanilla while generating), and the
+GPU offload is opt-in; see the repository README's Parity section and `analysis/` for what was
+measured.
 
 ## Install — ONE jar, client and server alike
 1. NeoForge **1.21.1** (neoforge `21.1.x`, Java **21**), client or dedicated server.
@@ -44,6 +46,10 @@ nested third-party mod jars; everything is one mod id (`superchunk`).
    once on the next start. Your values are kept, and the old file is saved as
    `superchunk.properties.bak`. SuperChunk logs only warnings and errors unless you set
    `logging.verbose=true` there.
+7. GPU offload is off by default: set `gpu.enabled=true` in `config/superchunk.properties`. It
+   needs an OpenCL GPU with double-precision (fp64) support and falls back to the CPU path when
+   none is usable. The first start compiles the kernels (several minutes); they are cached on disk
+   until the GPU driver changes.
 
 `./gradlew deployBundle` collects the shippable jar into `build/deploy/`.
 
@@ -74,7 +80,12 @@ standalone Lithium (and Radium) too.
     - On a **dedicated server** (which ships no LWJGL), the same jar's bootstrap supplies the LWJGL
       core module so the OpenCL bindings resolve.
   This is distinct from C2ME's `natives-math` *CPU-SIMD* path, which remains **inert** on this
-  Java 21 build (it needs Java 22 `java.lang.foreign` + prebuilt native libs). GPU worldgen is
-  experimental; see `../MERGE_NOTES.md`.
-- Not exhaustively gameplay-tested — boot + multithreaded spawn-gen are verified; a longer play
-  session (chunk save/reload, players connecting) is wise before production.
+  Java 21 build (it needs Java 22 `java.lang.foreign` + prebuilt native libs). How the GPU path
+  works, what it measured and its parity envelope: the repository README and `GPU-AHEAD-PLAN.md`.
+- Worldgen datapacks: a feature that reads a chunk farther away than world generation allows makes
+  vanilla fail the whole chunk; SuperChunk skips that one feature in that chunk and logs it once
+  (`-Dsuperchunk.worldgen.skipOutOfRegionFeatures=false` restores vanilla). See
+  `../compatibility.txt` for tested mods and datapacks.
+- Tested with pregens under every verify flag, a 9-mod worldgen modpack, save-then-kill crash
+  recovery, `/reload` and `/save-all flush`, and singleplayer play with Distant Horizons, Skein and
+  a large worldgen datapack. As with any chunk-system mod, keep backups of worlds you care about.
