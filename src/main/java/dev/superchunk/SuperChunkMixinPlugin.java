@@ -88,7 +88,7 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
                     && dev.superchunk.compat.OptionalTargets.present(targetClassName);
         }
         if (mixinClassName.startsWith("dev.superchunk.mixin.compat.MixinSkein")) {
-            // Each Skein hook names both of Skein's package roots; only one exists in any build.
+            // Each Skein hook names every one of Skein's package roots; only one exists in any build.
             return dev.superchunk.compat.OptionalTargets.present(targetClassName);
         }
         return true;
