@@ -14,8 +14,7 @@ import java.util.List;
 @Pseudo
 @Mixin(targets = {
         "com.theproknightgamer.skein.SkeinConfig",
-        "com.theproknightgamr.skein.SkeinConfig",
-        "com.asher.skein.SkeinConfig"
+        "com.theproknightgamr.skein.SkeinConfig"
 }, remap = false)
 public abstract class MixinSkeinConfig {
     @Inject(method = "refresh", at = @At("HEAD"), cancellable = true, require = 1)

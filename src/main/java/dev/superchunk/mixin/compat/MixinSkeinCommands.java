@@ -13,8 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Pseudo
 @Mixin(targets = {
         "com.theproknightgamer.skein.SkeinCommands",
-        "com.theproknightgamr.skein.SkeinCommands",
-        "com.asher.skein.SkeinCommands"
+        "com.theproknightgamr.skein.SkeinCommands"
 }, remap = false)
 public abstract class MixinSkeinCommands {
     @Inject(method = "reload", at = @At("HEAD"), cancellable = true, require = 1)

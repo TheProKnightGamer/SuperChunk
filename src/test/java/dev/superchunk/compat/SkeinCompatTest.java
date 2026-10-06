@@ -13,14 +13,12 @@ public final class SkeinCompatTest {
     public static void main(String[] args) throws Exception {
         check(SkeinCompat.discover(name -> { throw new ClassNotFoundException(name); }, Object.class) == null,
                 "Absent Skein must leave the vanilla catchers intact");
-        SkeinCompat.ClassLookup lookup = fixtureLookup("com.theproknightgamr.skein");
-        SkeinCompat.ClassLookup legacyLookup = fixtureLookup("com.asher.skein");
+        SkeinCompat.ClassLookup lookup = fixtureLookup("com.theproknightgamer.skein");
+        SkeinCompat.ClassLookup legacyLookup = fixtureLookup("com.theproknightgamr.skein");
         SkeinCompat.Bridge bridge = SkeinCompat.discover(lookup, Object.class);
         check(bridge != null, "Complete current optional API must bind");
         check(!bridge.isDimensionPhaseActive(), "Inactive dimension barrier must be visible to whole-server tasks");
         SkeinCompat.Bridge legacyBridge = SkeinCompat.discover(legacyLookup, Object.class);
-        check(SkeinCompat.discover(fixtureLookup("com.theproknightgamer.skein"), Object.class) != null,
-                "Skein's renamed package must bind, or its workers trip the async catchers");
         check(legacyBridge != null, "Legacy optional API must remain supported");
         fails(() -> SkeinCompat.discover(name -> {
             try {
@@ -34,10 +32,10 @@ public final class SkeinCompatTest {
             return lookup.find(name);
         }, Object.class), "Incomplete current ownership API must fail closed");
         fails(() -> SkeinCompat.discover(name -> {
-            if (name.equals("com.theproknightgamr.skein.core.TickContext")) {
+            if (name.equals("com.theproknightgamer.skein.core.TickContext")) {
                 throw new ClassNotFoundException(name);
             }
-            if (name.equals("com.asher.skein.Skein")) throw new ClassNotFoundException(name);
+            if (name.equals("com.theproknightgamr.skein.Skein")) throw new ClassNotFoundException(name);
             try {
                 return lookup.find(name);
             } catch (ClassNotFoundException absent) {
