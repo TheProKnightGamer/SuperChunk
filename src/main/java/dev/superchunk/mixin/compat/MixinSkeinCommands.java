@@ -12,6 +12,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 /** Give command-block reloads an accurate result while their dimension still owns a worker. */
 @Pseudo
 @Mixin(targets = {
+        "com.theproknightgamer.skein.SkeinCommands",
         "com.theproknightgamr.skein.SkeinCommands",
         "com.legacy.skein.SkeinCommands"
 }, remap = false)

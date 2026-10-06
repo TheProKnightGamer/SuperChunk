@@ -25,7 +25,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * An incompatible API fails closed.
  */
 public final class SkeinCompat {
-    private static final String[] PACKAGE_ROOTS = {"com.theproknightgamr.skein", "com.legacy.skein"};
+    // Skein now lives in com.theproknightgamer; the two older roots are
+    // releases still in use. Only one exists in any build.
+    private static final String[] PACKAGE_ROOTS = {
+            "com.theproknightgamer.skein", "com.theproknightgamr.skein", "com.legacy.skein"};
 
     private static final Bridge BRIDGE = discover(
             name -> Class.forName(name, false, SkeinCompat.class.getClassLoader()), Level.class);
