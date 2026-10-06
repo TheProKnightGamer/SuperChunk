@@ -12,6 +12,19 @@ import java.util.Map;
 public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
     protected static final String JSON_KEY_LITHIUM_OPTIONS = "lithium:options";
 
+    /**
+     * Voxy's ingest ({@code WorldConversionFactory.setupLocalPalette}) accepts the vanilla palettes,
+     * plus {@code net.caffeinemc.mods.lithium.common.world.chunk.LithiumHashPalette} only when a mod
+     * with id {@code lithium} is loaded. This bundled copy is neither: its palette lives under
+     * {@code dev.superchunk.*}, so every section {@code mixin.chunk.palette} gave a hash palette throws
+     * "Unknown palette type" and Voxy never ingests it (GitHub issue #8). Turning the rule off here,
+     * as if Voxy declared it in {@code lithium:options}, affects only the bundled copy: a standalone
+     * Lithium makes this one stand down, and Voxy recognises its palette. Kill switch:
+     * {@code -Dsuperchunk.compat.voxy=false}.
+     */
+    private static final boolean VOXY_COMPAT =
+            Boolean.parseBoolean(System.getProperty("superchunk.compat.voxy", "true"));
+
     @Override
     public void applyLithiumCompat(Map<String, Option> options) {
 
@@ -21,6 +34,9 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
         List<MixinOverride> list = new ArrayList<>();
 
         for (ModInfo meta : FMLLoader.getLoadingModList().getMods()) {
+            if (VOXY_COMPAT && "voxy".equals(meta.getModId())) {
+                list.add(new MixinOverride(meta.getModId(), "mixin.chunk.palette", false));
+            }
             meta.getOwningFile().getConfigElement(JSON_KEY_LITHIUM_OPTIONS).ifPresent(override -> {
                 if (override instanceof Map<?, ?> overrides && overrides.keySet().stream().allMatch(key -> key instanceof String)) {
                     overrides.forEach((key, value) -> {

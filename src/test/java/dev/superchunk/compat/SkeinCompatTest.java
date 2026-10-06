@@ -19,6 +19,8 @@ public final class SkeinCompatTest {
         check(bridge != null, "Complete current optional API must bind");
         check(!bridge.isDimensionPhaseActive(), "Inactive dimension barrier must be visible to whole-server tasks");
         SkeinCompat.Bridge legacyBridge = SkeinCompat.discover(legacyLookup, Object.class);
+        check(SkeinCompat.discover(fixtureLookup("com.theproknightgamer.skein"), Object.class) != null,
+                "Skein's renamed package must bind, or its workers trip the async catchers");
         check(legacyBridge != null, "Legacy optional API must remain supported");
         fails(() -> SkeinCompat.discover(name -> {
             try {

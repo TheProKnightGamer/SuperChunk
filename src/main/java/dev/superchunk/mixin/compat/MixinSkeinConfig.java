@@ -13,6 +13,7 @@ import java.util.List;
 /** Keep startup, file reloads, and command reloads inside the supported dimension-only configuration. */
 @Pseudo
 @Mixin(targets = {
+        "com.theproknightgamer.skein.SkeinConfig",
         "com.theproknightgamr.skein.SkeinConfig",
         "com.legacy.skein.SkeinConfig"
 }, remap = false)
