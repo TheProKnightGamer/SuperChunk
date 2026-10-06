@@ -23,8 +23,9 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 7  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 8  (ModernFix, singleplayer only — FIXED;
                                           Twilight Forest — FIXED;
+                                          Voxy via Roxy, client only — FIXED;
                                           Distant Horizons chunk-IO thread leak — FIXED;
                                           Skein parallel tick phases — FIXED;
                                           YUNG's Better Caves — CLEARED;
@@ -322,6 +323,38 @@ FIXED  (was incompatible; SuperChunk changed to support it)
 
     NOTE: Radium is REDUNDANT with SuperChunk (SuperChunk already bundles Lithium). It no longer
     crashes, but installing it adds nothing — SuperChunk's Lithium simply steps aside for it.
+
+  voxy .................. Voxy 0.2.16-beta (via Roxy 0.3.3) ........ PASS (after fix)  [client]
+
+    GitHub issue #8 (2026-09-20): with Roxy (Voxy on NeoForge) the game launched, but Voxy ingested
+    no chunks and logged "Unknown palette type: dev.superchunk.net.caffeinemc.mods.lithium.common.
+    world.chunk.LithiumHashPalette" from WorldConversionFactory.setupLocalPalette, 2,966 times in
+    the reported log. The reporter found lithium.chunk.palette=false fixes it.
+
+    Root cause: Voxy reads section palettes itself. It accepts the vanilla palettes, plus Lithium's
+    hash palette only when a mod with id "lithium" is loaded and the palette is
+    net.caffeinemc.mods.lithium.common.world.chunk.LithiumHashPalette. SuperChunk's bundled Lithium
+    is neither: no "lithium" mod id, and the class is relocated under dev.superchunk.*. So every
+    section that mixin.chunk.palette gave a hash palette was rejected.
+
+    FIX: when a mod with id "voxy" is loaded, the bundled Lithium turns mixin.chunk.palette off as
+    if Voxy had declared it in lithium:options (NeoForgeMixinOverrides). Vanilla's HashMapPalette is
+    used instead, which Voxy and SuperChunk's FastPalettePacking both handle. This only affects the
+    bundled copy: a standalone Lithium makes it stand down, and Voxy recognises that palette. Voxy
+    is client-only, so a dedicated server keeps the Lithium palette. Kill switch:
+    -Dsuperchunk.compat.voxy=false.
+
+    VERIFIED 2026-10-05 in a real client with the reporter's mods: NeoForge 21.1.251, Roxy 0.3.3,
+    Voxy 0.2.16-beta+1.21.11, Sodium 0.8.12, Forgified Fabric API 0.116.14. Singleplayer on the
+    same world, 90 s after joining, then a normal quit (Xvfb + Mesa llvmpipe; Voxy needs
+    MESA_GL_VERSION_OVERRIDE=4.6 and MESA_GLSL_VERSION_OVERRIDE=460 there).
+      - kill switch on (= before the fix): 2,760 "Ingest service had an exception ... Unknown
+        palette type: dev.superchunk...LithiumHashPalette", the reporter's stack line for line;
+        Voxy's store 0.8 MB.
+      - fixed: "Force-disabling mixin 'chunk.palette.PalettedContainer$StrategyMixin' as rule
+        'mixin.chunk.palette' (added by mods [voxy])", zero ingest exceptions, Voxy's store 8.8 MB.
+    A dedicated-server boot with a stub "voxy" mod also showed the override applying only with
+    the mod present and not with the kill switch.
 
 =============================================================
 INVESTIGATED AND CLEARED  (suspected, proven not to be the cause)
