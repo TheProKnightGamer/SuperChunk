@@ -113,6 +113,9 @@ public final class SuperChunk {
                 if (Boolean.getBoolean("superchunk.worldgen.flatClimateSearch.verify")) {
                     dev.superchunk.worldgen.FlatClimateIndex.reportVerify();
                 }
+                if (dev.superchunk.worldgen.ClimateColumns.VERIFY) {
+                    dev.superchunk.worldgen.ClimateColumns.reportVerify();
+                }
                 try {
                     GpuFillStats.logSummary("server stopping");
                 } catch (Throwable ignored) {

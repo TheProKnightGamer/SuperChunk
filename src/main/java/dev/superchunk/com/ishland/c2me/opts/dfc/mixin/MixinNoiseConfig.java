@@ -38,6 +38,8 @@ public class MixinNoiseConfig {
         if ((Object) this instanceof dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCellCache.Owner owner) {
             owner.superchunk$decideCellSharing(this.router);
         }
+        // SuperChunk: biome fill's per-column climate reuse, decided from the vanilla router too.
+        final byte superchunk$climateColumns = dev.superchunk.worldgen.ClimateColumns.decide(this.router);
         Reference2ReferenceMap<DensityFunction, DensityFunction> tempCache = new Reference2ReferenceOpenHashMap<>();
         // SuperChunk GPU (kernel merge): batch THIS router's DF kernels so they emit into ONE
         // OpenCL program (shared headers compiled once) built at endBatch, instead of one program
@@ -74,6 +76,7 @@ public class MixinNoiseConfig {
             // Build the one merged program + resolve every deferred GPU delegate (or per-DF fallback).
             dev.superchunk.gpu.dfc.GpuDfcHook.endBatch();
         }
+        dev.superchunk.worldgen.ClimateColumns.register(this.router, superchunk$climateColumns);
         stopwatch.stop();
         org.slf4j.LoggerFactory.getLogger("SuperChunk-DFC").info("Density function compilation finished in {}", stopwatch);
 

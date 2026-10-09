@@ -12,6 +12,16 @@ import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 
+/**
+ * SuperChunk: NOT REGISTERED (removed from noisium.mixins.json 2026-10-06) — do not re-add.
+ * Biome lookup order is part of vanilla's output: {@code Climate.RTree.search} starts from the
+ * thread's previous result and keeps it on an exact distance tie, so visiting the cells y,z,x
+ * instead of vanilla's x,y,z changed tie-broken biomes (~3% of chunks, e.g. plains vs forest
+ * columns, river vs dripstone_caves cells) versus vanilla on the same seed. Its aim, a faster biome
+ * fill, is met exactly by {@link dev.superchunk.worldgen.ClimateColumns} (per-column climate reuse,
+ * vanilla lookup order). The reordering only changed the palette-write order, and palette and loop
+ * work is 2.3% of biome-fill time (~0.1% of worldgen CPU, JFR 2026-10-07), so it had nothing to win.
+ */
 @Mixin(LevelChunkSection.class)
 public class ChunkSectionMixin {
 	@Unique

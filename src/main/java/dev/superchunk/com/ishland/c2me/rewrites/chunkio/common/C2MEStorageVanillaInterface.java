@@ -33,9 +33,14 @@ public class C2MEStorageVanillaInterface extends IOWorker implements IDirectStor
         return this.backend.getChunkData(pos.toLong(), null).thenApply(Optional::ofNullable);
     }
 
+    /**
+     * SuperChunk: {@code sync} decides the fsync, as in vanilla's {@code IOWorker.synchronize}
+     * (upstream always fsynced). Both wait for every queued write. Vanilla's entity
+     * {@code saveAll} calls {@code synchronize(false)} once per pass and {@code true} once at the end.
+     */
     @Override
     public CompletableFuture<Void> synchronize(boolean sync) {
-        return this.backend.flush(true);
+        return this.backend.flush(sync);
     }
 
     @Override

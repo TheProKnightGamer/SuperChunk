@@ -66,7 +66,43 @@ public final class CLProgramCache {
     private static final java.util.concurrent.atomic.LongAdder diskHits = new java.util.concurrent.atomic.LongAdder();
     private static final java.util.concurrent.atomic.LongAdder builds = new java.util.concurrent.atomic.LongAdder();
 
+    /**
+     * Largest fully-inlined program the driver is asked to compile, in MB of source including the
+     * shared noise headers ({@link KernelInlineEstimate}); {@code <= 0} disables the check. Vanilla's
+     * largest programs measure 214 MB and build cold at a ~7 GB process peak; Tectonic's router
+     * programs measure 1.9-11.7 GB, and building one took the server past 20 GB (OOM-killed).
+     */
+    private static final long MAX_INLINED_CHARS =
+            Long.getLong("superchunk.gpu.maxInlinedKernelMB", 500L) * 1_000_000L;
+    /** Sources already refused (by cache key), so each is measured and reported once. */
+    private static final java.util.Set<String> REFUSED = ConcurrentHashMap.newKeySet();
+
     private CLProgramCache() {
+    }
+
+    /** Whether a cold build of {@code source} is refused because its kernels inline too large. */
+    private static boolean tooLargeToBuild(String key, String source) {
+        if (MAX_INLINED_CHARS <= 0) {
+            return false;
+        }
+        if (REFUSED.contains(key)) {
+            return true;
+        }
+        long inlined = KernelInlineEstimate.maxInlinedChars(source);
+        if (inlined <= MAX_INLINED_CHARS) {
+            return false;
+        }
+        boolean first = REFUSED.isEmpty();
+        REFUSED.add(key);
+        String message = "[SuperChunk-GPU] Not compiling an OpenCL program that inlines to {} MB (limit {} MB, "
+                + "-Dsuperchunk.gpu.maxInlinedKernelMB): the driver's compiler can need tens of GB of memory "
+                + "for it. The density functions it holds run on the CPU instead (same output).";
+        if (first) {
+            LOGGER.warn(message, inlined / 1_000_000L, MAX_INLINED_CHARS / 1_000_000L);
+        } else {
+            LOGGER.info(message, inlined / 1_000_000L, MAX_INLINED_CHARS / 1_000_000L);
+        }
+        return true;
     }
 
     /**
@@ -122,6 +158,9 @@ public final class CLProgramCache {
 
             // 3) compile from source + persist binary.
             if (program == null) {
+                if (tooLargeToBuild(key, source)) {
+                    return null; // CPU fallback, as for a failed build
+                }
                 program = CLProgram.build(source, opt);
                 if (program == null) {
                     return null; // build failed -> CPU fallback

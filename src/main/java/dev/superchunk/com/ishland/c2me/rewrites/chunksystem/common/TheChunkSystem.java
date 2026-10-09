@@ -20,6 +20,7 @@ import net.minecraft.server.level.progress.ChunkProgressListener;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.util.StaticCache2D;
+import net.minecraft.util.thread.BlockableEventLoop;
 import net.minecraft.world.level.ChunkPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,23 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
         this.schedulingManager =  ((IVanillaChunkManager) tacs).c2me$getSchedulingManager();
         this.LOGGER = LoggerFactory.getLogger("ChunkAccess System of %s".formatted(((IThreadedAnvilChunkStorage) tacs).getWorld().dimension().location()));
         managedTickets.defaultReturnValue(NewChunkStatus.vanillaLevelToStatus.length - 1);
+    }
+
+    /**
+     * SuperChunk: runs a task at once on the server thread, else queues it there. The chunk futures
+     * handed to vanilla and other mods complete through this, so their callbacks run on the server
+     * thread as in vanilla, where a FlowSched worker completing a future (an unload failing pending
+     * requests, for one) used to run them on that worker instead.
+     */
+    final Executor vanillaCompletionExecutor = this::runOnMainThread;
+
+    private void runOnMainThread(Runnable command) {
+        final BlockableEventLoop<Runnable> mainThread = ((IThreadedAnvilChunkStorage) this.tacs).getMainThreadExecutor();
+        if (mainThread.isSameThread()) {
+            command.run();
+        } else {
+            mainThread.execute(command);
+        }
     }
 
     @Override
@@ -136,6 +154,42 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
             ((IThreadedAnvilChunkStorage) this.tacs).getMainThreadExecutor().execute(
                     () -> ((IThreadedAnvilChunkStorage) this.tacs).invokeOnChunkStatusChange(holder.getKey(), statusReached1.toChunkLevelType()));
         }
+    }
+
+    /**
+     * SuperChunk: the full chunks a flushing {@code ChunkMap.saveAllChunks(true)} cannot see, saved
+     * on the main thread just before it flushes the storage. Vanilla's flush saves the holders in its
+     * holder map and, through {@code processUnloads}, every chunk on its way out. Here a holder leaves
+     * that map ({@link NewChunkHolderVanillaInterface#wasAccessibleSinceLastSave()} false) as soon as it
+     * drops below SERVER_ACCESSIBLE, but keeps its full chunk until the last unload step
+     * ({@code ReadFromDisk.downgradeFromThis}) saves it after a light sync, and can wait there while
+     * neighbours still need it. A flush in that window skipped the chunk and returned, so a crash right
+     * after {@code /save-all flush} lost ~25% of recently generated chunks (vanilla: none). The later
+     * unload save then finds nothing unsaved, as it does after any vanilla save.
+     *
+     * @return how many chunks were written
+     */
+    public int saveFullChunksOutsideHolderMap() {
+        if (!((IThreadedAnvilChunkStorage) this.tacs).getMainThreadExecutor().isSameThread()) {
+            return 0; // the unload steps this races with run on the main thread; never save beside them
+        }
+        int saved = 0;
+        for (ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, NewChunkHolderVanillaInterface> holder : this.snapshotHolders()) {
+            final NewChunkHolderVanillaInterface vanillaHolder = holder.getUserData().get();
+            if (vanillaHolder == null || vanillaHolder.wasAccessibleSinceLastSave()) {
+                continue; // in the holder map: vanilla's own flush loop saved it
+            }
+            final ChunkState state = holder.getItem().get();
+            net.minecraft.world.level.chunk.ChunkAccess chunk = state != null ? state.chunk() : null;
+            // ImposterProtoChunk.isUnsaved() is always false: save the full chunk it wraps, as the unload step does
+            if (chunk instanceof net.minecraft.world.level.chunk.ImposterProtoChunk imposter) {
+                chunk = imposter.getWrapped();
+            }
+            if (chunk instanceof net.minecraft.world.level.chunk.LevelChunk && ((IThreadedAnvilChunkStorage) this.tacs).invokeSave(chunk)) {
+                saved++;
+            }
+        }
+        return saved;
     }
 
     public ChunkHolder vanillaIf$setLevel(long pos, int level) {

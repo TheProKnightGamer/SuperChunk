@@ -21,6 +21,8 @@ import org.spongepowered.asm.mixin.Mixin;
         // climate search inputs the flat index inlines
         "net.minecraft.world.level.biome.Climate$TargetPoint",
         "net.minecraft.world.level.biome.Climate$Parameter",
+        // per-column climate reuse (ClimateColumns) answers sample() itself
+        "net.minecraft.world.level.biome.Climate$Sampler",
         // whole-method replicas (ForeignHooks)
         "net.minecraft.world.level.levelgen.feature.OreFeature",
         "net.minecraft.world.level.levelgen.placement.PlacedFeature",

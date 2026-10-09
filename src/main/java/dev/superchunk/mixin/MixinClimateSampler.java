@@ -33,7 +33,21 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * {@link #superchunk$measureDepthFlip}).
  */
 @Mixin(Climate.Sampler.class)
-public abstract class MixinClimateSampler {
+public abstract class MixinClimateSampler implements dev.superchunk.worldgen.ClimateColumns.Tagged {
+
+    /** Biome-fill samplers only (set by NoiseChunk.cachedClimateSampler): functions reused per column. */
+    @org.spongepowered.asm.mixin.Unique
+    private byte superchunk$columnMask;
+
+    @Override
+    public byte superchunk$columnMask() {
+        return this.superchunk$columnMask;
+    }
+
+    @Override
+    public void superchunk$setColumnMask(byte mask) {
+        this.superchunk$columnMask = mask;
+    }
 
     /** Real-DF correctness check: compare each GPU-served sample to vanilla compute(). Off by default. */
     private static final boolean superchunk$verify = Boolean.getBoolean("superchunk.biome.verify");
@@ -45,11 +59,13 @@ public abstract class MixinClimateSampler {
             require = 0)
     private void superchunk$sampleFromGpu(int x, int y, int z, CallbackInfoReturnable<Climate.TargetPoint> cir) {
         if (!BiomeClimateCache.isEnabled()) {
-            return;   // offload OFF (default) -> skip even the ThreadLocal fetch; unchanged vanilla path
+            superchunk$sampleColumns(x, y, z, cir);   // offload OFF (default): CPU, per-column reuse or vanilla
+            return;
         }
         double[] tvd = BiomeClimateCache.serve(this, x, y, z);
         if (tvd == null) {
-            return;   // not armed / outside lattice / GPU failed -> unchanged vanilla path
+            superchunk$sampleColumns(x, y, z, cir);   // not armed / outside lattice / GPU failed
+            return;
         }
         // Match vanilla Climate.Sampler.sample exactly: one SinglePointContext at the
         // quart-block position, the three flatCache DFs computed on the CPU as before, and
@@ -93,6 +109,18 @@ public abstract class MixinClimateSampler {
                     continentalness, erosion, weirdness, gpuTarget);
         }
         cir.setReturnValue(gpuTarget);
+    }
+
+    /** CPU sample during biome fill, reusing the column's y-independent values ({@link dev.superchunk.worldgen.ClimateColumns}). */
+    @org.spongepowered.asm.mixin.Unique
+    private void superchunk$sampleColumns(int x, int y, int z, CallbackInfoReturnable<Climate.TargetPoint> cir) {
+        byte mask = this.superchunk$columnMask;
+        if (mask != 0) {
+            Climate.TargetPoint target = dev.superchunk.worldgen.ClimateColumns.sample((Climate.Sampler) (Object) this, mask, x, y, z);
+            if (target != null) {
+                cir.setReturnValue(target);
+            }
+        }
     }
 
     /**
