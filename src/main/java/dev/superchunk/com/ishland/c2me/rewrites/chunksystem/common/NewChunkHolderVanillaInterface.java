@@ -68,7 +68,7 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
                 return CompletableFuture.completedFuture(ChunkResult.of(this.newHolder.getItem().get().chunk()));
             }
         }
-        return future.handle((unused, throwable) -> {
+        return future.handleAsync((unused, throwable) -> {
             while (throwable instanceof CompletionException) {
                 throwable = throwable.getCause();
             }
@@ -80,7 +80,7 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
             } else {
                 return ChunkResult.of(this.newHolder.getItem().get().chunk());
             }
-        });
+        }, this.chunkSystem.vanillaCompletionExecutor);
     }
 
     @SuppressWarnings("unchecked")
@@ -100,7 +100,7 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
                 return CompletableFuture.completedFuture(ChunkResult.of(this.newHolder.getItem().get().protoChunk()));
             }
         }
-        return future.handle((unused, throwable) -> {
+        return future.handleAsync((unused, throwable) -> {
             while (throwable instanceof CompletionException) {
                 throwable = throwable.getCause();
             }
@@ -112,7 +112,7 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
             } else {
                 return ChunkResult.of(this.newHolder.getItem().get().protoChunk());
             }
-        });
+        }, this.chunkSystem.vanillaCompletionExecutor);
     }
 
     @SuppressWarnings("unchecked")
@@ -137,7 +137,7 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
                 }
             }
         }
-        return future.handle((unused, throwable) -> {
+        return future.handleAsync((unused, throwable) -> {
             while (throwable instanceof CompletionException) {
                 throwable = throwable.getCause();
             }
@@ -154,7 +154,7 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
                     return ChunkHolder.UNLOADED_LEVEL_CHUNK; // might have unloaded at this point
                 }
             }
-        });
+        }, this.chunkSystem.vanillaCompletionExecutor);
     }
 
     /**

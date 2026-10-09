@@ -359,6 +359,22 @@ FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
 INVESTIGATED AND CLEARED  (suspected, proven not to be the cause)
 =============================================================
+  irons_spellbooks ...... Iron's Spells 'n Spellbooks 3.15.6 ...... PASS (mod bug, now reported as vanilla does)
+
+    Behind a "Failed to save chunk x,z" report (2026-10-08). PortalFrameBlockEntity.saveAdditional
+    calls level.isLoaded(...) and throws a NullPointerException when the block entity sits in a
+    partly generated chunk, which has no level. Reproduced deterministically with Create Chronicles:
+    The Endventure (321 mods, NeoForge 21.1.229): fresh world, End pregen centred on 568,1100 with
+    radius 100; the border chunk 35,76 holds a portal frame.
+
+    SuperChunk saves the partly generated ring around generated terrain; vanilla discarded it in the
+    same test. So this mod bug, and others like it, can surface with SuperChunk but not without.
+    Before 2026-10-08 SuperChunk's async unload hit it outside its error handling: "Error
+    downgrading chunk [35, 76]", then a misleading "Failed to load chunk 35,76", and the chunk was
+    marked broken. Now it falls back to vanilla's save, which logs "Failed to save chunk 35,76" with
+    the mod's stack trace, as vanilla does when a save throws, and the unload goes on. That chunk
+    is not saved until the mod is fixed. Report it to the mod's author.
+
   bettercaves ........... YUNG's Better Caves ..................... PASS
 
     Prime suspect for the Endventure world-generation failure for two rounds, and NOT the cause —

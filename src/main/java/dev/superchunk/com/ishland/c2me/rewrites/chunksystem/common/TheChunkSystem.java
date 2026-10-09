@@ -20,6 +20,7 @@ import net.minecraft.server.level.progress.ChunkProgressListener;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.util.StaticCache2D;
+import net.minecraft.util.thread.BlockableEventLoop;
 import net.minecraft.world.level.ChunkPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,23 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
         this.schedulingManager =  ((IVanillaChunkManager) tacs).c2me$getSchedulingManager();
         this.LOGGER = LoggerFactory.getLogger("ChunkAccess System of %s".formatted(((IThreadedAnvilChunkStorage) tacs).getWorld().dimension().location()));
         managedTickets.defaultReturnValue(NewChunkStatus.vanillaLevelToStatus.length - 1);
+    }
+
+    /**
+     * SuperChunk: runs a task at once on the server thread, else queues it there. The chunk futures
+     * handed to vanilla and other mods complete through this, so their callbacks run on the server
+     * thread as in vanilla, where a FlowSched worker completing a future (an unload failing pending
+     * requests, for one) used to run them on that worker instead.
+     */
+    final Executor vanillaCompletionExecutor = this::runOnMainThread;
+
+    private void runOnMainThread(Runnable command) {
+        final BlockableEventLoop<Runnable> mainThread = ((IThreadedAnvilChunkStorage) this.tacs).getMainThreadExecutor();
+        if (mainThread.isSameThread()) {
+            command.run();
+        } else {
+            mainThread.execute(command);
+        }
     }
 
     @Override

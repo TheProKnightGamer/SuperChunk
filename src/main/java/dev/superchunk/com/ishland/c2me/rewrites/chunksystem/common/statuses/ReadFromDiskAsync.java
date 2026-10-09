@@ -243,7 +243,21 @@ public class ReadFromDiskAsync extends ReadFromDisk {
             // with asyncSerialization=true — never posted ChunkDataEvent.Save at all.
             boolean chunkSaveEventFree = HookCompatibility.isChunkSaveEventFree();
 
-            AsyncSerializationManager.Scope scope = new AsyncSerializationManager.Scope(chunk, ((IThreadedAnvilChunkStorage) tacs).getWorld());
+            // SuperChunk: the scope serializes the block entities here, on the main thread, before
+            // the error handling below exists. A block entity that throws on save (seen: Iron's
+            // Spellbooks' portal frame NPEs on its null level in a proto chunk) used to fail the
+            // whole unload: the chunk was marked broken and the error was reported as a LOAD
+            // failure. Take the same fallback as a failed async save: vanilla's save logs "Failed
+            // to save chunk" with the cause, as it would without SuperChunk, and the unload goes on.
+            final AsyncSerializationManager.Scope scope;
+            try {
+                scope = new AsyncSerializationManager.Scope(chunk, ((IThreadedAnvilChunkStorage) tacs).getWorld());
+            } catch (Exception e) {
+                LOGGER.error("Failed to save chunk {},{} asynchronously, falling back to sync saving", chunkPos.x, chunkPos.z, e);
+                chunk.setUnsaved(true);
+                ((IThreadedAnvilChunkStorage) tacs).invokeSave(chunk);
+                return Completable.complete();
+            }
             return Single.fromCallable(() -> {
                         try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(((IThreadedAnvilChunkStorage) tacs).getWorld(), chunk.getPos(), this, false))) {
                             scope.open();
