@@ -22,6 +22,23 @@ public class LithiumMixinPlugin implements IMixinConfigPlugin {
     private static LithiumConfig CONFIG;
 
     /**
+     * Mod-ids that ARE Lithium (the original, or a fork/repackage that ships Lithium's mixins under
+     * the same {@code net.caffeinemc.mods.lithium.*} classes). Any of these standing alongside
+     * SuperChunk means two copies of the same Lithium mixins would target the same vanilla classes —
+     * a fatal double-application (observed as e.g. {@code Critical injection failure: Redirector
+     * removeOldMapAlloc ... (0/1) succeeded} on {@code alloc.nbt.CompoundTagMixin} when Radium is
+     * present). Detecting them here stands the bundled copy down so the external one is authoritative,
+     * exactly as for the original standalone Lithium. Radium keeps the {@code net.caffeinemc.mods.lithium}
+     * package and reads {@code config/lithium.properties} (so SuperChunk's five C2ME-overlap pins,
+     * written there, still apply) — verified compatible via server boot test.
+     *
+     * <p>Declared above {@link #STANDALONE_LITHIUM}: static fields initialise in order, and its
+     * detector reads this array (declared after it, the array was still null and the mod-id check
+     * always failed over to the class probes).
+     */
+    private static final String[] LITHIUM_EQUIVALENT_MODIDS = {"lithium", "radium"};
+
+    /**
      * True when a STANDALONE Lithium mod is installed alongside SuperChunk. Computed ONCE at
      * class-init (i.e. when Mixin first instantiates this plugin while preparing
      * {@code superchunk-lithium(.neoforge).mixins.json}) — that is mixin-plugin time, BEFORE mod
@@ -49,19 +66,6 @@ public class LithiumMixinPlugin implements IMixinConfigPlugin {
     public static boolean isStandaloneLithiumActive() {
         return STANDALONE_LITHIUM;
     }
-
-    /**
-     * Mod-ids that ARE Lithium (the original, or a fork/repackage that ships Lithium's mixins under
-     * the same {@code net.caffeinemc.mods.lithium.*} classes). Any of these standing alongside
-     * SuperChunk means two copies of the same Lithium mixins would target the same vanilla classes —
-     * a fatal double-application (observed as e.g. {@code Critical injection failure: Redirector
-     * removeOldMapAlloc ... (0/1) succeeded} on {@code alloc.nbt.CompoundTagMixin} when Radium is
-     * present). Detecting them here stands the bundled copy down so the external one is authoritative,
-     * exactly as for the original standalone Lithium. Radium keeps the {@code net.caffeinemc.mods.lithium}
-     * package and reads {@code config/lithium.properties} (so SuperChunk's five C2ME-overlap pins,
-     * written there, still apply) — verified compatible via server boot test.
-     */
-    private static final String[] LITHIUM_EQUIVALENT_MODIDS = {"lithium", "radium"};
 
     private static boolean detectStandaloneLithium() {
         // Primary: scan the FML loading mod list BY MOD-ID (populated during mod discovery, before

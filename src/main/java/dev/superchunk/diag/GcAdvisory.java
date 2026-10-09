@@ -164,7 +164,9 @@ public final class GcAdvisory {
     /** Turnkey reference for launcher-managed (client) setups where we cannot edit the JVM args. */
     private static void writeClientHint() {
         try {
-            Path dir = Path.of("config");
+            // FMLPaths.CONFIGDIR, not a cwd-relative "./config": the rest of the mod's config I/O is
+            // anchored there, and cwd is not always the game directory (as in forge-1.20.1).
+            Path dir = net.neoforged.fml.loading.FMLPaths.CONFIGDIR.get();
             if (!Files.isDirectory(dir)) {
                 return;
             }
@@ -172,7 +174,8 @@ public final class GcAdvisory {
                     + "# A mod cannot change the running JVM's garbage collector, so paste the line below into your\n"
                     + "# launcher's JVM / \"Additional Arguments\" (CurseForge: Profile Options -> Java; Prism: Settings\n"
                     + "# -> Java). REMOVE any -XX:+UseG1GC / Aikar-style G1 flags first; give the JVM >= 8G for RD 48+.\n"
-                    + "# (Dedicated servers are auto-configured in user_jvm_args.txt instead.)\n\n"
+                    + "# (Dedicated servers: paste it into user_jvm_args.txt, or start once with -Dsuperchunk.gc.autoConfig=true\n"
+                    + "# to have SuperChunk add it there.)\n\n"
                     + ZGC_FLAGS + "\n";
             Files.writeString(dir.resolve("superchunk-jvm-args.txt"), body);
         } catch (Throwable ignored) {

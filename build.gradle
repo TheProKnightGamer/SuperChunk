@@ -389,7 +389,8 @@ tasks.named('test') { failOnNoDiscoveredTests = false }
     biomeFiddleCacheRegressionTest: 'dev.superchunk.worldgen.BiomeFiddleCacheTest',
     configDocsRegressionTest: 'dev.superchunk.config.SuperChunkConfigDocsTest',
     mixinTargetScanRegressionTest: 'dev.superchunk.MixinTargetScanTest',
-    skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest'
+    skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest',
+    featureRegionReadsRegressionTest: 'dev.superchunk.worldgen.FeatureRegionReadsTest'
 ].each { taskName, testMain ->
     def regression = tasks.register(taskName, JavaExec) {
         group = 'verification'

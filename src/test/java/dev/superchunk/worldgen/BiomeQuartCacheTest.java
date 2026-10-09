@@ -71,6 +71,10 @@ public final class BiomeQuartCacheTest {
         }
         check(BiomeQuartCache.encode(1, 0, -2049, 0) == BiomeQuartCache.UNCACHEABLE, "Y lower bound");
         check(BiomeQuartCache.encode(1, 0, 2048, 0) == BiomeQuartCache.UNCACHEABLE, "Y upper bound");
+        for (long generation = 1; generation <= 15; generation++) {
+            check(BiomeQuartCache.encode(generation, 0, 0, 0) != BiomeQuartCache.UNCACHEABLE,
+                    "quart (0, 0, 0) must be cacheable under generation " + generation);
+        }
         System.out.println("BiomeQuartCache: generation-wrap, 100000 interleaved lookups, thread isolation and bounds passed");
     }
 

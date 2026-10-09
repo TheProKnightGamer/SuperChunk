@@ -36,6 +36,7 @@
     "MixinChunkMapClimateDimLabel",
     "MixinChunkMapPredictiveGen",
     "MixinClimateSampler",
+    "MixinNoiseChunkClimateColumns",
     "MixinClimateParameterListFlat",
     "MixinClimateRTreeLeaf",
     "MixinProbeBiomeLookup",

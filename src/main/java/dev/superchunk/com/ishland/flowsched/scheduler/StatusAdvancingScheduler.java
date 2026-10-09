@@ -432,6 +432,16 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
         }
     }
 
+    /** SuperChunk: a copy of every current item (for a full flush save to visit them all). */
+    public java.util.List<ItemHolder<K, V, Ctx, UserData>> snapshotHolders() {
+        final long stamp = this.itemsLock.readLock();
+        try {
+            return new java.util.ArrayList<>(this.items.values());
+        } finally {
+            this.itemsLock.unlockRead(stamp);
+        }
+    }
+
     /**
      * SuperChunk: the key of a {@link ItemHolder#FLAG_BROKEN} item that keeps {@code key} from ever
      * reaching {@code wanted}, or {@code null} if none turns up within {@code nodeBudget} items.

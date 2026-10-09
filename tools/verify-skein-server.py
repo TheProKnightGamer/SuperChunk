@@ -83,8 +83,14 @@ def setup_commands():
 
 def console_health(console):
     phases = re.findall(r'\bphases:\s*([^\r\n]*)', console)
+
+    # Current Skein lists every phase and marks the ones not running, e.g.
+    # "dimensions, scheduledTicks (blocked), ..."; only the unmarked ones run.
+    def running(line):
+        return {entry for entry in line.strip().split(', ') if entry and '(' not in entry}
+
     return {
-        'expected_phases': bool(phases) and all(set(p.strip().split(', ')) == EXPECTED_PHASES for p in phases),
+        'expected_phases': bool(phases) and all(running(p) == EXPECTED_PHASES for p in phases),
         'saved': 'Saved the game' in console,
         'no_errors': not any(FAILED.search(line) for line in console.splitlines()),
     }
@@ -101,7 +107,9 @@ def check_fresh(console, benchmark, exit_code):
         'four_pigs': console.count('Summoned new Pig') == 4,
         'three_hoppers': console.count('Changed the block at 2052, 101, 2052') == 3,
         'three_chests': console.count('Changed the block at 2052, 102, 2052') == 3,
-        'console_reload': 'Skein: config re-read.' in console,
+        # Skein's reply was reworded on 2026-09-30 ("config will be re-read at the start of the
+        # next tick"); accept both, so the check works on either Skein build.
+        'console_reload': 'Skein: config re-read.' in console or 'Skein: config will be re-read' in console,
         'finished': 'SC_SKEIN_FRESH_DONE' in console,
     })
     return checks
@@ -113,7 +121,7 @@ def check_restart(console, exit_code, timed_out):
     # that could report one successful action more than once.
     reloads = sum('2054, 101, 2054 has the following block data:' in line
                   and ('config reload queued for the next server tick' in line
-                       or 'config re-read.' in line) for line in lines)
+                       or 'config re-read.' in line or 'config will be re-read' in line) for line in lines)
     spreads = sum('2050, 101, 2054 has the following block data:' in line
                   and 'commands.spreadplayers.success.entities' in line for line in lines)
     hoppers = sum('2052, 101, 2052 has the following block data:' in line

@@ -41,6 +41,12 @@ public final class FeatureRegionReads {
 
     /** WorldGenRegion.getChunk's message for a chunk outside the region. */
     private static final String OUTSIDE_REGION = "Requested chunk unavailable during world generation";
+    /**
+     * Lithium forks with {@code mixin.gen.chunk_region} (Radium/Canary) overwrite WorldGenRegion's
+     * getBlockState/getChunk and refuse a chunk outside the region with
+     * {@code NullPointerException("No chunk exists at " + chunkPos)} instead (as in forge-1.20.1).
+     */
+    private static final String LITHIUM_OUTSIDE_REGION = "No chunk exists at ";
     private static final long INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(10);
     private static final Logger LOGGER = LoggerFactory.getLogger("SuperChunk-Worldgen");
 
@@ -55,6 +61,10 @@ public final class FeatureRegionReads {
     public static boolean outsideRegion(Throwable t) {
         for (int depth = 0; t != null && depth < 16; depth++) {
             if (t instanceof IllegalStateException && OUTSIDE_REGION.equals(t.getMessage())) {
+                return true;
+            }
+            if (t.getClass() == NullPointerException.class && t.getMessage() != null
+                    && t.getMessage().startsWith(LITHIUM_OUTSIDE_REGION)) {
                 return true;
             }
             Throwable next = t instanceof ReportedException reported ? reported.getReport().getException() : t.getCause();

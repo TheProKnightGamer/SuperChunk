@@ -89,6 +89,15 @@ public class MixinThreadedAnvilChunkStorage implements IChunkSystemAccess {
         return ChunkType.LEVELCHUNK;
     }
 
+    /**
+     * SuperChunk: a flush save (/save-all flush, shutdown) also writes the full chunks that left the
+     * holder map on their way out, before the storage is flushed ({@link TheChunkSystem#saveFullChunksOutsideHolderMap}).
+     */
+    @Inject(method = "saveAllChunks(Z)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkMap;flushWorker()V"))
+    private void superchunk$saveChunksLeavingHolderMap(boolean flush, CallbackInfo ci) {
+        this.newSystem.saveFullChunksOutsideHolderMap();
+    }
+
     // NeoForge port: 1.21.1 ChunkMap has no `shouldDelayShutdown`; the closest is `hasWork()`.
     @ModifyReturnValue(method = "hasWork", at = @At("RETURN"))
     private boolean delayShutdown(boolean original) {

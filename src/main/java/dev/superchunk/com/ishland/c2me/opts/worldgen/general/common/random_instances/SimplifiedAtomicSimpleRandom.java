@@ -14,7 +14,11 @@ public class SimplifiedAtomicSimpleRandom extends LegacyRandomSource { // TODO [
 
     public SimplifiedAtomicSimpleRandom(long seed) {
         super(0);
-        this.seed = seed;
+        // SuperChunk: scramble like vanilla's LegacyRandomSource(long) (which calls setSeed). Upstream
+        // stored the raw seed, so a redirected source used without a reseed started a different
+        // sequence: GeodeFeature builds its NormalNoise from new LegacyRandomSource(worldSeed), and
+        // every amethyst geode came out a different shape than vanilla on the same seed.
+        this.setSeed(seed);
     }
 
     @Override

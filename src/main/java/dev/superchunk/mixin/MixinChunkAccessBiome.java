@@ -37,6 +37,8 @@ public abstract class MixinChunkAccessBiome {
         // Time the whole biome stage whenever the GPU backend is up, in BOTH offloadBiome
         // ON and OFF, so the ON-vs-OFF delta isolates the CPU climate work the GPU removed.
         long t0 = OpenCLBackend.isAvailable() ? System.nanoTime() : 0L;
+        // CPU: reuse each quart column's y-independent climate values (ClimateColumns).
+        boolean columns = dev.superchunk.worldgen.ClimateColumns.arm(sampler);
         try {
             original.call(resolver, sampler);
         } finally {
@@ -44,6 +46,9 @@ public abstract class MixinChunkAccessBiome {
             // dispatch. Recording the stat is best-effort and must never be able to
             // pre-empt the disarm (which would re-leak the armed Ctx.pending).
             BiomeClimateCache.endChunk();
+            if (columns) {
+                dev.superchunk.worldgen.ClimateColumns.disarm();
+            }
             if (t0 != 0L) {
                 GpuFillStats.recordBiomeStageTime(System.nanoTime() - t0);
             }

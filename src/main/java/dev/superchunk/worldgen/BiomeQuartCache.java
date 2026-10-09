@@ -55,8 +55,12 @@ public final class BiomeQuartCache {
     private static final int SLOTS = 4096;
     private static final int MASK = SLOTS - 1;
 
-    /** Returned by {@link #encode} for coordinates that do not fit the packed key. */
-    public static final long UNCACHEABLE = Long.MIN_VALUE;
+    /**
+     * Returned by {@link #encode} for coordinates that do not fit the packed key. Zero, like an empty
+     * slot: every real key carries a generation of 1..15 in its top four bits. ({@code Long.MIN_VALUE}
+     * was the key of quart (0, 0, 0) under generation 8, so that cell was never cached there.)
+     */
+    public static final long UNCACHEABLE = 0L;
 
     private static final int GEN_BITS = 4;
     private static final int GEN_MASK = (1 << GEN_BITS) - 1;
