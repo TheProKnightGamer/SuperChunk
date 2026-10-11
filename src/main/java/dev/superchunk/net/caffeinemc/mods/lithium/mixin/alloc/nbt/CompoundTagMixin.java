@@ -34,8 +34,14 @@ public class CompoundTagMixin {
             at = @At(value = "INVOKE", target = "Lnet/minecraft/nbt/CompoundTag;<init>(Ljava/util/Map;)V")
     )
     private static Map<String, Tag> useFasterCollection(Map<String, Tag> oldMap) {
-        return new Object2ObjectOpenHashMap<>();
+        // SuperChunk: sized for the typical compound (1-6 entries). The default (16 expected) allocates
+        // two 33-slot arrays per compound: 7% of all worldgen allocation, mostly chunk saving.
+        return new Object2ObjectOpenHashMap<>(SMALL_COMPOUND);
     }
+
+    /** Expected entries for a new compound: two 9-slot arrays, grown as needed. */
+    @org.spongepowered.asm.mixin.Unique
+    private static final int SMALL_COMPOUND = 4;
 
     @Redirect(
             method = "<init>()V",
@@ -72,7 +78,7 @@ public class CompoundTagMixin {
                 )
         )
         private static Map<String, Tag> useFasterCollection(Map<String, Tag> map) {
-            return new Object2ObjectOpenHashMap<>();
+            return new Object2ObjectOpenHashMap<>(4); // SuperChunk: see SMALL_COMPOUND above
         }
 
         @Redirect(

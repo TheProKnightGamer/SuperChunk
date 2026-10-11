@@ -93,10 +93,21 @@ public class CompiledDensityFunction extends SubCompiledDensityFunction {
             // GPU delegate forward, otherwise every per-chunk sampler would lose GPU
             // routing (the delegate is only attached to the pre-mapAll instance).
             mapped.c2me$copyGpuDelegateFrom(this);
+            mapped.superchunk$setOrigin(this.superchunk$origin());
             return mapped;
         } else {
             return this;
         }
+    }
+
+    /** SuperChunk cell sign skip: the generated class (instances of one class share the field order). */
+    public Class<?> superchunk$entryClass() {
+        return this.compiledEntry.getClass();
+    }
+
+    /** SuperChunk cell sign skip: this instance's field values, in the generated class's field order. */
+    public List<Object> superchunk$args() {
+        return this.compiledEntry.getArgs();
     }
 
 }

@@ -26,7 +26,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 //   x0y0z0..x1y1z1 -> noise000..noise111, result -> value.
 // lerp3 corner order matches: Mojmap noiseXYZ == Yarn x<X>y<Y>z<Z>.
 @Mixin(NoiseChunk.NoiseInterpolator.class)
-public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFastCacheLike, IOnDeviceInterpCache {
+public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFastCacheLike, IOnDeviceInterpCache,
+        dev.superchunk.worldgen.CellSignSkip.Corners {
 
     @Shadow @Final NoiseChunk this$0;
 
@@ -173,6 +174,17 @@ public abstract class MixinChunkNoiseSamplerDensityInterpolator implements IFast
         }
 
         return false;
+    }
+
+    /** SuperChunk cell sign skip: the current cell's corner range (set by selectCellYZ). */
+    @Override
+    public void superchunk$cornerRange(double[] out, int at) {
+        double min = Math.min(Math.min(Math.min(this.noise000, this.noise100), Math.min(this.noise010, this.noise110)),
+                Math.min(Math.min(this.noise001, this.noise101), Math.min(this.noise011, this.noise111)));
+        double max = Math.max(Math.max(Math.max(this.noise000, this.noise100), Math.max(this.noise010, this.noise110)),
+                Math.max(Math.max(this.noise001, this.noise101), Math.max(this.noise011, this.noise111)));
+        out[at] = min;
+        out[at + 1] = max;
     }
 
     // ---- SuperChunk: per-cell lerp tables (dev.superchunk.worldgen.LerpTables) ----

@@ -56,7 +56,7 @@ import org.spongepowered.asm.mixin.injection.At;
  * Kill switch: {@code -Dsuperchunk.worldgen.biomeCellPath=false}.
  */
 @Mixin(BiomeManager.class)
-public abstract class MixinBiomeManagerQuartCache {
+public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worldgen.BiomeCellLookup {
 
     @Unique
     private static final boolean SUPERCHUNK$ENABLED =
@@ -135,8 +135,29 @@ public abstract class MixinBiomeManagerQuartCache {
 
     @WrapMethod(method = "getBiome", require = 0)
     private Holder<Biome> superchunk$cellPathBiome(BlockPos pos, Operation<Holder<Biome>> original) {
-        if (!SUPERCHUNK$CELL_PATH || superchunk$fiddleCopy <= 0) {
+        Holder<Biome> biome = superchunk$cellPath(pos);
+        if (biome == null) {
             return original.call(pos); // the per-corner hook runs the copy self-check first
+        }
+        if (SUPERCHUNK$FIDDLE_VERIFY) {
+            Holder<Biome> vanilla = original.call(pos);
+            BiomeFiddleCache.recordCellVerify(pos.getX(), pos.getY(), pos.getZ(), biome, vanilla);
+            return vanilla;
+        }
+        return biome;
+    }
+
+    /** Direct callers (surface rules) take the cell path without the wrapper; verify keeps them on it. */
+    @Override
+    public Holder<Biome> superchunk$cellBiome(BlockPos pos) {
+        return SUPERCHUNK$FIDDLE_VERIFY ? null : superchunk$cellPath(pos);
+    }
+
+    /** The cell path's biome, or {@code null} when it does not apply (see {@link #superchunk$cellPathBiome}). */
+    @Unique
+    private Holder<Biome> superchunk$cellPath(BlockPos pos) {
+        if (!SUPERCHUNK$CELL_PATH || superchunk$fiddleCopy <= 0) {
+            return null;
         }
         int mode = superchunk$mode;
         if (mode == 0) {
@@ -146,23 +167,17 @@ public abstract class MixinBiomeManagerQuartCache {
         BiomeFiddleCache fiddles = superchunk$fiddles;
         if (mode < 0 || fiddles == null || superchunk$owner != Thread.currentThread()
                 || !superchunk$onlySuperChunkMixins()) {
-            return original.call(pos);
+            return null;
         }
         int x = pos.getX();
         int y = pos.getY();
         int z = pos.getZ();
         int corner = fiddles.nearestCorner(this.biomeZoomSeed, x, y, z);
         if (corner < 0) {
-            return original.call(pos);
+            return null;
         }
-        Holder<Biome> biome = superchunk$quartDirect(
+        return superchunk$quartDirect(
                 ((x - 2) >> 2) + (corner >> 2), ((y - 2) >> 2) + ((corner >> 1) & 1), ((z - 2) >> 2) + (corner & 1));
-        if (SUPERCHUNK$FIDDLE_VERIFY) {
-            Holder<Biome> vanilla = original.call(pos);
-            BiomeFiddleCache.recordCellVerify(x, y, z, biome, vanilla);
-            return vanilla;
-        }
-        return biome;
     }
 
     /** The quart memo of {@link #superchunk$cacheQuartBiome}, resolving misses on the source itself. */

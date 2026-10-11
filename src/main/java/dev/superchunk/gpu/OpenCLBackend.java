@@ -57,6 +57,12 @@ public final class OpenCLBackend {
      * {@link CLProgram#effectiveOptions(String)}, the single build-options choke point.
      */
     private static volatile boolean crDivide = false;
+
+    /**
+     * The NVIDIA ptxas optimization level flag ({@code -cl-nv-opt-level=N}) appended to every build
+     * this session, or {@code null}. Resolved once in {@link #init}; see {@link #nvOptLevelFlag()}.
+     */
+    private static volatile String nvOptLevelFlag = null;
     private static long context = NULL;
     private static long queue = NULL;
 
@@ -199,6 +205,7 @@ public final class OpenCLBackend {
             // cold recompile of every kernel.
             boolean crWant = Boolean.parseBoolean(System.getProperty("superchunk.gpu.crDivide", "true"));
             crDivide = crWant && picked.crDivideFp32();
+            nvOptLevelFlag = resolveNvOptLevelFlag(picked);
 
             if (!createContextAndQueue(picked)) {
                 return; // already logged
@@ -214,6 +221,8 @@ public final class OpenCLBackend {
                             + "CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT={}, -cl-fp32-correctly-rounded-divide-sqrt "
                             + "applied={} (-Dsuperchunk.gpu.crDivide={}).",
                     picked.crDivideFp32(), crDivide, crWant);
+            LOGGER.info("[SuperChunk-GPU] NVIDIA compiler options: cl_nv_compiler_options={}, ptxas level flag={}.",
+                    picked.nvCompilerOptions(), nvOptLevelFlag == null ? "driver default" : nvOptLevelFlag);
             LOGGER.info("[SuperChunk-GPU] OpenCL backend ready (context + queue created).");
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-GPU] OpenCL init failed — GPU disabled, CPU fallback.", t);
@@ -370,7 +379,9 @@ public final class OpenCLBackend {
         // honor the -cl-fp32-correctly-rounded-divide-sqrt build flag.
         long singleFpConfig = getDeviceInfoLong(device, CL_DEVICE_SINGLE_FP_CONFIG);
         boolean crDivideFp32 = (singleFpConfig & CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT) != 0L;
-        return new OpenCLDevice(platform, device, name, vendor, version, computeUnits, globalMem, fp64, crDivideFp32);
+        boolean nvCompilerOptions = extensions != null && extensions.contains("cl_nv_compiler_options");
+        return new OpenCLDevice(platform, device, name, vendor, version, computeUnits, globalMem, fp64, crDivideFp32,
+                nvCompilerOptions);
     }
 
     /** Picks a device per config: explicit indices, else fp64-preferred GPU, else first. */
@@ -570,6 +581,40 @@ public final class OpenCLBackend {
         return crDivide;
     }
 
+    /**
+     * NVIDIA fast compile: {@code -cl-nv-opt-level=N} when the device advertises
+     * {@code cl_nv_compiler_options}, else {@code null}. Read by {@link CLProgram#effectiveOptions},
+     * so the program caches key on it.
+     *
+     * <p>NVIDIA's OpenCL build is the front end (OpenCL C to PTX) plus ptxas (PTX to machine code),
+     * and ptxas is most of it: 61 of 74 s for one fused program. That is also why a disk-cache hit
+     * here (the cached "binary" is PTX) still costs nearly a cold build unless NVIDIA's own
+     * ComputeCache holds the machine code. The level only changes ptxas; the PTX the driver returns
+     * is the same size at every level. Measured 2026-10-10 on an RTX 3070, driver 595.91.07, cold
+     * vanilla world:
+     * <ul>
+     *   <li>driver default (3): boot 436 s, 520 s of compiling, fused program 81 s.</li>
+     *   <li><b>1 (default here)</b>: boot 313 s, 369 s of compiling, fused program 51 s; warm
+     *       pregen throughput unchanged within noise (r2048 85.5 vs 84 s, r1024 20 vs 21.5 s).</li>
+     *   <li>0: boot 229 s, 305 s of compiling, but warm pregens ran 23% slower.</li>
+     * </ul>
+     * Results are bit-exact at every level: the fp64 GPU-vs-vanilla self-test passes, the noise
+     * fill hashes of 1,490 chunks match the CPU, and compact-ids verify shows the same single known
+     * fp32 decide flip in 474M blocks as the driver default. {@code -Dsuperchunk.gpu.nvOptLevel=N}
+     * picks 0-3; -1 leaves the driver's default.
+     */
+    public static String nvOptLevelFlag() {
+        return nvOptLevelFlag;
+    }
+
+    private static String resolveNvOptLevelFlag(OpenCLDevice device) {
+        int level = Integer.getInteger("superchunk.gpu.nvOptLevel", 1);
+        if (!device.nvCompilerOptions() || level < 0 || level > 3) {
+            return null;
+        }
+        return "-cl-nv-opt-level=" + level;
+    }
+
     public static GpuConfig config() {
         return config;
     }
@@ -664,5 +709,6 @@ public final class OpenCLBackend {
         // Re-resolved from the next world's chosen device in init(); a different device
         // (multi-GPU / changed indices) may not advertise the cap.
         crDivide = false;
+        nvOptLevelFlag = null;
     }
 }

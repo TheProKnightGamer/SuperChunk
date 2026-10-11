@@ -112,7 +112,10 @@ chained after them picks every block of the batch (terrain, aquifer water and
 lava, ore veins) and reads back one byte per block, which the chunk is written
 from directly ("compact IDs", on by default with the GPU). Compiled program
 binaries are cached to disk, so the one-time JIT only recurs when your driver
-changes (warm boot is ~11–13 s; a cold cache takes several minutes). What
+changes (warm boot is ~11–13 s; a cold cache takes several minutes). On NVIDIA,
+where most of a build is ptxas, SuperChunk compiles at ptxas level 1
+(`-cl-nv-opt-level=1`): a cold boot on an RTX 3070 takes ~5 min instead of
+~7.5, with the same output and throughput (`-Dsuperchunk.gpu.nvOptLevel`). What
 shipped, the measurements, and what is next: [`GPU-AHEAD-PLAN.md`](GPU-AHEAD-PLAN.md).
 
 Main files live in `src/main/java/dev/superchunk/gpu/dfc/`.
@@ -171,6 +174,7 @@ depends only on its position and seed, two runs must agree chunk for chunk
 cache let the first chunk to compute an aquifer cell decide it for its neighbours where vanilla
 computes it per chunk (5–7 chunks per 4,882 differed); fixed 2026-09-25, see
 [`analysis/worldgen-big-2026-09-25.md`](analysis/worldgen-big-2026-09-25.md).
+`-Dsuperchunk.debug.surfaceHash=<file>` does the same after the surface pass.
 
 One deliberate difference from vanilla: when a datapack or mod feature reads a chunk
 farther away than world generation allows, vanilla fails the whole chunk (and the
@@ -201,6 +205,7 @@ Install the plain jar, not the `-core` one — that rides inside it.
 - `analysis/review-2026-09-25.md` — code and performance review: chunk-save, hang and compatibility fixes, quiet logging, remaining backlog
 - `analysis/jjthunder-freeze-2026-09-25.md` — diagnosis of a world freeze with the JJThunder To The Max datapack, and the 2026-09-26 follow-up (features reading too far are skipped instead of failing the chunk)
 - `analysis/worldgen-big-2026-09-25.md` — noise-fill CPU pass (lerp tables, bulk multiply, air-cell skip), the pregen hash check, and the aquifer cell cache exactness fix
+- `analysis/cpu-per-chunk-2026-10-11.md` — CPU cost per chunk: cell sign skip, shared corner columns and surface levels, region center chunk, lean surface writes, allocation; the surface hash check
 - `dist/README.md` — end-user install notes
 
 ## License

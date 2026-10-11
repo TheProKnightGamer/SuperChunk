@@ -45,6 +45,35 @@ public class SubCompiledDensityFunction implements DensityFunction {
      */
     private volatile dev.superchunk.com.ishland.c2me.opts.dfc.common.ast.AstNode sourceAst;
 
+    /**
+     * SuperChunk cell sign skip: the router-level instance this per-chunk copy was mapped from
+     * ({@code null} on the router-level instance itself). Lets a chunk find the source AST, which
+     * {@code mapAll} copies do not carry, without re-walking anything.
+     */
+    private volatile SubCompiledDensityFunction superchunk$origin;
+
+    /** SuperChunk: the instance carrying the source AST: the router-level origin, else this one. */
+    public SubCompiledDensityFunction superchunk$origin() {
+        SubCompiledDensityFunction origin = this.superchunk$origin;
+        return origin != null ? origin : this;
+    }
+
+    /** SuperChunk: record the router-level origin of a {@code mapAll} copy. */
+    public void superchunk$setOrigin(SubCompiledDensityFunction origin) {
+        this.superchunk$origin = origin;
+    }
+
+    /** SuperChunk cell sign skip: per-origin state, built once (see {@code CellSignSkip}). */
+    private volatile Object superchunk$cellSignTemplate;
+
+    public Object superchunk$cellSignTemplate() {
+        return this.superchunk$cellSignTemplate;
+    }
+
+    public void superchunk$setCellSignTemplate(Object template) {
+        this.superchunk$cellSignTemplate = template;
+    }
+
     /** SuperChunk: stash the compile-source AST (see {@link #sourceAst}). */
     public void c2me$setSourceAst(dev.superchunk.com.ishland.c2me.opts.dfc.common.ast.AstNode ast) {
         this.sourceAst = ast;

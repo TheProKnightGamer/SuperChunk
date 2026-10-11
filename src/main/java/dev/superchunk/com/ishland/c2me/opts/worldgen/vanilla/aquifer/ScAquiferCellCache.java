@@ -71,6 +71,9 @@ public final class ScAquiferCellCache {
             Math.max(STRIPES, Integer.getInteger("superchunk.worldgen.aquiferCellCacheSize", 1 << 18));
     private static final int MAX_PER_STRIPE = Math.max(1, MAX_TOTAL / STRIPES);
 
+    /** The same RandomState's shared preliminary surface levels (valid under the same proof). */
+    public final PreliminarySurfaceLevels surfaceLevels = new PreliminarySurfaceLevels();
+
     private final Long2ObjectLinkedOpenHashMap<Aquifer.FluidStatus>[] stripes;
     private final Object[] locks;
 

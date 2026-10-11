@@ -114,4 +114,7 @@ public class MinShortNode extends AbstractBinaryNode {
     protected void bytecodeGenMultiBody(InstructionAdapter m, int idx, int res1) {
         throw new UnsupportedOperationException();
     }
+
+    // SuperChunk: read access for the cell sign skip (dev.superchunk.worldgen.CellSignSkip).
+    public double getRightMin() { return this.rightMin; }
 }

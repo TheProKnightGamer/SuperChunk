@@ -107,7 +107,18 @@ Ranked by expected payoff (from `analysis/review-2026-09-25.md` and the GPU-mode
    subtrees, an inferred ~5–7× redundancy. This is the main GPU-capacity lever now that the GPU is
    the scarce resource at high worker counts.
 2. **Cold start** (M). Per-DF programs compile on the server thread, plus a redundant fused
-   per-chunk program: ~6 min with a cold cache, ~1–2 min is reachable.
+   per-chunk program: ~6 min with a cold cache, ~1–2 min is reachable. Measured 2026-10-10
+   (RTX 3070, driver 595, `tools/compilebench.c` on programs dumped with
+   `-Dsuperchunk.gpu.dumpProgramsTo`):
+   - Three ~2.9M-char programs are two-thirds of it: the two biggest per-DF programs and the
+     fused program. The per-DF ones served 200 dispatches before the fused program took over.
+   - ptxas is ~80% of each build, so the default is now `-cl-nv-opt-level=1`: cold boot 436 → 313 s,
+     same output and throughput. Level 0 was faster to build (229 s) but 23% slower to run.
+   - NVIDIA serializes builds within a process: 8 threads were no faster than 1.
+   - The disk cache holds PTX on NVIDIA, so a cache hit still runs ptxas unless NVIDIA's
+     ComputeCache has the machine code (SuperChunk's share there: ~94 MB).
+   - Next: build the per-DF programs of DFs the fused program will cover off the server thread
+     (or skip them), so the boot no longer waits for them.
 3. **Nether and End never batch** (M). Their chunks take the per-chunk path and get no compact ids
    (the aux capture needs a noise aquifer); routing them through the batcher is the first step.
 4. **Batching knobs** (S). A/B the batch window and a minimum K, and re-test column dedup
