@@ -118,5 +118,7 @@ public abstract class AbstractBinaryNode implements AstNode {
 
     protected abstract void bytecodeGenMultiBody(InstructionAdapter m, int idx, int res1);
 
-
+    // SuperChunk: read access for the cell sign skip (dev.superchunk.worldgen.CellSignSkip).
+    public AstNode getLeft() { return this.left; }
+    public AstNode getRight() { return this.right; }
 }

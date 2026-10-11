@@ -123,4 +123,10 @@ public class YClampedGradientNode implements AstNode {
     public int relaxedHashCode() {
         return this.hashCode();
     }
+
+    // SuperChunk: read access for the cell sign skip (dev.superchunk.worldgen.CellSignSkip).
+    public double getFromY() { return this.fromY; }
+    public double getToY() { return this.toY; }
+    public double getFromValue() { return this.fromValue; }
+    public double getToValue() { return this.toValue; }
 }

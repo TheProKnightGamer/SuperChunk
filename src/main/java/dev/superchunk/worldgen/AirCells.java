@@ -60,6 +60,11 @@ public final class AirCells {
         void superchunk$setAirCell(boolean air);
 
         boolean superchunk$airCell();
+
+        /** The cell sign skip proved every block of the current cell the default block. */
+        void superchunk$setSolidCell(boolean solid);
+
+        boolean superchunk$solidCell();
     }
 
     private static final AtomicLong CELLS = new AtomicLong();
@@ -74,6 +79,13 @@ public final class AirCells {
     public static boolean cellIsAir(NoiseChunk nc) {
         if (VERIFY) {
             CELLS.incrementAndGet();
+        }
+        // The cell sign skip already proved this cell non-positive and aquifer air, without values.
+        if (nc instanceof CellSignSkip.Chunk signed && signed.superchunk$takeProvenAir()) {
+            if (VERIFY) {
+                AIR_CELLS.incrementAndGet();
+            }
+            return true;
         }
         List<?> caches = ((Chunk) nc).superchunk$cellCaches();
         if (caches.size() != 1 || !(caches.get(0) instanceof CellValues values)) {

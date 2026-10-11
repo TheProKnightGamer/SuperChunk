@@ -363,4 +363,11 @@ public class RangeChoiceNode implements AstNode {
 
         return result;
     }
+
+    // SuperChunk: read access for the cell sign skip (dev.superchunk.worldgen.CellSignSkip).
+    public AstNode getInput() { return this.input; }
+    public double getMinInclusive() { return this.minInclusive; }
+    public double getMaxExclusive() { return this.maxExclusive; }
+    public AstNode getWhenInRange() { return this.whenInRange; }
+    public AstNode getWhenOutOfRange() { return this.whenOutOfRange; }
 }

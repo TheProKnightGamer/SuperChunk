@@ -73,12 +73,17 @@ public abstract class MixinSurfaceColumnMemo {
     private int superchunk$z = Integer.MIN_VALUE;
     @Unique
     private boolean superchunk$usable;
+    /** {@link dev.superchunk.worldgen.ProtoChunkWrites}: the chunk's heightmaps, or null for the original write. */
+    @Unique
+    private net.minecraft.world.level.levelgen.Heightmap[] superchunk$heightmaps;
 
     @Unique
     private void superchunk$initFor(ChunkAccess chunk) {
         this.superchunk$chunk = chunk;
         this.superchunk$usable = chunk.getClass() == ProtoChunk.class
                 && ((ProtoChunk) chunk).getBelowZeroRetrogen() == null;
+        this.superchunk$heightmaps = this.superchunk$usable
+                ? dev.superchunk.worldgen.ProtoChunkWrites.bind((ProtoChunk) chunk) : null;
         if (this.superchunk$usable) {
             this.superchunk$minBuild = chunk.getMinBuildHeight();
             int h = chunk.getHeight();
@@ -154,7 +159,12 @@ public abstract class MixinSurfaceColumnMemo {
             require = 0)
     private BlockState superchunk$memoSet(ChunkAccess chunk, BlockPos pos, BlockState state, boolean isMoving,
                                           Operation<BlockState> original) {
-        BlockState old = original.call(chunk, pos, state, isMoving);
+        net.minecraft.world.level.levelgen.Heightmap[] maps = this.superchunk$heightmaps;
+        int y = pos.getY();
+        BlockState old = maps != null && chunk == this.superchunk$chunk
+                && y >= this.superchunk$minBuild && y - this.superchunk$minBuild < this.superchunk$memo.length
+                ? dev.superchunk.worldgen.ProtoChunkWrites.set((ProtoChunk) chunk, maps, pos, state)
+                : original.call(chunk, pos, state, isMoving);
         if (SUPERCHUNK$ENABLED && this.superchunk$usable && chunk == this.superchunk$chunk
                 && pos.getX() == this.superchunk$x && pos.getZ() == this.superchunk$z) {
             int idx = pos.getY() - this.superchunk$minBuild;

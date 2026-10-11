@@ -174,6 +174,7 @@ depends only on its position and seed, two runs must agree chunk for chunk
 cache let the first chunk to compute an aquifer cell decide it for its neighbours where vanilla
 computes it per chunk (5–7 chunks per 4,882 differed); fixed 2026-09-25, see
 [`analysis/worldgen-big-2026-09-25.md`](analysis/worldgen-big-2026-09-25.md).
+`-Dsuperchunk.debug.surfaceHash=<file>` does the same after the surface pass.
 
 One deliberate difference from vanilla: when a datapack or mod feature reads a chunk
 farther away than world generation allows, vanilla fails the whole chunk (and the
@@ -204,6 +205,7 @@ Install the plain jar, not the `-core` one — that rides inside it.
 - `analysis/review-2026-09-25.md` — code and performance review: chunk-save, hang and compatibility fixes, quiet logging, remaining backlog
 - `analysis/jjthunder-freeze-2026-09-25.md` — diagnosis of a world freeze with the JJThunder To The Max datapack, and the 2026-09-26 follow-up (features reading too far are skipped instead of failing the chunk)
 - `analysis/worldgen-big-2026-09-25.md` — noise-fill CPU pass (lerp tables, bulk multiply, air-cell skip), the pregen hash check, and the aquifer cell cache exactness fix
+- `analysis/cpu-per-chunk-2026-10-11.md` — CPU cost per chunk: cell sign skip, shared corner columns and surface levels, region center chunk, lean surface writes, allocation; the surface hash check
 - `dist/README.md` — end-user install notes
 
 ## License

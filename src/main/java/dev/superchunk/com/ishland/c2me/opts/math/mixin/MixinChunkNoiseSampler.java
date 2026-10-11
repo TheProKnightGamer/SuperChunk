@@ -43,6 +43,20 @@ public class MixinChunkNoiseSampler implements dev.superchunk.worldgen.AirCells.
         return this.superchunk$airCell;
     }
 
+    /** SuperChunk cell sign skip: a proven-solid, vein-free cell reads no interpolator either. */
+    @org.spongepowered.asm.mixin.Unique
+    private boolean superchunk$solidCell;
+
+    @Override
+    public void superchunk$setSolidCell(boolean solid) {
+        this.superchunk$solidCell = solid;
+    }
+
+    @Override
+    public boolean superchunk$solidCell() {
+        return this.superchunk$solidCell;
+    }
+
     @Inject(method = "<init>", at = @At("RETURN"))
     private void postInit(CallbackInfo ci) {
         this.interpolators = new ObjectArrayList<>(this.interpolators);
@@ -50,7 +64,7 @@ public class MixinChunkNoiseSampler implements dev.superchunk.worldgen.AirCells.
 
     @Redirect(method = "updateForX", at = @At(value = "INVOKE", target = "Ljava/util/List;forEach(Ljava/util/function/Consumer;)V"))
     private void replaceIterationX(List<NoiseChunk.NoiseInterpolator> instance, Consumer<NoiseChunk.NoiseInterpolator> consumer, int blockX, double deltaX) {
-        if (this.superchunk$airCell && !dev.superchunk.worldgen.AirCells.VERIFY) {
+        if ((this.superchunk$airCell && !dev.superchunk.worldgen.AirCells.VERIFY) || this.superchunk$solidCell) {
             return;
         }
         if (instance == this.interpolators && instance instanceof ObjectArrayList<NoiseChunk.NoiseInterpolator> list) {
@@ -66,7 +80,7 @@ public class MixinChunkNoiseSampler implements dev.superchunk.worldgen.AirCells.
 
     @Redirect(method = "updateForY", at = @At(value = "INVOKE", target = "Ljava/util/List;forEach(Ljava/util/function/Consumer;)V"))
     private void replaceIterationY(List<NoiseChunk.NoiseInterpolator> instance, Consumer<NoiseChunk.NoiseInterpolator> consumer, int blockY, double deltaY) {
-        if (this.superchunk$airCell && !dev.superchunk.worldgen.AirCells.VERIFY) {
+        if ((this.superchunk$airCell && !dev.superchunk.worldgen.AirCells.VERIFY) || this.superchunk$solidCell) {
             return;
         }
         if (instance == this.interpolators && instance instanceof ObjectArrayList<NoiseChunk.NoiseInterpolator> list) {
@@ -82,7 +96,7 @@ public class MixinChunkNoiseSampler implements dev.superchunk.worldgen.AirCells.
 
     @Redirect(method = "updateForZ", at = @At(value = "INVOKE", target = "Ljava/util/List;forEach(Ljava/util/function/Consumer;)V"))
     private void replaceIterationZ(List<NoiseChunk.NoiseInterpolator> instance, Consumer<NoiseChunk.NoiseInterpolator> consumer, int blockZ, double deltaZ) {
-        if (this.superchunk$airCell && !dev.superchunk.worldgen.AirCells.VERIFY) {
+        if ((this.superchunk$airCell && !dev.superchunk.worldgen.AirCells.VERIFY) || this.superchunk$solidCell) {
             return;
         }
         if (instance == this.interpolators && instance instanceof ObjectArrayList<NoiseChunk.NoiseInterpolator> list) {

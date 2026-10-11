@@ -38,6 +38,10 @@ public class MixinNoiseConfig {
         if ((Object) this instanceof dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCellCache.Owner owner) {
             owner.superchunk$decideCellSharing(this.router);
         }
+        // SuperChunk: cell-corner column sharing, decided from the vanilla router too.
+        if ((Object) this instanceof dev.superchunk.worldgen.CornerColumns.Owner corners) {
+            corners.superchunk$decideCornerSharing(this.router);
+        }
         // SuperChunk: biome fill's per-column climate reuse, decided from the vanilla router too.
         final byte superchunk$climateColumns = dev.superchunk.worldgen.ClimateColumns.decide(this.router);
         Reference2ReferenceMap<DensityFunction, DensityFunction> tempCache = new Reference2ReferenceOpenHashMap<>();

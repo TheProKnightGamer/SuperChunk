@@ -112,6 +112,58 @@ public final class AquiferCellSharing {
         return null;
     }
 
+    /**
+     * Null when chunks may share the cell-corner columns of every {@code interpolated} function of
+     * the router ({@code dev.superchunk.worldgen.CornerColumns}); otherwise why not. A corner column
+     * is read at a quart-aligned (x, z) down every cell row, through the asking chunk's caches: the
+     * same conditions as the preliminary surface columns ({@link Site#COLUMNS}). Every function of the
+     * router is walked to find the interpolated ones, so an unknown function anywhere refuses.
+     */
+    public static String cornerReason(NoiseRouter r) {
+        Walk walk = new Walk();
+        List<DensityFunction> interpolated = new ArrayList<>();
+        Map<DensityFunction, Boolean> seen = new IdentityHashMap<>();
+        DensityFunction[] fields = {r.barrierNoise(), r.fluidLevelFloodednessNoise(), r.fluidLevelSpreadNoise(),
+                r.lavaNoise(), r.temperature(), r.vegetation(), r.continents(), r.erosion(), r.depth(), r.ridges(),
+                r.initialDensityWithoutJaggedness(), r.finalDensity(), r.veinToggle(), r.veinRidged(), r.veinGap()};
+        for (DensityFunction df : fields) {
+            String why = collectInterpolated(df, interpolated, seen);
+            if (why != null) {
+                return why;
+            }
+        }
+        for (DensityFunction marker : interpolated) {
+            String why = walk.check(((DensityFunctions.Marker) marker).wrapped(), Site.COLUMNS);
+            if (why != null) {
+                return "interpolated function " + why;
+            }
+        }
+        return null;
+    }
+
+    private static String collectInterpolated(DensityFunction df, List<DensityFunction> out, Map<DensityFunction, Boolean> seen) {
+        if (seen.put(df, Boolean.TRUE) != null) {
+            return null;
+        }
+        if (df instanceof DensityFunctions.Marker marker && marker.type() == DensityFunctions.Marker.Type.Interpolated) {
+            out.add(df);
+        }
+        if (df instanceof DensityFunctions.BeardifierOrMarker) {
+            return null; // a leaf: only an interpolated one matters, and the walk above refuses it there
+        }
+        List<DensityFunction> children = children(df);
+        if (children == null) {
+            return "has a density function SuperChunk does not know (" + df.getClass().getName() + ")";
+        }
+        for (DensityFunction child : children) {
+            String why = collectInterpolated(child, out, seen);
+            if (why != null) {
+                return why;
+            }
+        }
+        return null;
+    }
+
     private static final class Walk {
         private static final String OK = "";
         // Routers are DAGs (holders reused all over the splines): memoize per node.

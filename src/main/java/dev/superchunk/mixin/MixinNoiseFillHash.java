@@ -81,6 +81,51 @@ public abstract class MixinNoiseFillHash {
     }
 
     @Unique
+    private static final String SUPERCHUNK$SURFACE_PATH = System.getProperty("superchunk.debug.surfaceHash");
+
+    /**
+     * Test hook: {@code -Dsuperchunk.debug.surfaceHash=<file>} appends {@code "cx cz hash"} after each
+     * chunk's surface pass: every block state and the two worldgen heightmaps. Like the fill, the
+     * surface of a chunk depends only on its position, so two runs must agree chunk by chunk
+     * ({@code tools/noisehashdiff.py} compares the files).
+     */
+    @Inject(method = "buildSurface(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/chunk/ChunkAccess;)V",
+            at = @At("RETURN"))
+    private void superchunk$hashSurface(net.minecraft.server.level.WorldGenRegion level, StructureManager structureManager,
+                                        RandomState randomState, ChunkAccess chunk,
+                                        org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+        if (SUPERCHUNK$SURFACE_PATH == null) {
+            return;
+        }
+        long h = 0xCBF29CE484222325L;
+        for (LevelChunkSection section : chunk.getSections()) {
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        h = superchunk$mix(h, Block.BLOCK_STATE_REGISTRY.getId(section.getBlockState(x, y, z)));
+                    }
+                }
+            }
+        }
+        for (Heightmap.Types type : new Heightmap.Types[]{Heightmap.Types.OCEAN_FLOOR_WG, Heightmap.Types.WORLD_SURFACE_WG}) {
+            for (long word : chunk.getOrCreateHeightmapUnprimed(type).getRawData()) {
+                h = superchunk$mix(h, word);
+            }
+        }
+        superchunk$appendTo(SUPERCHUNK$SURFACE_PATH, chunk.getPos().x + " " + chunk.getPos().z + " " + Long.toHexString(h) + "\n");
+    }
+
+    @Unique
+    private static synchronized void superchunk$appendTo(String path, String line) {
+        try {
+            Files.writeString(Path.of(path), line, StandardCharsets.US_ASCII,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (IOException ignored) {
+            // test hook: a missed line shows up as a missing chunk in the comparison
+        }
+    }
+
+    @Unique
     private static long superchunk$mix(long h, long v) {
         return (h ^ v) * 0x100000001B3L;
     }

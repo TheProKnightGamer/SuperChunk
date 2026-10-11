@@ -47,6 +47,10 @@ public abstract class MixinNoiseChunkVeinCensus {
             DensityFunction veinToggle, DensityFunction veinRidged, DensityFunction veinGap,
             PositionalRandomFactory random, Operation<NoiseChunk.BlockStateFiller> original) {
         if (!SUPERCHUNK$CENSUS) {
+            // The cell sign skip bounds this toggle per cell to prove a solid cell vein-free.
+            if ((Object) this instanceof dev.superchunk.worldgen.CellSignSkip.Chunk signed) {
+                signed.superchunk$setVeinToggle(veinToggle);
+            }
             // Not census mode: the unchanged vanilla filler, fed a factory that reuses one
             // generator on this thread instead of allocating one per vein-band block.
             return original.call(veinToggle, veinRidged, veinGap, dev.superchunk.worldgen.ReusableOreRandom.wrap(random));

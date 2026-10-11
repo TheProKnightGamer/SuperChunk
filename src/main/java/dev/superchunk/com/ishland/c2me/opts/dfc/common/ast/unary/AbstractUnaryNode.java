@@ -79,4 +79,7 @@ public abstract class AbstractUnaryNode implements AstNode {
         String operandMethod = context.newMultiMethod(this.operand);
         context.callDelegateMulti(m, operandMethod);
     }
+
+    // SuperChunk: read access for the cell sign skip (dev.superchunk.worldgen.CellSignSkip).
+    public AstNode getOperand() { return this.operand; }
 }

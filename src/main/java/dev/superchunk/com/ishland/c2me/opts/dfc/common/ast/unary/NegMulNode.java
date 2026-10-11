@@ -90,4 +90,7 @@ public class NegMulNode extends AbstractUnaryNode {
         });
         m.areturn(Type.VOID_TYPE);
     }
+
+    // SuperChunk: read access for the cell sign skip (dev.superchunk.worldgen.CellSignSkip).
+    public double getNegMul() { return this.negMul; }
 }
