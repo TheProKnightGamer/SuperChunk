@@ -65,6 +65,16 @@ public final class CLProgramCache {
     private static final java.util.concurrent.atomic.LongAdder memHits = new java.util.concurrent.atomic.LongAdder();
     private static final java.util.concurrent.atomic.LongAdder diskHits = new java.util.concurrent.atomic.LongAdder();
     private static final java.util.concurrent.atomic.LongAdder builds = new java.util.concurrent.atomic.LongAdder();
+    /** Summed wall time of the source compiles behind {@link #builds} (concurrent builds overlap). */
+    private static final java.util.concurrent.atomic.LongAdder buildNanos = new java.util.concurrent.atomic.LongAdder();
+
+    /**
+     * Diagnostic (default unset, {@code -Dsuperchunk.gpu.dumpProgramsTo=<dir>}): every program
+     * compiled from source is also written there as {@code <key>.cl} plus its effective build
+     * options in {@code <key>.opts}, so the driver's compile can be timed and tuned outside the game
+     * ({@code tools/compilebench.c}).
+     */
+    private static final String DUMP_DIR = System.getProperty("superchunk.gpu.dumpProgramsTo", "").trim();
 
     /**
      * Largest fully-inlined program the driver is asked to compile, in MB of source including the
@@ -161,11 +171,17 @@ public final class CLProgramCache {
                 if (tooLargeToBuild(key, source)) {
                     return null; // CPU fallback, as for a failed build
                 }
+                final long buildStart = System.nanoTime();
                 program = CLProgram.build(source, opt);
+                final long buildTime = System.nanoTime() - buildStart;
+                dump(key, source, opt);
                 if (program == null) {
                     return null; // build failed -> CPU fallback
                 }
                 builds.increment();
+                buildNanos.add(buildTime);
+                LOGGER.info("[SuperChunk-GPU] compiled a {}-char program in {} ms", source.length(),
+                        buildTime / 1_000_000L);
                 byte[] bin = program.getBinary();
                 if (bin != null) {
                     writeDisk(key, bin);
@@ -240,9 +256,24 @@ public final class CLProgramCache {
 
     /** Logs cache effectiveness. */
     public static void logStats(String when) {
-        LOGGER.info("[SuperChunk-GPU] program cache ({}): distinct kernels built={}, "
+        LOGGER.info("[SuperChunk-GPU] program cache ({}): distinct kernels built={} ({} s of compiling), "
                         + "in-memory dedup hits={}, disk-binary hits={} (unique programs cached={})",
-                when, builds.sum(), memHits.sum(), diskHits.sum(), MEM.size());
+                when, builds.sum(), buildNanos.sum() / 1_000_000_000L, memHits.sum(), diskHits.sum(), MEM.size());
+    }
+
+    /** {@link #DUMP_DIR}: best effort, never fails a build. */
+    private static void dump(String key, String source, String options) {
+        if (DUMP_DIR.isEmpty()) {
+            return;
+        }
+        try {
+            Path dir = Path.of(DUMP_DIR);
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve(key + ".cl"), source);
+            Files.writeString(dir.resolve(key + ".opts"), options);
+        } catch (Throwable t) {
+            LOGGER.debug("[SuperChunk-GPU] could not dump program {}", key, t);
+        }
     }
 
     // ---- disk helpers ----

@@ -112,7 +112,10 @@ chained after them picks every block of the batch (terrain, aquifer water and
 lava, ore veins) and reads back one byte per block, which the chunk is written
 from directly ("compact IDs", on by default with the GPU). Compiled program
 binaries are cached to disk, so the one-time JIT only recurs when your driver
-changes (warm boot is ~11–13 s; a cold cache takes several minutes). What
+changes (warm boot is ~11–13 s; a cold cache takes several minutes). On NVIDIA,
+where most of a build is ptxas, SuperChunk compiles at ptxas level 1
+(`-cl-nv-opt-level=1`): a cold boot on an RTX 3070 takes ~5 min instead of
+~7.5, with the same output and throughput (`-Dsuperchunk.gpu.nvOptLevel`). What
 shipped, the measurements, and what is next: [`GPU-AHEAD-PLAN.md`](GPU-AHEAD-PLAN.md).
 
 Main files live in `src/main/java/dev/superchunk/gpu/dfc/`.

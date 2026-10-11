@@ -162,6 +162,8 @@ public final class CLProgram implements AutoCloseable {
         StringBuilder sb = new StringBuilder(options == null ? "" : options);
         addFlag(sb, OpenCLBackend.crDivideApplied(), CR_DIVIDE_FLAG);
         addFlag(sb, OPT_DISABLE, OPT_DISABLE_FLAG);
+        String nvOptLevel = OpenCLBackend.nvOptLevelFlag();
+        addFlag(sb, nvOptLevel != null, nvOptLevel);
         // Per-program noinline opt-out: a caller passing FORCE_INLINE_MARKER keeps its helpers
         // inlined even when the global noinlineHelpers flag is on. The marker stays in the
         // options string (a harmless -D define), so the mem/disk cache key differs from the

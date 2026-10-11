@@ -18,6 +18,9 @@ package dev.superchunk.gpu;
  *                        bit {@code 1<<7}) — i.e. the device supports the
  *                        {@code -cl-fp32-correctly-rounded-divide-sqrt} build flag that
  *                        forces IEEE-correctly-rounded fp32 divide/sqrt (spline-drift lever)
+ * @param nvCompilerOptions whether the device advertises NVIDIA's {@code cl_nv_compiler_options}
+ *                        extension, which defines the {@code -cl-nv-*} build options (among them
+ *                        {@code -cl-nv-opt-level}, the ptxas optimization level)
  */
 public record OpenCLDevice(
         long platform,
@@ -28,15 +31,17 @@ public record OpenCLDevice(
         int maxComputeUnits,
         long globalMemBytes,
         boolean fp64,
-        boolean crDivideFp32
+        boolean crDivideFp32,
+        boolean nvCompilerOptions
 ) {
     /** Human-readable one-line caps summary for logging. */
     public String describe() {
         return String.format(
-                "%s [%s] | %s | CU=%d | mem=%.1f GiB | fp64=%s | crDivideFp32=%s",
+                "%s [%s] | %s | CU=%d | mem=%.1f GiB | fp64=%s | crDivideFp32=%s | nvCompilerOptions=%s",
                 name, vendor, openclVersion, maxComputeUnits,
                 globalMemBytes / (1024.0 * 1024.0 * 1024.0),
                 fp64 ? "yes" : "no",
-                crDivideFp32 ? "yes" : "no");
+                crDivideFp32 ? "yes" : "no",
+                nvCompilerOptions ? "yes" : "no");
     }
 }
