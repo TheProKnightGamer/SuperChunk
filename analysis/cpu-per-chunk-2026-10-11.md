@@ -65,7 +65,7 @@ every block of the cell at once.
   - the chunk has more than one cell cache;
   - the aquifer is not vanilla's noise aquifer;
   - another mod hooks the fill (`BlockFillHooks`);
-  - GPU routing is on;
+  - on-device interpolation is on;
   - a node has no bound.
 
 Overworld, radius 512: 88.2% of cells decided (28% solid, 60% air); 76% of the solid ones are
@@ -98,8 +98,8 @@ A chunk fills 25 corner columns per interpolator, but 9 are shared with neighbou
 
 `fillSlice` then copies a column another chunk computed and publishes the ones it computes. The
 table is direct-mapped and holds immutable entries (key and values) with release/acquire
-publication. It is sized from the heap: 2^16 entries (≤ 29 MB) from 6 GB. Unblended, CPU-routed
-chunks only.
+publication. It is sized from the heap: 2^16 entries (≤ 29 MB) from 6 GB. Unblended chunks only;
+GPU routing is allowed (see "GPU mode" below).
 
 32.5% of columns were shared at radius 512 (the ceiling is 36%).
 
@@ -200,5 +200,38 @@ package shows up as untracked, ready to add.
 - Remaining allocation:
   - the scheduler's absolute dependency arrays (`KeyStatusPair` + `ChunkPos`, ~6%);
   - biome fill's `TargetPoint` (3%).
-- The cell sign skip and corner sharing are off in GPU mode. That mode's fill has consumers (compact
-  ids) these were not tested with.
+
+## GPU mode (2026-10-17)
+
+The first version stood the cell sign skip and corner sharing down whenever GPU routing was on,
+untested. They now run there too.
+
+- The cell cache fill never reaches the GPU. Its 4x8x4 points are off the chunk's corner lattice, so
+  `ChunkGridCache` rejects them, and 128 points is under `GpuDfcDelegate`'s direct-dispatch floor
+  (1024). The final density's GPU delegate therefore leaves it to the same CPU bytecode as with the
+  GPU off. `CellSignSkip.bind` accepts a delegate only when that holds for the cell size
+  (`GpuDfcDelegate.cpuFillsOffLattice`); very large custom cells or `-Dsuperchunk.gpu.liveServeAll`
+  still stand it down. The vein toggle is read per block through `compute`, which never uses the
+  delegate.
+- Compact ids `on`: consumed chunks skip the fill, so neither shortcut runs there. The hybrid fill's
+  CPU cells are the ones holding a beard-sentinel block, and sentinels are written for exactly the
+  NoiseChunk's beard box, the box the cell sign skip reads. So no hybrid CPU cell is ever decided,
+  and the hybrid path never evaluates the material rules over a bound.
+- Corner sharing copies columns the GPU computed; skipping a `fillArray` only means the grid cache
+  serves fewer columns.
+
+Light test, RTX 3070 (shared with other GPU jobs), radius 256, seed -987654321:
+
+| Check | Compared | Mismatches |
+|---|---:|---:|
+| Cell sign verify, compact ids `verify` (89.1% decided) | 131,885,952 blocks | 0 |
+| Cell sign solid answers | 30,106,496 blocks | 0 |
+| Shared corner columns, recomputed | 96,985 columns | 0 |
+| Shared surface levels / air cells | 286,325 / 88,749,952 | 0 |
+| Noise-fill hash, compact ids `off`, switches on vs off | 1,490 chunks (76 with structure adaptation) | 0 |
+| Surface hash, same legs | 1,490 chunks | 0 |
+
+Compact-consume verify showed one stone->air flip in 143.2M blocks, the known fp32 decide flip: the
+same position and counts appeared in a run where the cell sign skip did not engage at all. With the
+GPU defaults (compact ids `on`) the skip saw 37,870 cells at radius 256 (77% decided): the chunks
+that take the original fill, plus the hybrid fills' CPU cells, which stay undecided.

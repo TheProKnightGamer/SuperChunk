@@ -65,6 +65,15 @@ public final class GpuDfcDelegate {
      */
     static final int MIN_DIRECT_DISPATCH_N = 1024;
 
+    /**
+     * Whether {@link #fill} hands an {@code n}-point fill that is off the chunk's corner lattice
+     * (a cell cache's per-block fill) to the CPU bytecode without a dispatch: the grid cache
+     * cannot serve it and it is under {@link #MIN_DIRECT_DISPATCH_N}.
+     */
+    public static boolean cpuFillsOffLattice(int n) {
+        return !LIVE_SERVE_ALL && n < MIN_DIRECT_DISPATCH_N;
+    }
+
     /** One-shot flag so this DF's FIRST gate rejection is logged (debug) for observability. */
     private volatile boolean gateRejectLogged = false;
 
