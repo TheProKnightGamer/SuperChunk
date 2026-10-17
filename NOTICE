@@ -1,0 +1,100 @@
+SuperChunk
+==========
+
+SuperChunk is a single, standalone NeoForge 1.21.1 mod created by merging the
+source of several existing Minecraft mods, plus an original GPU/OpenCL worldgen
+offload written from scratch.
+
+Because it incorporates LGPL-3.0 licensed source, the COMBINED WORK as a whole is
+distributed under the GNU Lesser General Public License, version 3.0 (see the
+LICENSE file). The MIT-licensed components below remain under the MIT License; the
+full MIT permission notice required by that license is reproduced at the end of
+this file.
+
+This NOTICE exists to preserve the copyright and license attributions of the
+upstream projects, as required by their licenses. Do not remove it.
+
+--------------------------------------------------------------------------------
+Incorporated components
+--------------------------------------------------------------------------------
+
+C2ME (Concurrent Chunk Management Engine) — multithreaded chunk gen/IO + the
+  density-function compiler.
+    Upstream:  https://github.com/RelativityMC/C2ME-fabric  (NeoForge port)
+    License:   MIT
+    Copyright: (c) 2021-2024 ishland
+
+FlowSched — task scheduler vendored with C2ME (com.ishland.flowsched).
+    Upstream:  ishland / FlowSched
+    License:   MIT
+    Copyright: (c) 2023 ishland
+
+VMP (Very Many Players) — area-based player chunk watching/sending.
+    Upstream:  https://github.com/RelativityMC/VMP-fabric
+    License:   MIT
+    Copyright: (c) 2021-2023 ishland
+
+Lithium — general game-logic optimizations.
+    Upstream:  https://github.com/CaffeineMC/lithium  (NeoForge port)
+    License:   GNU LGPL-3.0
+    Copyright: (c) CaffeineMC and the Lithium contributors
+
+ScalableLux — Starlight-based lighting engine.
+    Upstream:  ScalableLux (a fork of Starlight)
+    License:   GNU LGPL-3.0
+    Copyright: (c) the ScalableLux contributors; based on Starlight,
+               (c) Spottedleaf and contributors
+
+Noisium (forked) — worldgen block-storage optimizations.
+    Upstream:  https://github.com/steveplays28/noisium  (forked)
+    License:   GNU LGPL-3.0-or-later
+    Copyright: (c) 2023-present Darion Spaargaren (steveplays28)
+
+--------------------------------------------------------------------------------
+Original work
+--------------------------------------------------------------------------------
+
+GPU/OpenCL worldgen offload (package dev.superchunk.gpu and edits under
+com.ishland.c2me.opts.dfc) — written from scratch for SuperChunk; NOT derived
+from any third-party OpenCL worldgen implementation. Licensed, as part of the
+combined work, under GNU LGPL-3.0.
+    Copyright: (c) 2026 the SuperChunk authors
+
+--------------------------------------------------------------------------------
+Licensing summary
+--------------------------------------------------------------------------------
+
+- The combined/derivative work is distributed under GNU LGPL-3.0 (see LICENSE).
+  LGPL-3.0 is supplemented on top of the GNU GPL-3.0; the full text of both is
+  available at https://www.gnu.org/licenses/lgpl-3.0.html and
+  https://www.gnu.org/licenses/gpl-3.0.html .
+- The complete corresponding source code must be made available to anyone who
+  receives a binary, per LGPL-3.0.
+- The MIT-licensed components (C2ME, FlowSched, VMP) retain their MIT license; the
+  notice below satisfies the MIT requirement to include the copyright and
+  permission notice.
+- Minecraft itself is not included or redistributed; SuperChunk requires the
+  user's own licensed copy of Minecraft / NeoForge.
+
+--------------------------------------------------------------------------------
+MIT License (applies to the MIT-licensed components listed above:
+C2ME — (c) 2021-2024 ishland; FlowSched — (c) 2023 ishland; VMP — (c) 2021-2023 ishland)
+--------------------------------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

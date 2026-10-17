@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.superchunk.com.ishland.vmp.mixins",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "superchunk.refmap.json",
+  "plugin": "dev.superchunk.SuperChunkMixinPlugin",
+  "mixinPriority": 1050,
+  "mixins": [
+    "playerwatching.MixinChunkFilter",
+    "playerwatching.MixinServerPlayerEntity",
+    "playerwatching.MixinThreadedAnvilChunkStorage"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

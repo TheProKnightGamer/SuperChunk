@@ -1,0 +1,17 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin",
+  "refmap": "superchunk.refmap.json",
+  "plugin": "dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.MixinPlugin",
+  "mixins": [
+    "aquifer.MixinAquiferSamplerImpl",
+    "aquifer.MixinNoiseChunkCellCache",
+    "aquifer.MixinRandomStateCellCache",
+    "jigsaw.MixinJigsawPlacement",
+    "jigsaw.MixinJigsawPlacementPlacer",
+    "jigsaw.MixinJigsawPlacementPlacerSkipBlocked",
+    "structure_weight_sampler.MixinStructureWeightSampler",
+    "the_end_biome_cache.MixinTheEndBiomeSource"
+  ]
+}

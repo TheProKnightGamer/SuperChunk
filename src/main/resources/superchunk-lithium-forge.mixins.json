@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "dev.superchunk.net.caffeinemc.mods.lithium.forge.mixin",
+  "refmap": "superchunk.refmap.json",
+  "plugin": "dev.superchunk.net.caffeinemc.mods.lithium.mixin.LithiumMixinPlugin",
+  "compatibilityLevel": "JAVA_17",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "conformVisibility": true
+  },
+  "mixins": [
+    "block.hopper.LevelMixin",
+    "util.inventory_change_listening.ChestBlockEntityMixin"
+  ],
+  "client": []
+}

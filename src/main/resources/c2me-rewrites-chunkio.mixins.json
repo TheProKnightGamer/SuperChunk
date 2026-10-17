@@ -1,0 +1,12 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.rewrites.chunkio.mixin",
+  "plugin": "dev.superchunk.com.ishland.c2me.base.common.ModuleMixinPlugin",
+  "refmap": "superchunk.refmap.json",
+  "mixins": [
+    "MixinSerializingRegionBasedStorageIo",
+    "MixinStorageIoWorker",
+    "MixinVersionedChunkStorage"
+  ]
+}

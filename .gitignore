@@ -1,0 +1,45 @@
+# eclipse
+bin
+*.launch
+.settings
+.metadata
+.classpath
+.project
+
+# idea
+out
+*.ipr
+*.iws
+*.iml
+.idea
+
+# gradle
+build
+.gradle
+
+# other
+eclipse
+/run
+/runs
+/run-data
+
+repo
+
+# superchunk repo hygiene
+bench/
+upstream/
+.vscode/
+dist/*.jar
+dist/mods/*.jar
+*.log
+hs_err_*.log
+replay_*.log
+.superchunk-bootstrap/
+__pycache__/
+*.py[cod]
+
+# compiled microbench (tools/noisebench.c)
+tools/noisebench
+
+# local port planning notes (machine-specific paths)
+portplans/

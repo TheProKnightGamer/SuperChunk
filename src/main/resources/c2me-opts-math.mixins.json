@@ -1,0 +1,13 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "dev.superchunk.com.ishland.c2me.opts.math.mixin",
+  "refmap": "superchunk.refmap.json",
+  "plugin": "dev.superchunk.com.ishland.c2me.base.common.ModuleMixinPlugin",
+  "mixins": [
+    "MixinChunkNoiseSampler",
+    "MixinChunkPos",
+    "MixinOctavePerlinNoiseSampler",
+    "MixinPerlinNoiseSampler"
+  ]
+}

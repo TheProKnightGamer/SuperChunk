@@ -1,0 +1,332 @@
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'net.minecraftforge.gradle' version '[6.0.16,6.2)'
+    // Mixin annotation processor + refmap + run wiring (must apply after FG).
+    id 'org.spongepowered.mixin' version '0.7.+'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+// Forge 1.20.1 targets Java 17.
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+minecraft {
+    // Official (Mojmap) mappings ship with Forge — no extra Parchment download.
+    // (Parchment can be re-enabled once its maven is reachable in this environment.)
+    mappings channel: 'official', version: minecraft_version
+
+    // Access transformer, ported 1:1 from the neo project (widens the vanilla worldgen ctors/fields
+    // the GPU offload + mixins need). Present from stage 1 even though the offload lands later.
+    copyIdeResources = true
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            // SuperChunk GPU config lives in the run/config dir.
+            // Forward -Dsuperchunk.* flags from the gradle invocation into the run JVM
+            // (parity/verify gates: superchunk.dfc.paritytest, gpu.blockIdVerify, ...).
+            System.properties.each { k, v ->
+                if (k.toString().startsWith('superchunk.')) {
+                    property k.toString(), v.toString()
+                }
+            }
+        }
+        server {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
+    }
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+// Nested-jar bundling (MixinExtras now; lwjgl-opencl in the runtime milestone).
+jarJar.enable()
+
+repositories {
+    maven { url = 'https://maven.parchmentmc.org' }
+    mavenCentral()   // LWJGL
+}
+
+mixin {
+    add sourceSets.main, 'superchunk.refmap.json'
+    // Stage-2 configs (worldgen GPU offload). Parent c2me.mixins.json is inherited, not registered.
+    config 'superchunk.mixins.json'
+    config 'c2me-base.mixins.json'
+    config 'c2me-opts-dfc.mixins.json'
+    config 'c2me-opts-worldgen-vanilla.mixins.json'
+    config 'noisium.mixins.json'
+    config 'scalablelux.mixins.json'
+    // Wave B (c2me-core standalone modules).
+    config 'c2me-opts-allocs.mixins.json'
+    config 'c2me-opts-math.mixins.json'
+    config 'c2me-opts-natives-math.mixins.json'
+    config 'c2me-opts-scheduling.mixins.json'
+    config 'c2me-opts-chunkio.mixins.json'
+    config 'c2me-opts-worldgen-general.mixins.json'
+    config 'c2me-server-utils.mixins.json'
+    config 'c2me-threading-lighting.mixins.json'
+    config 'c2me-fixes-worldgen-threading-issues.mixins.json'
+    config 'c2me-fixes-general-threading-issues.mixins.json'
+    config 'c2me-fixes-chunkio-threading-issues.mixins.json'
+    config 'c2me-fixes-worldgen-vanilla-bugs.mixins.json'
+    // Wave C (c2me rewrites: chunk-serializer / chunkio / chunk-system).
+    config 'c2me-rewrites-chunk-serializer.mixins.json'
+    config 'c2me-rewrites-chunkio.mixins.json'
+    config 'c2me-rewrites-chunk-system.mixins.json'
+    // VMP/notickvd player wave (vmp-notickvd-player.md).
+    config 'vmp.mixins.json'
+    config 'c2me-notickvd.mixins.json'
+    // Merged-Lithium (portplans/lithium.md, waves L1-L3).
+    config 'superchunk-lithium.mixins.json'
+    config 'superchunk-lithium-forge.mixins.json'
+    // Optional-mod interop (Distant Horizons' own batch generator). "required": false inside the
+    // config: its targets are DH classes, so with DH absent — or a DH build that renamed them —
+    // nothing resolves and nothing applies. DhMixinPlugin additionally gates on the DH mod id.
+    config 'superchunk-dh.mixins.json'
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // Mixin AP: generates superchunk.refmap.json (mojmap dev names -> SRG for production).
+    // 0.8.7 PROCESSOR (runtime mixin stays Forge's bundled 0.8.5): 0.8.5's AP crashes on
+    // @Shadow fields of string-target (ASM-resolved) mixins — TypeHandleASM.findField feeds
+    // FIELD descriptors to SignaturePrinter/Type.getReturnType (method-desc parser) ->
+    // StringIndexOutOfBoundsException. Hit via MixinChunkNoiseSampler1's `this$0` shadow on
+    // the anonymous NoiseChunk$1 (desc length 47). Fixed upstream in later mixin releases.
+    annotationProcessor 'org.spongepowered:mixin:0.8.7:processor'
+
+    // MixinExtras (@WrapOperation/@Local/... used by the dfc + superchunk mixins).
+    // Forge flavor bootstraps via ModuleMixinPlugin.onLoad -> MixinExtrasBootstrap.init().
+    compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:${mixinextras_version}"))
+    implementation(jarJar("io.github.llamalad7:mixinextras-forge:${mixinextras_version}")) {
+        jarJar.ranged(it, "[${mixinextras_version},)")
+    }
+
+    // Reactive prefetch pipeline (GpuBatchPrefetch/GpuClimatePrefetch observeOn scheduler).
+    // jarJar = production nested modules; minecraftLibrary = DEV game-layer visibility (the
+    // seam mixins hit Rx during live gen — plain implementation deps are boot-side only in
+    // FG6 dev runs -> NoClassDefFoundError: io/reactivex/... from the mod layer).
+    jarJar(implementation('io.reactivex.rxjava3:rxjava:3.1.12')) { jarJar.ranged(it, '[3.1,4.0)') }
+    jarJar(implementation('org.reactivestreams:reactive-streams:1.0.4')) { jarJar.ranged(it, '[1.0,2.0)') }
+    minecraftLibrary 'io.reactivex.rxjava3:rxjava:3.1.12'
+    minecraftLibrary 'org.reactivestreams:reactive-streams:1.0.4'
+
+    // C2ME core deps (wave B, same jarJar + minecraftLibrary pattern as rxjava above):
+    // exp4j — base ModuleEntryPoint parallelism expression; jctools — TheSpeedyObjectFactory
+    // (chunk-system wave, added at Gate 0 per plan); asyncutil — opts/allocs MixinUtil +
+    // base SerializerAccess Either.
+    jarJar(implementation('net.objecthunter:exp4j:0.4.8')) { jarJar.ranged(it, '[0.4,0.5)') }
+    jarJar(implementation('org.jctools:jctools-core:4.0.5')) { jarJar.ranged(it, '[4.0,5.0)') }
+    jarJar(implementation('com.ibm.async:asyncutil:0.1.0')) { jarJar.ranged(it, '[0.1,1.0)') }
+    minecraftLibrary 'net.objecthunter:exp4j:0.4.8'
+    minecraftLibrary 'org.jctools:jctools-core:4.0.5'
+    minecraftLibrary 'com.ibm.async:asyncutil:0.1.0'
+
+    // === LWJGL / OpenCL (three-pronged; see PORT-NOTES.md) ===
+    // COMPILE: against the real modules (compileOnly never reaches the run classpath, so
+    // ForgeGradle's org.lwjgl handling — which requests the NONEXISTENT
+    // `lwjgl-opencl:natives-<os>` classifier from a hardcoded Maven Central lookup for every
+    // org.lwjgl run-classpath module — never fires).
+    compileOnly "org.lwjgl:lwjgl:${lwjgl_version}"
+    compileOnly "org.lwjgl:lwjgl-opencl:${lwjgl_version}"
+    // DEV RUNS (runServer): the same jars as plain FILE dependencies from ./libs — no
+    // module group means FG's LWJGL natives machinery is bypassed entirely, and
+    // `minecraftLibrary` (NOT runtimeOnly) puts them on the GAME-layer classpath where mod
+    // code can see them (plain runtimeOnly landed on the boot classpath only ->
+    // NoClassDefFoundError: org/lwjgl/opencl/CL from the mod's classloader). The
+    // natives-linux jar rides along; LWJGL extracts the .so from classpath resources.
+    // (1.20.1 SERVERS ship no LWJGL at all, so core + opencl + natives are all needed.)
+    minecraftLibrary files("libs/lwjgl-${lwjgl_version}.jar",
+                           "libs/lwjgl-opencl-${lwjgl_version}.jar",
+                           "libs/lwjgl-${lwjgl_version}-natives-linux.jar")
+    // PRODUCTION: lwjgl-opencl rides as a real jarJar nested module; lwjgl CORE + platform
+    // natives are embedded as PLAIN resources under META-INF/jarjar/ (jar task below) which
+    // OpenCLBackend.ensureNativeLibrary() extracts at runtime (Configuration.LIBRARY_PATH).
+    // The Forge server dependency-locator (contributing core as module org.lwjgl on servers,
+    // mirroring neo's LwjglServerDependencyLocator) is part of the dist milestone.
+    jarJar("org.lwjgl:lwjgl-opencl:[${lwjgl_version},3.4)") {
+        jarJar.pin(it, lwjgl_version)
+        transitive = false
+    }
+}
+
+// Expand ${...} tokens in mods.toml / pack.mcmeta from gradle.properties.
+tasks.named('processResources', ProcessResources).configure {
+    var replaceProperties = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        forge_version          : forge_version,
+        forge_version_range    : forge_version_range,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_license            : mod_license,
+        mod_version            : mod_version,
+        mod_authors            : mod_authors,
+        mod_description        : mod_description,
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties
+    }
+}
+
+// lwjgl platform natives as PLAIN resources (NOT jarJar modules — deliberately absent
+// from META-INF/jarjar/metadata.json): the GPU backend extracts the native at runtime.
+// Applied to BOTH archives — the jarJar task builds its own archive and does not inherit
+// the jar task's content blocks (verified: -all.jar lacked the embeds without this).
+// lwjgl CORE moved to the SHELL jar (see the single-jar block below); the shell-only
+// locator package is excluded so the shell's SERVICE-layer module and the mod's
+// GAME-layer module share NO packages (the neo build's observed ResolutionException).
+tasks.withType(Jar).configureEach {
+    if (name in ['jar', 'jarJar', 'shellJar']) {
+        // G5: the combined work is LGPL-3.0-only with vendored MIT components — ship the
+        // license + attribution files in every distributed archive.
+        into('META-INF') {
+            from files('LICENSE', 'NOTICE')
+        }
+    }
+    if (name in ['jar', 'jarJar']) {
+        exclude 'dev/superchunk/loader/**'
+        into('META-INF/jarjar') {
+            from files("libs/lwjgl-${lwjgl_version}-natives-linux.jar",
+                       "libs/lwjgl-${lwjgl_version}-natives-windows.jar")
+        }
+    }
+}
+
+// === SINGLE-JAR SHELL (mirror of neo's packaging on FG6) ========================================
+// The distributed superchunk-<ver>.jar is a thin shell: the bootstrap IDependencyLocator
+// (dev.superchunk.loader.SuperChunkBootstrapLocator) + its top-level services file (generated at
+// jar-build time ONLY — never src/main/resources, or dev classpath scanning would hoist the dev
+// classes into the service layer and the dev mod would not load) + the REAL mod (the reobf'd
+// -all jarJar artifact, stashed as superchunk-core.jar) + lwjgl core. FML hoists the
+// service-declaring shell to the SERVICE layer and skips it as a mod; the locator contributes the
+// nested core as the mod on both dists and lwjgl-core (module org.lwjgl) on DEDICATED SERVERS
+// only — "LWJGL enabled only when the instance doesn't have it".
+var bootstrapLocatorService = tasks.register('bootstrapLocatorService') {
+    var outDir = layout.buildDirectory.dir('generated/bootstrapLocator')
+    outputs.dir(outDir)
+    doLast {
+        var svc = outDir.get().file('META-INF/services/net.minecraftforge.forgespi.locating.IDependencyLocator').asFile
+        svc.parentFile.mkdirs()
+        svc.text = 'dev.superchunk.loader.SuperChunkBootstrapLocator\n'
+    }
+}
+var shellJar = tasks.register('shellJar', Jar) {
+    // The stashed core must be the REOBF'D -all.jar (reobfJarJar rewrites it in place).
+    dependsOn tasks.named('jarJar'), tasks.named('reobfJarJar'), tasks.named('classes'), bootstrapLocatorService
+    archiveBaseName = mod_id
+    archiveVersion = mod_version
+    archiveClassifier = 'shell'
+    from(sourceSets.main.output) {
+        include 'dev/superchunk/loader/**'
+    }
+    from(bootstrapLocatorService)
+    from(tasks.named('jarJar').flatMap { it.archiveFile }) {
+        into 'META-INF/jarjar'
+        rename { 'superchunk-core.jar' }
+    }
+    into('META-INF/jarjar') {
+        from files("libs/lwjgl-${lwjgl_version}.jar")
+    }
+    manifest {
+        // Pins the SERVICE-layer module name away from the GAME-layer mod module ("superchunk").
+        attributes('Automatic-Module-Name': 'dev.superchunk.bootstrap')
+    }
+}
+tasks.named('assemble') { dependsOn shellJar }
+
+tasks.named('jar', Jar).configure {
+    manifest {
+        attributes([
+            'Specification-Title'     : mod_id,
+            'Specification-Vendor'    : mod_authors,
+            'Specification-Version'   : '1',
+            'Implementation-Title'    : project.name,
+            'Implementation-Version'  : project.jar.archiveVersion,
+            'Implementation-Vendor'   : mod_authors,
+            // Forge 1.20.1 discovers mixin configs from the manifest in production
+            // (mods.toml [[mixins]] is a NeoForge/1.20.5+ thing).
+            'MixinConfigs'            : 'superchunk.mixins.json,c2me-base.mixins.json,c2me-opts-dfc.mixins.json,c2me-opts-worldgen-vanilla.mixins.json,noisium.mixins.json,scalablelux.mixins.json,' +
+                                        'c2me-opts-allocs.mixins.json,c2me-opts-math.mixins.json,c2me-opts-natives-math.mixins.json,c2me-opts-scheduling.mixins.json,c2me-opts-chunkio.mixins.json,' +
+                                        'c2me-opts-worldgen-general.mixins.json,c2me-server-utils.mixins.json,c2me-threading-lighting.mixins.json,c2me-fixes-worldgen-threading-issues.mixins.json,' +
+                                        'c2me-fixes-general-threading-issues.mixins.json,c2me-fixes-chunkio-threading-issues.mixins.json,c2me-fixes-worldgen-vanilla-bugs.mixins.json,' +
+                                        'c2me-rewrites-chunk-serializer.mixins.json,c2me-rewrites-chunkio.mixins.json,c2me-rewrites-chunk-system.mixins.json,' +
+                                        'vmp.mixins.json,c2me-notickvd.mixins.json,superchunk-lithium.mixins.json,superchunk-lithium-forge.mixins.json,' +
+                                        'superchunk-dh.mixins.json'
+        ])
+    }
+    finalizedBy 'reobfJar'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// The mixin AP writes the refmap (and its mappings) next to compileJava's outputs without
+// declaring them, so with org.gradle.caching=true a compile restored FROM-CACHE (sources compiled
+// before: a revert, another checkout) left them out and the jar shipped with no
+// superchunk.refmap.json — every string-target mixin then fails on an SRG (production) server.
+// Declared, the cache stores and restores them with the classes.
+tasks.named('compileJava', JavaCompile).configure {
+    def apOut = layout.buildDirectory.dir('tmp/compileJava')
+    outputs.file(apOut.map { it.file('superchunk.refmap.json') })
+    outputs.file(apOut.map { it.file('compileJava-refmap.json') })
+    outputs.file(apOut.map { it.file('compileJava-mappings.tsrg') })
+}
+
+// ForgeGradle supplies Minecraft to main; the standalone regression programs also compare
+// against vanilla classes (bit storage, climate search), without booting the game or applying
+// mixins. compileOnly deps (LWJGL, MixinExtras) are main-only, so hand the test set main's
+// compile classpath, as neo's ModDev build does.
+sourceSets.test.compileClasspath += sourceSets.main.compileClasspath
+sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
+// These programs use explicit assertions and need no additional test framework. (Gradle 8.8 does
+// not fail a test task that discovers nothing, so neo's failOnNoDiscoveredTests line is not needed.)
+[
+    schedulerRegressionTest: 'dev.superchunk.com.ishland.flowsched.scheduler.SchedulerRegressionTest',
+    smallPaletteRegressionTest: 'dev.superchunk.worldgen.SmallPaletteIndicesTest',
+    fastPalettePackingRegressionTest: 'dev.superchunk.chunkio.FastPalettePackingTest',
+    biomeFiddleRegressionTest: 'dev.superchunk.worldgen.BiomeFiddleMathTest',
+    aquiferColumnRegressionTest: 'dev.superchunk.worldgen.AquiferColumnCacheTest',
+    positionalFloatRegressionTest: 'dev.superchunk.worldgen.FirstPositionalFloatTest',
+    biomeCacheRegressionTest: 'dev.superchunk.worldgen.BiomeQuartCacheTest',
+    flatClimateRegressionTest: 'dev.superchunk.worldgen.FlatClimateIndexTest',
+    biomeFiddleCacheRegressionTest: 'dev.superchunk.worldgen.BiomeFiddleCacheTest',
+    configDocsRegressionTest: 'dev.superchunk.config.SuperChunkConfigDocsTest',
+    mixinTargetScanRegressionTest: 'dev.superchunk.MixinTargetScanTest',
+    skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest',
+    featureRegionReadsRegressionTest: 'dev.superchunk.worldgen.FeatureRegionReadsTest'
+].each { taskName, testMain ->
+    def regression = tasks.register(taskName, JavaExec) {
+        group = 'verification'
+        description = "Runs ${testMain} standalone regression checks."
+        dependsOn tasks.named('testClasses')
+        classpath = sourceSets.test.runtimeClasspath
+        mainClass = testMain
+        // Minecraft's logging writes logs/ into the working directory; keep it out of the tree.
+        def runDir = layout.buildDirectory.dir('regression-tests').get().asFile
+        workingDir = runDir
+        doFirst { runDir.mkdirs() }
+    }
+    tasks.named('check') { dependsOn regression }
+}
+
+// NOTE (dist milestone, see PORT-NOTES "@Shadow SRG remap"): an explicit
+// `-AoutTsrgFile=...` compiler arg was tried here to make the mixin AP emit @Shadow member
+// renames for reobf. It produced no output AND activated an AP validation path that crashes
+// mixin 0.8.5 on string-target mixins (TypeHandleASM.findField parses field descriptors as
+// method descriptors -> StringIndexOutOfBoundsException). Do not re-add it; solve @Shadow
+// production remap at the dist milestone differently.

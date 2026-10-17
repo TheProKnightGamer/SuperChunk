@@ -1,0 +1,4 @@
+package dev.superchunk.com.ishland.flowsched.executor;
+
+public interface LockToken {
+}

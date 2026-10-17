@@ -1,0 +1,133 @@
+modLoader = "javafml"
+loaderVersion = "${loader_version_range}"
+license = "${mod_license}"
+# The upstream project's public issue tracker.
+issueTrackerURL = "https://github.com/TheProKnightGamer/SuperChunk/issues"
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+authors = "${mod_authors}"
+description = '''
+${mod_description}
+'''
+
+[[dependencies.${mod_id}]]
+    modId = "forge"
+    mandatory = true
+    versionRange = "${forge_version_range}"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.${mod_id}]]
+    modId = "minecraft"
+    mandatory = true
+    versionRange = "${minecraft_version_range}"
+    ordering = "NONE"
+    side = "BOTH"
+
+# Load-order pins (G3): SuperChunkMixinPlugin's config write-through must write
+# config/lithium.properties (the C2ME-overlap safety pins) BEFORE a standalone
+# Lithium-fork's own mixin plugin reads that file. mandatory=false keeps these inert
+# when the fork is absent. Radium and Canary both read lithium.properties.
+[[dependencies.superchunk]]
+    modId = "radium"
+    mandatory = false
+    versionRange = "[0,)"
+    ordering = "BEFORE"
+    side = "BOTH"
+[[dependencies.superchunk]]
+    modId = "canary"
+    mandatory = false
+    versionRange = "[0,)"
+    ordering = "BEFORE"
+    side = "BOTH"
+[[dependencies.superchunk]]
+    modId = "lithium"
+    mandatory = false
+    versionRange = "[0,)"
+    ordering = "BEFORE"
+    side = "BOTH"
+
+# ---------------------------------------------------------------------------------------------
+# HARD INCOMPATIBILITIES
+#
+# A mod cannot disable another mod at runtime, and the mod list is resolved long before we get
+# control. What the loader DOES support is refusing to launch. NeoForge spells that
+# `type = "incompatible"`; FORGE 1.20.1 HAS NO SUCH FIELD (its dependency schema is
+# mandatory/versionRange/ordering/side only), so the equivalent here is an OPTIONAL dependency
+# whose version range NO version can satisfy: absent -> inert, present -> the range check fails
+# and mod loading stops with an error screen naming both mods. This port's own QA established
+# that mechanic the hard way (an omitted range parses as EMPTY and hard-failed the boot whenever
+# the mod was actually installed — see PORT-NOTES, FORK STANDDOWN). Here it is what we want, so
+# the empty range is written explicitly rather than left to that quirk.
+#
+# Bar for adding an entry: a REPRODUCED failure with a known mechanism, written up in
+# compatibility.txt. Do not list mods on suspicion — an entry here bricks the launch for anyone
+# who has that mod, so a false positive is worse than the bug. Where the conflict is ours to
+# yield instead, stand our own feature down (see compat/StructureLayoutOptimizerCompat,
+# compat/ByePregenCompat, the Radium/Canary stand-down) rather than blocking the other mod.
+#
+# Better Chunk Loading calls ChunkHolder.addSaveDependency from a whenComplete hook on the chunk
+# future. C2ME's chunk-system rewrite deliberately nulls vanilla's ChunkHolder futures (saveSync
+# et al) in chunksystem.mixin.MixinChunkHolder#failFastIncompatibility — a tripwire so that mods
+# reaching for vanilla chunk-holder state fail loudly instead of operating on state the rewritten
+# chunk system no longer honours. That tripwire is present in this port too (verified), so the
+# failure reproduces identically: NPE at MinecraftServer.setInitialSpawn, so a new world dies
+# before it exists and an existing one dies on the next chunk load. Not fixable from our side —
+# the two are competing implementations of the same subsystem, and the NPE is C2ME's intended
+# failure mode. Inherited verbatim from upstream C2ME, so plain C2ME fails the same way.
+[[dependencies.superchunk]]
+    modId = "betterchunkloading"
+    mandatory = false
+    versionRange = "(,0.0.0)"
+    ordering = "NONE"
+    side = "BOTH"
+
+# ScalableLux, C2ME and Noisium are bundled inside SuperChunk. Reproduced on the NeoForge 1.21.1
+# build (2026-09-25, ScalableLux 0.1.0.1, C2ME 0.4.0-alpha.0.106, Noisium 2.7.0): installed next to
+# it, each one killed the launch before the mod list with a raw Mixin error. The mechanisms carry
+# over to this port:
+#   noisium: its populateNoise redirect collides with the bundled copy's ("Critical injection
+#     failure: Redirector ...populateNoiseWrapSetBlockStateOperation") -- a Mixin-level conflict
+#     on the same vanilla call, independent of the loader. (No dollar sign here: this file is
+#     expanded as a Groovy template at build time.)
+#   scalablelux, c2me: both ship mixin configs under the very names this jar registers
+#     (scalablelux.mixins.json, c2me-base.mixins.json, ...), and each rewrites the same subsystem
+#     (lighting engine, chunk system) that the bundled copy already replaces.
+# Same impossible-range mechanism as betterchunkloading above: absent -> inert, present -> the
+# loader refuses to launch and names the mod to remove.
+[[dependencies.superchunk]]
+    modId = "scalablelux"
+    mandatory = false
+    versionRange = "(,0.0.0)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.superchunk]]
+    modId = "c2me"
+    mandatory = false
+    versionRange = "(,0.0.0)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.superchunk]]
+    modId = "noisium"
+    mandatory = false
+    versionRange = "(,0.0.0)"
+    ordering = "NONE"
+    side = "BOTH"
+
+# Starlight (Forge) is the 1.20.1 counterpart of the bundled ScalableLux (a Starlight fork).
+# Reproduced on this port (2026-10-06, Starlight Forge 1.1.2+1.20): both engines apply, Mixin skips
+# several of the bundled overwrites ("Method overwrite conflict ... previously written by
+# ca.spottedleaf.starlight"), and the hybrid saves NO light: 0 SkyLight/BlockLight sections in
+# 1,089 generated chunks (Starlight alone: normal), while every chunk is still stamped
+# starlight.light_version=9, so the empty light is trusted on load.
+[[dependencies.superchunk]]
+    modId = "starlight"
+    mandatory = false
+    versionRange = "(,0.0.0)"
+    ordering = "NONE"
+    side = "BOTH"

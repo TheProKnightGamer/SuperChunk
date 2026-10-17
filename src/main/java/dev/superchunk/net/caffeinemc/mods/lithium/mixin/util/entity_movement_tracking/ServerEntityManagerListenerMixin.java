@@ -1,0 +1,77 @@
+package dev.superchunk.net.caffeinemc.mods.lithium.mixin.util.entity_movement_tracking;
+
+import dev.superchunk.net.caffeinemc.mods.lithium.common.tracking.entity.EntityMovementTrackerSection;
+import dev.superchunk.net.caffeinemc.mods.lithium.common.tracking.entity.MovementTrackerHelper;
+import dev.superchunk.net.caffeinemc.mods.lithium.common.tracking.entity.ToggleableMovementTracker;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.entity.EntityAccess;
+import net.minecraft.world.level.entity.EntitySection;
+import net.minecraft.world.level.entity.PersistentEntitySectionManager;
+import org.spongepowered.asm.mixin.Final;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(targets = "net/minecraft/world/level/entity/PersistentEntitySectionManager$Callback")
+public class ServerEntityManagerListenerMixin<T extends EntityAccess> implements ToggleableMovementTracker {
+    @Shadow
+    private EntitySection<T> currentSection;
+    @Shadow
+    @Final
+    private T entity;
+
+    @Unique
+    private int notificationMask;
+
+    @Inject(method = "<init>", at = @At("RETURN"))
+    private void init(PersistentEntitySectionManager<?> outer, T entityLike, long l, EntitySection<T> entityTrackingSection, CallbackInfo ci) {
+        this.notificationMask = MovementTrackerHelper.getNotificationMask((Entity) this.entity);
+
+        //Fix #284 Summoned inventory minecarts do not immediately notify hoppers of their presence when created using summon command
+        this.notifyMovementListeners();
+    }
+
+    @Inject(method = "onMove()V", at = @At("RETURN"))
+    private void updateEntityTrackerEngine(CallbackInfo ci) {
+        this.notifyMovementListeners();
+    }
+
+    @Inject(
+            method = "onMove()V",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/world/level/entity/EntitySection;add(Lnet/minecraft/world/level/entity/EntityAccess;)V",
+                    shift = At.Shift.AFTER
+            )
+    )
+    private void onAddEntity(CallbackInfo ci) {
+        this.notifyMovementListeners();
+    }
+
+    @Inject(
+            method = "onRemove(Lnet/minecraft/world/entity/Entity$RemovalReason;)V",
+            at = @At(
+                    value = "HEAD"
+            )
+    )
+    private void onRemoveEntity(Entity.RemovalReason reason, CallbackInfo ci) {
+        this.notifyMovementListeners();
+    }
+
+    @Unique
+    private void notifyMovementListeners() {
+        if (this.notificationMask != 0) {
+            ((EntityMovementTrackerSection) this.currentSection).lithium$trackEntityMovement(this.notificationMask, ((Entity) this.entity).getCommandSenderWorld().getGameTime());
+        }
+    }
+
+    @Override
+    public int lithium$setNotificationMask(int notificationMask) {
+        int oldNotificationMask = this.notificationMask;
+        this.notificationMask = notificationMask;
+        return oldNotificationMask;
+    }
+}

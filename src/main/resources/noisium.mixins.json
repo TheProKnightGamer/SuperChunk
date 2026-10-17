@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.superchunk.io.github.steveplays28.noisium.mixin",
+  "refmap": "superchunk.refmap.json",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "ChainedBlockSourceMixin",
+    "NoiseChunkGeneratorMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
