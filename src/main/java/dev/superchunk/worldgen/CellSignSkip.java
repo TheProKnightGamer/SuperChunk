@@ -18,6 +18,7 @@ import dev.superchunk.com.ishland.c2me.opts.dfc.common.ast.unary.SquareNode;
 import dev.superchunk.com.ishland.c2me.opts.dfc.common.ast.unary.SqueezeNode;
 import dev.superchunk.com.ishland.c2me.opts.dfc.common.gen.CompiledDensityFunction;
 import dev.superchunk.com.ishland.c2me.opts.dfc.common.gen.SubCompiledDensityFunction;
+import dev.superchunk.gpu.dfc.GpuDfcDelegate;
 import dev.superchunk.gpu.dfc.ScBeardBoxAccess;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.levelgen.DensityFunction;
@@ -49,8 +50,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  * In both cases the cell cache is filled with the bound (a value of the proven sign) and the
  * per-block evaluation is skipped. Every block comes out as before; mixed cells, cells that may
- * touch a structure's beard box, blending, GPU-served chunks and any expression node this class
- * does not know take the original fill.
+ * touch a structure's beard box, blending and any expression node this class does not know take
+ * the original fill. GPU routing may stay on: a cell's fill is never served by the GPU (see
+ * {@link #bind}), and the compact-ids hybrid fill's CPU cells all touch the beard box.
  *
  * <p>Kill switch {@code -Dsuperchunk.worldgen.cellSignSkip=false}. Verify
  * {@code -Dsuperchunk.worldgen.cellSignSkip.verify=true} skips nothing and checks every decided
@@ -488,13 +490,15 @@ public final class CellSignSkip {
     /**
      * The program for a cell cache's filler, or {@code null} when it does not have the shape this
      * class bounds: {@code add(compiled final density, beardifier)} with every per-block leaf an
-     * interpolator of this chunk.
+     * interpolator of this chunk. With GPU routing on, the final density carries a GPU delegate;
+     * it is bound only when the delegate leaves a {@code cellBlocks}-point cell fill to the CPU
+     * bytecode, so the cell's values are computed exactly as with the GPU off.
      */
-    public static Program bind(DensityFunction filler) {
+    public static Program bind(DensityFunction filler, int cellBlocks) {
         if (!(filler instanceof DensityFunctions.TwoArgumentSimpleFunction two)
                 || two.type() != DensityFunctions.TwoArgumentSimpleFunction.Type.ADD
                 || !(two.argument1() instanceof CompiledDensityFunction compiled)
-                || compiled.c2me$getGpuDelegate() != null) {
+                || (compiled.c2me$getGpuDelegate() != null && !GpuDfcDelegate.cpuFillsOffLattice(cellBlocks))) {
             standDown("cell cache filler " + describe(filler));
             return null;
         }
@@ -535,7 +539,8 @@ public final class CellSignSkip {
 
     /**
      * A program bounding a per-chunk density function with no beardifier (the ore vein toggle), or
-     * {@code null}: a compiled expression of this chunk's interpolators, or one interpolator.
+     * {@code null}: a compiled expression of this chunk's interpolators, or one interpolator. The
+     * vein filler reads it per block through {@code compute}, which never takes a GPU delegate.
      */
     public static Program bindValue(DensityFunction df) {
         if (df instanceof net.minecraft.world.level.levelgen.NoiseChunk.NoiseInterpolator && df instanceof Corners corners) {
@@ -543,7 +548,7 @@ public final class CellSignSkip {
                     List.<double[]>of(new double[4]), new int[]{0});
             return new Program(t, new Corners[]{corners}, null);
         }
-        if (!(df instanceof CompiledDensityFunction compiled) || compiled.c2me$getGpuDelegate() != null) {
+        if (!(df instanceof CompiledDensityFunction compiled)) {
             return null;
         }
         return bindCompiled(compiled, null);

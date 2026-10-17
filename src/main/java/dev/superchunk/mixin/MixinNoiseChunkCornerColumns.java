@@ -3,7 +3,6 @@ package dev.superchunk.mixin;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
-import dev.superchunk.gpu.dfc.GpuDfcHook;
 import dev.superchunk.gpu.dfc.OnDeviceInterp;
 import dev.superchunk.worldgen.BlockFillHooks;
 import dev.superchunk.worldgen.CornerColumns;
@@ -84,7 +83,7 @@ public abstract class MixinNoiseChunkCornerColumns {
         byte state = this.superchunk$cornersState;
         if (state == 0) {
             boolean ok = this.getBlender() == Blender.empty()
-                    && !OnDeviceInterp.ENABLED && !GpuDfcHook.isRoutingEnabled()
+                    && !OnDeviceInterp.ENABLED
                     && this.interpolators.size() <= 64
                     && BlockFillHooks.unhooked()
                     && table.accepts(this.cellHeight, this.cellNoiseMinY, this.cellCountY, this.cellWidth);
