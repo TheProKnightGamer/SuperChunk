@@ -156,10 +156,10 @@ public abstract class MixinNoiseChunkCellSign implements CellSignSkip.Chunk {
         // One cell cache (vanilla's final density), no blending (the blended fill takes another
         // path), the CPU interpolation (no on-device GPU field), vanilla's noise aquifer and no
         // other mod in the fill: the conditions under which only the aquifer reads the values.
+        // GPU routing may stay on (see CellSignSkip.bind).
         String reason = this.cellCaches.size() != 1 ? "cell caches " + this.cellCaches.size()
                 : this.getBlender() != Blender.empty() ? null // blending near old chunks: expected, not logged
                 : OnDeviceInterp.ENABLED ? "on-device interpolation"
-                : dev.superchunk.gpu.dfc.GpuDfcHook.isRoutingEnabled() ? null // GPU fills (compact ids): not tested, keep the full fill
                 : !AirCells.ENABLED ? "air cells off"
                 : !(this.aquifer() instanceof Aquifer.NoiseBasedAquifer) ? "aquifer " + this.aquifer().getClass().getName()
                 : !BlockFillHooks.unhooked() ? null // BlockFillHooks names a foreign hook itself; early chunks may not know yet
@@ -170,7 +170,9 @@ public abstract class MixinNoiseChunkCellSign implements CellSignSkip.Chunk {
             }
             return Boolean.FALSE;
         }
-        CellSignSkip.Program program = CellSignSkip.bind(filler);
+        IChunkNoiseSampler cell = (IChunkNoiseSampler) this;
+        int w = cell.getHorizontalCellBlockCount();
+        CellSignSkip.Program program = CellSignSkip.bind(filler, w * cell.getVerticalCellBlockCount() * w);
         return program != null ? program : Boolean.FALSE;
     }
 }
