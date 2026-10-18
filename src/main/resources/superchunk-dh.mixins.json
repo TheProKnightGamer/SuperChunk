@@ -2,6 +2,9 @@
   "required": false,
   "minVersion": "0.8.5",
   "package": "dev.superchunk.mixin.compat",
+  "overwrites": {
+    "conformVisibility": true
+  },
   "refmap": "superchunk.refmap.json",
   "plugin": "dev.superchunk.compat.DhMixinPlugin",
   "compatibilityLevel": "JAVA_17",

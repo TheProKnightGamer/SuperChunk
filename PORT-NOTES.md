@@ -1,5 +1,37 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## GUHAO'S VIX STARTUP CRASHES (2026-10-18) — same changes as neo
+
+GUHAO's VIX crashed the game at startup: `Critical injection failure: Redirector postponeGetEntities
+... entity.collisions.movement.EntityMixin failed injection check`. VIX bundles ModelLoader, whose
+`EntityCollisionMixin` (priority max) takes the same call in `Entity.collide`, and VIX declares
+`"lithium:options" = { "mixin.entity.collisions.movement" = false }` to turn Lithium's redirect off.
+It puts the key inside its `[[mods]]` entry, and `ForgeMixinOverrides` read it only at the top of
+the file, so the bundled rule stayed on. It now reads both (`ModInfo.getConfigElement` for the
+entry); the fixed jar logs the rule disabled "added by mods [vix]".
+
+Past that, VMP failed: `PACKAGE @Overwrite method m_140192_ in vmp.mixins.json:playerwatching.
+MixinThreadedAnvilChunkStorage cannot reduce visibiliy of PUBLIC target method`. ModelLoader's
+access transformer has wildcards (`public net.minecraft.server.level.ChunkMap *()`, and the same
+for Entity, LivingEntity, Level, ServerLevel, ServerChunkCache, MinecraftServer, the entity
+section classes and about twenty more), so every non-public overwrite on those classes trips
+Mixin's visibility check. C2ME's and Lithium's configs already set
+`"overwrites": {"conformVisibility": true}` (C2ME's modules inherit it from `c2me.mixins.json`),
+which lets Mixin raise a private overwrite to the target's visibility (logged as "Static binding
+violation") and accept a package one. vmp, noisium, scalablelux, superchunk and superchunk-dh now
+set it too (neo as well). Without such an AT nothing changes: the check only acts when the target
+is more visible than the overwrite.
+
+Tested (dedicated server, r256): the shipped 0.5.0 jar fails with the collision injection error
+on Forge 47.3.0 and 47.4.28; the fixed jar with VIX 1.20-1.3.6 + Epic Fight 20.14.17 on 47.4.28
+boots and generates 1,089 chunks, and SuperChunk alone does too on 47.3.0 and 47.4.28. VIX 1.3.x
+needs Forge 47.4 (`ResourceLocation.fromNamespaceAndPath`) and Epic Fight (it loads
+`yesman.epicfight` classes without declaring the dependency); both are VIX's requirements.
+
+Neo additionally vendored MixinSquared's `@TargetHandler` (its jar-in-jar copy clashed with VIX's,
+packaged under the other Maven group). Forge does not bundle MixinSquared, so there is nothing to
+port for that half.
+
 ## CELL SIGN SKIP + CORNER SHARING IN GPU MODE (2026-10-17) — same files as neo, copied
 
 Both used to stand down whenever GPU routing was on. They now run there too; the reasoning and the

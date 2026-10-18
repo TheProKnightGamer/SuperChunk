@@ -2,6 +2,9 @@
   "required": true,
   "minVersion": "0.8",
   "package": "dev.superchunk.com.ishland.vmp.mixins",
+  "overwrites": {
+    "conformVisibility": true
+  },
   "compatibilityLevel": "JAVA_17",
   "refmap": "superchunk.refmap.json",
   "plugin": "dev.superchunk.SuperChunkMixinPlugin",

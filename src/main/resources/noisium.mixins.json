@@ -2,6 +2,9 @@
   "required": true,
   "minVersion": "0.8",
   "package": "dev.superchunk.io.github.steveplays28.noisium.mixin",
+  "overwrites": {
+    "conformVisibility": true
+  },
   "refmap": "superchunk.refmap.json",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
