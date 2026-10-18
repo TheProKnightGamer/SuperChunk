@@ -2,6 +2,9 @@
   "required": true,
   "minVersion": "0.8",
   "package": "dev.superchunk.ca.spottedleaf.starlight.mixin",
+  "overwrites": {
+    "conformVisibility": true
+  },
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "common.blockstate.BlockStateBaseMixin",

@@ -1,5 +1,8 @@
 {
   "package" : "dev.superchunk.net.caffeinemc.mods.lithium.mixin",
+  "overwrites": {
+    "conformVisibility": true
+  },
   "required" : true,
   "compatibilityLevel" : "JAVA_21",
   "plugin" : "dev.superchunk.net.caffeinemc.mods.lithium.mixin.LithiumMixinPlugin",
