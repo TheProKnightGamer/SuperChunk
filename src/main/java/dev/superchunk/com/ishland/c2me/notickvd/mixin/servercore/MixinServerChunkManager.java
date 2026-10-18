@@ -1,6 +1,6 @@
 package dev.superchunk.com.ishland.c2me.notickvd.mixin.servercore;
 
-import com.bawnorton.mixinsquared.TargetHandler;
+import dev.superchunk.com.bawnorton.mixinsquared.TargetHandler;
 import dev.superchunk.com.ishland.c2me.base.common.theinterface.IFastChunkHolder;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ServerChunkCache;
@@ -16,7 +16,7 @@ public class MixinServerChunkManager {
             mixin = "me.wesley1808.servercore.mixin.optimizations.ticking.chunk.broadcast.ServerChunkCacheMixin",
             name = "servercore$broadcastChanges"
     )
-    @Redirect(method = "@MixinSquared:Handler", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkHolder;getTickingChunk()Lnet/minecraft/world/level/chunk/LevelChunk;"), require = 0)
+    @Redirect(method = "@SuperChunk:Handler", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkHolder;getTickingChunk()Lnet/minecraft/world/level/chunk/LevelChunk;"), require = 0)
     private LevelChunk includeAccessibleChunks(ChunkHolder instance) {
         if (instance instanceof IFastChunkHolder fastChunkHolder) {
             // SuperChunk: a FULL chunk outside the ticking range is listed only so its pending

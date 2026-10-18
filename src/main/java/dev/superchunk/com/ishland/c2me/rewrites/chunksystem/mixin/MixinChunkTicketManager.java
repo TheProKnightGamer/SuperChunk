@@ -1,6 +1,6 @@
 package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.mixin;
 
-import com.bawnorton.mixinsquared.TargetHandler;
+import dev.superchunk.com.bawnorton.mixinsquared.TargetHandler;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.Config;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ducks.TicketDistanceLevelPropagatorExtension;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
@@ -39,7 +39,7 @@ public abstract class MixinChunkTicketManager {
             mixin = "dev.superchunk.com.ishland.vmp.mixins.ticketsystem.ticketpropagator.MixinChunkTicketManager",
             name = "tickTickets"
     )
-    @Redirect(method = "@MixinSquared:Handler", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkHolder;getLevel()I"), require = 0)
+    @Redirect(method = "@SuperChunk:Handler", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkHolder;getLevel()I"), require = 0)
     private int fakeLevel(ChunkHolder instance) {
         return Integer.MAX_VALUE;
     }
@@ -49,7 +49,7 @@ public abstract class MixinChunkTicketManager {
             mixin = "dev.superchunk.com.ishland.vmp.mixins.ticketsystem.ticketpropagator.MixinChunkTicketManager",
             name = "tickTickets"
     )
-    @Redirect(method = "@MixinSquared:Handler", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/world/DistanceManager;getChunkHolder(J)Lnet/minecraft/server/level/ChunkHolder;"), require = 0)
+    @Redirect(method = "@SuperChunk:Handler", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/world/DistanceManager;getChunkHolder(J)Lnet/minecraft/server/level/ChunkHolder;"), require = 0)
     private ChunkHolder fakeLevel(DistanceManager instance, long l) {
         return null;
     }
@@ -59,7 +59,7 @@ public abstract class MixinChunkTicketManager {
             mixin = "dev.superchunk.com.ishland.vmp.mixins.ticketsystem.ticketpropagator.MixinChunkTicketManager",
             name = "tickTickets"
     )
-    @Redirect(method = "@MixinSquared:Handler", at = @At(value = "FIELD", target = "Lnet/minecraft/server/level/ChunkLevel;INACCESSIBLE:I", opcode = Opcodes.GETSTATIC, ordinal = 0), require = 0)
+    @Redirect(method = "@SuperChunk:Handler", at = @At(value = "FIELD", target = "Lnet/minecraft/server/level/ChunkLevel;INACCESSIBLE:I", opcode = Opcodes.GETSTATIC, ordinal = 0), require = 0)
     private int fakeLevel() {
         return Integer.MAX_VALUE - 1;
     }
