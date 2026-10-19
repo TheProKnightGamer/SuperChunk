@@ -1,6 +1,8 @@
 package dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.structure_weight_sampler;
 
 import com.google.common.collect.Iterators;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.objects.ObjectListIterator;
 import net.minecraft.world.level.levelgen.Beardifier;
 import net.minecraft.world.level.levelgen.DensityFunction;
@@ -137,12 +139,33 @@ public abstract class MixinStructureWeightSampler implements dev.superchunk.gpu.
             || z < this.c2me$bMinZ || z > this.c2me$bMaxZ;
     }
 
+    /** Stand down when another mod hooks compute ({@link dev.superchunk.worldgen.ForeignHooks}). */
+    @Unique
+    private static byte superchunk$hooks;
+
+    @Unique
+    private static boolean superchunk$unhooked() {
+        byte state = superchunk$hooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The beardifier replica (Beardifier.compute)",
+                    "net.minecraft.world.level.levelgen.Beardifier#compute");
+            superchunk$hooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
+
     /**
-     * @author ishland
-     * @reason optimize impl
+     * C2ME's optimized compute (ishland). Upstream overwrites the method; a wrap leaves vanilla's
+     * body in place, so another mod's injection into it still applies and runs when this stands
+     * down. Over the overwrite, Qliphoth Awakening's injection (its arenas' terrain) failed to
+     * apply and broke world generation. Measured against the overwrite (CPU, r1024, three pairs):
+     * -0.6%, -0.8% and +0.3% CPU per chunk.
      */
-    @Overwrite
-    public double compute(DensityFunction.FunctionContext pos) {
+    @WrapMethod(method = "compute")
+    private double superchunk$compute(DensityFunction.FunctionContext pos, Operation<Double> original) {
+        if (!superchunk$unhooked()) {
+            return original.call(pos);
+        }
         if (this.c2me$pieceArray == null || this.c2me$junctionArray == null) {
             this.c2me$initArrays();
         }

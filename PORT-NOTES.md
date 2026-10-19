@@ -1,5 +1,32 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## SPAWN AND QLIPHOTH AWAKENING CRASHES (2026-10-19) — Forge only
+
+GitHub #20 ("Crash with Spawn"): the client failed at mod construction with `Registry Object not
+present: spawn:ant_mound`. 1wholibs creates the item renderer while mods are still being constructed,
+which makes a shulker box block entity, and Lithium's support cache tested `BlockEntityType.isValid`
+in the `BlockEntity` constructor. Spawn hooks `isValid` and reads its own registry object, which is
+not filled yet. 1.21 vanilla calls `isValid` in that constructor itself, so neo is unaffected; on
+1.20.1 nothing else does. The cache (`support_cache/BlockEntityMixin`) is now filled on first use and
+cleared by `setBlockState`.
+
+GitHub #19 ("Incompatible with performant"): the world failed to load with `chunk [0, 0] failed to
+generate`. The cause was Qliphoth Awakening (`fdbosses`), not Performant (Performant was only first
+in the crash report's suspect list). Its `BeardifierMixin` injects into `Beardifier.compute` after
+the second `terrainAdjustment()` call (an ENCAPSULATE-style term for its arena pieces), and C2ME's
+`MixinStructureWeightSampler` overwrote `compute` with a higher priority, so the injection failed to
+apply (FATAL) when `Beardifier` first loaded. `compute` is now a `@WrapMethod` that stands down via
+`ForeignHooks` (`Beardifier#compute` -> `m_207386_` added to `MixinTargetScan.SRG_NAMES`), so vanilla's
+body, with the other mod's injection, runs. The beard box consumers already stand down through
+`BlockFillHooks` whenever another mod's mixin is on `Beardifier`. Qliphoth Awakening 3.2 for 1.21.1
+only hooks `forStructuresInChunk`, so neo does not crash; neo still overwrites `compute`.
+
+Tested: the shipped 0.5.0 jar with Qliphoth Awakening 3.1.0.3 + FDLib on a dedicated server fails
+the same way as the report; the fixed jar generates 1,089 chunks and logs the stand-down. Without
+it, worlds are unchanged (noise-fill and surface hashes, 18,499 chunks, 1,207 with structure
+adaptation, 0 mismatches) and CPU per chunk is unchanged (three r1024 pairs: -0.6%, -0.8%, +0.3%).
+"No starting jigsaw fdbosses:malkuth_arena_part_1" also appears without SuperChunk: theirs.
+
 ## GUHAO'S VIX STARTUP CRASHES (2026-10-18) — same changes as neo
 
 GUHAO's VIX crashed the game at startup: `Critical injection failure: Redirector postponeGetEntities
