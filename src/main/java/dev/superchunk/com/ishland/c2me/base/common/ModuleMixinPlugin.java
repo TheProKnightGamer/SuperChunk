@@ -1,6 +1,6 @@
 package dev.superchunk.com.ishland.c2me.base.common;
 
-import com.bawnorton.mixinsquared.MixinSquaredBootstrap;
+import dev.superchunk.com.bawnorton.mixinsquared.MixinSquaredBootstrap;
 import com.llamalad7.mixinextras.MixinExtrasBootstrap;
 import org.objectweb.asm.tree.ClassNode;
 import org.slf4j.Logger;

@@ -34,6 +34,12 @@ VMP (Very Many Players) — area-based player chunk watching/sending.
     License:   MIT
     Copyright: (c) 2021-2023 ishland
 
+MixinSquared — the @TargetHandler annotation and its target selector, vendored
+  (trimmed) under dev.superchunk.com.bawnorton.mixinsquared.
+    Upstream:  https://github.com/Bawnorton/MixinSquared
+    License:   MIT
+    Copyright: (c) 2023-present Bawnorton
+
 Lithium — general game-logic optimizations.
     Upstream:  https://github.com/CaffeineMC/lithium  (NeoForge port)
     License:   GNU LGPL-3.0
@@ -78,7 +84,7 @@ Licensing summary
   https://www.gnu.org/licenses/gpl-3.0.html .
 - The complete corresponding source code must be made available to anyone who
   receives a binary, per LGPL-3.0.
-- The MIT-licensed components (C2ME, FlowSched, VMP) retain their MIT license; the
+- The MIT-licensed components (C2ME, FlowSched, VMP, MixinSquared) retain their MIT license; the
   notice below satisfies the MIT requirement to include the copyright and
   permission notice.
 - Minecraft itself is not included or redistributed; SuperChunk requires the
@@ -86,7 +92,8 @@ Licensing summary
 
 --------------------------------------------------------------------------------
 MIT License (applies to the MIT-licensed components listed above:
-C2ME — (c) 2021-2024 ishland; FlowSched — (c) 2023 ishland; VMP — (c) 2021-2023 ishland)
+C2ME — (c) 2021-2024 ishland; FlowSched — (c) 2023 ishland; VMP — (c) 2021-2023 ishland;
+MixinSquared — (c) 2023-present Bawnorton)
 --------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

@@ -19,15 +19,8 @@ group = mod_group_id
 
 repositories {
     mavenCentral()
-    // C2ME pulls MixinSquared from jitpack (com.github.bawnorton.mixinsquared:*-neoforge).
-    maven { url 'https://jitpack.io' }
-    // MixinSquared's own release maven (group com.bawnorton.mixinsquared).
-    maven {
-        url 'https://maven.bawnorton.com/releases'
-        content {
-            includeGroup 'com.bawnorton.mixinsquared'
-        }
-    }
+    // MixinSquared is not a dependency: the @TargetHandler part SuperChunk uses is vendored under
+    // dev.superchunk.com.bawnorton.mixinsquared (see MixinSquaredBootstrap there for why).
 }
 
 base {
@@ -209,8 +202,6 @@ dependencies {
     jarJar(implementation('net.objecthunter:exp4j:0.4.8'))         // expression eval (C2ME config)
     jarJar(implementation('org.jctools:jctools-core:4.0.5'))       // lock-free queues
     jarJar(implementation('com.github.ben-manes.caffeine:caffeine:3.2.1')) // caching
-    // MixinSquared: neoforge = runtime impl (embedded); common = annotation/AP surface (compile only).
-    jarJar(implementation('com.github.bawnorton.mixinsquared:mixinsquared-neoforge:0.3.3'))
     // GPU compute (OpenCL) via LWJGL. The OpenCL ICD itself comes from the system GPU driver; the
     // LWJGL Java bindings glue our code to it. See the "LWJGL dist-switch packaging" block (the
     // `neoForge {` header comment + the `jar`/locator tasks below) for the client-vs-server split
@@ -235,8 +226,6 @@ dependencies {
     lwjglServerBundle('org.lwjgl:lwjgl:3.3.3') { transitive = false }
     lwjglServerBundle('org.lwjgl:lwjgl:3.3.3:natives-linux') { transitive = false }
     lwjglServerBundle('org.lwjgl:lwjgl:3.3.3:natives-windows') { transitive = false }
-    compileOnly 'com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3'
-    annotationProcessor 'com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3'
 
     // Dev-run classpath: C2ME's mixin config plugins (ModuleMixinPlugin) + ConfigSystem run in the
     // early bootstrap/mixin classloader, BEFORE jar-in-jar libs become visible. Expose these libs to
@@ -247,17 +236,11 @@ dependencies {
     additionalRuntimeClasspath 'net.objecthunter:exp4j:0.4.8'
     additionalRuntimeClasspath 'org.jctools:jctools-core:4.0.5'
     additionalRuntimeClasspath 'com.github.ben-manes.caffeine:caffeine:3.2.1'
-    additionalRuntimeClasspath 'com.github.bawnorton.mixinsquared:mixinsquared-neoforge:0.3.3'
     // lwjgl-opencl is needed by EVERY dev run (client + server) — neither side's game ships it.
     // (lwjgl CORE + native are NOT added here: the client run gets them from the real game, and the
     // headless server/gameTestServer runs add them per-run above — adding them globally would put a
     // second org.lwjgl on the client run's module path and reproduce the duplicate-module crash.)
     additionalRuntimeClasspath('org.lwjgl:lwjgl-opencl:3.3.3') { transitive = false }
-    // The neoforge wrapper only carries platform/* classes; the core (MixinSquaredBootstrap,
-    // DynamicSelectorHandler, the extension) lives in a NESTED jar that jarJar only unpacks in a
-    // packaged build. For the dev run, the mixin bootstrap classloader needs the core on the
-    // classpath directly, so add mixinsquared-common (== the full MixinSquared core) too.
-    additionalRuntimeClasspath 'com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3'
 
     // Example optional mod dependency with JEI
     // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime

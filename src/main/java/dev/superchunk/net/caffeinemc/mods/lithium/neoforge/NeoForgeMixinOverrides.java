@@ -37,22 +37,29 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
             if (VOXY_COMPAT && "voxy".equals(meta.getModId())) {
                 list.add(new MixinOverride(meta.getModId(), "mixin.chunk.palette", false));
             }
-            meta.getOwningFile().getConfigElement(JSON_KEY_LITHIUM_OPTIONS).ifPresent(override -> {
-                if (override instanceof Map<?, ?> overrides && overrides.keySet().stream().allMatch(key -> key instanceof String)) {
-                    overrides.forEach((key, value) -> {
-                        if (!(value instanceof Boolean) || !(key instanceof String)) {
-                            System.out.printf("[Lithium] Mod '%s' attempted to override option '%s' with an invalid value, ignoring", meta.getModId(), key);
-                            return;
-                        }
-
-                        list.add(new MixinOverride(meta.getModId(), (String) key, (Boolean) value));
-                    });
-                } else {
-                    System.out.printf("[Lithium] '%s' contains invalid Lithium option overrides, ignoring", meta.getModId());
-                }
-            });
+            meta.getOwningFile().getConfigElement(JSON_KEY_LITHIUM_OPTIONS).ifPresent(override -> addOverrides(list, meta, override));
+            // Also read the key from the mod's own [[mods]] entry. GUHAO's VIX declares it there to
+            // turn off mixin.entity.collisions.movement, whose redirect collides with its bundled
+            // ModelLoader's EntityCollisionMixin; read only at the top of the file, the override was
+            // missed and the game failed to start with an injection error.
+            meta.getConfigElement(JSON_KEY_LITHIUM_OPTIONS).ifPresent(override -> addOverrides(list, meta, override));
         }
 
         return list;
+    }
+
+    private static void addOverrides(List<MixinOverride> list, ModInfo meta, Object override) {
+        if (override instanceof Map<?, ?> overrides && overrides.keySet().stream().allMatch(key -> key instanceof String)) {
+            overrides.forEach((key, value) -> {
+                if (!(value instanceof Boolean) || !(key instanceof String)) {
+                    System.out.printf("[Lithium] Mod '%s' attempted to override option '%s' with an invalid value, ignoring", meta.getModId(), key);
+                    return;
+                }
+
+                list.add(new MixinOverride(meta.getModId(), (String) key, (Boolean) value));
+            });
+        } else {
+            System.out.printf("[Lithium] '%s' contains invalid Lithium option overrides, ignoring", meta.getModId());
+        }
     }
 }
