@@ -663,7 +663,13 @@ ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per requ
   VMP (very-many-players) ....... BUNDLED. Do not install standalone.
   Sodium ........................ Client renderer; compatible. SuperChunk widens Sodium's
                                   render-distance slider cap (client-side).
-  Bye?Pregen! (byepregen) ....... Compatible. SuperChunk defers fluid post-processing to it.
+  Bye?Pregen! (byepregen) ....... Compatible. SuperChunk defers fluid post-processing to it, and
+                                  saves its worldgen chunks through the bundled C2ME: its raw
+                                  (GC-free) saves use vanilla's IOWorker mailbox, which the bundled
+                                  C2ME never creates, and its own C2ME check cannot see the
+                                  relocated copy. In 0.5.0 (Bye Pregen 1.1.3.3) every such save
+                                  failed ("this.mailbox is null"), the chunk was lost, and each
+                                  failure's crash report stalled the server (GitHub #23).
   Structure Layout Optimizer .... Compatible. SuperChunk stands its jigsaw octree down so SLO owns
                                   jigsaw placement.
   Distant Horizons .............. Compatible AND integrated: DH's own batch generator feeds
