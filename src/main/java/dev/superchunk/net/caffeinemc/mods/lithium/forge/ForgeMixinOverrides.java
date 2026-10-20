@@ -31,6 +31,18 @@ public class ForgeMixinOverrides implements PlatformMixinOverrides {
     private static final boolean VOXY_COMPAT =
             Boolean.parseBoolean(System.getProperty("superchunk.compat.voxy", "true"));
 
+    /**
+     * Entity Collision Optimization ({@code ecopt}) 1.20.1 {@code @Redirect}s the same
+     * {@code Level.getEntities} call in {@code LivingEntity.pushEntities} as
+     * {@code mixin.entity.collisions.unpushable_cramming}, at the same priority. Only one redirect
+     * can take a call, and both are required, so the game failed to start ("Redirector
+     * getOtherPushableEntities ... failed injection check", GitHub #22). Both optimize the same
+     * cramming check; this leaves it to ecopt. (Its 1.21.1 build wraps the call and yields instead.)
+     * Kill switch: {@code -Dsuperchunk.compat.ecopt=false}.
+     */
+    private static final boolean ECOPT_COMPAT =
+            Boolean.parseBoolean(System.getProperty("superchunk.compat.ecopt", "true"));
+
     @Override
     public void applyLithiumCompat(Map<String, Option> options) {
 
@@ -43,6 +55,9 @@ public class ForgeMixinOverrides implements PlatformMixinOverrides {
         for (ModInfo meta : FMLLoader.getLoadingModList().getMods()) {
             if (VOXY_COMPAT && "voxy".equals(meta.getModId())) {
                 list.add(new MixinOverride(meta.getModId(), "mixin.chunk.palette", false));
+            }
+            if (ECOPT_COMPAT && "ecopt".equals(meta.getModId())) {
+                list.add(new MixinOverride(meta.getModId(), "mixin.entity.collisions.unpushable_cramming", false));
             }
             // NOTE: the IModFileInfo INTERFACE (forgespi 7.x) does NOT declare getConfigElement —
             // it is declared on the concrete ModFileInfo returned by ModInfo.getOwningFile()

@@ -140,4 +140,26 @@ public final class ByePregenCompat {
             LOGGER.warn("[SuperChunk-Compat] Failed to apply byepregen C2ME override — filter stays at its default.", t);
         }
     }
+
+    private static volatile boolean rawSaveNoticeLogged;
+
+    /**
+     * Whether SuperChunk's bundled C2ME stores chunks, so Bye Pregen's raw (GC-free) chunk saves must
+     * not run ({@code MixinByePregenRawSave}). Those go through vanilla's IOWorker mailbox, which the
+     * bundled C2ME's IOWorker never creates; Bye Pregen turns them off itself when it finds C2ME, by
+     * the class {@code com.ishland.c2me.base.common.registry.SerializerAccess}, which the relocated
+     * copy does not have. Without this every raw save failed ("this.mailbox is null"), the chunk was
+     * not written, and each failure built a crash report (40 s server ticks, GitHub #23).
+     */
+    public static boolean c2meStoresChunks() {
+        if (!dev.superchunk.com.ishland.c2me.rewrites.chunkio.common.C2MEStorageVanillaInterface.inUse) {
+            return false;
+        }
+        if (!rawSaveNoticeLogged) {
+            rawSaveNoticeLogged = true;
+            LOGGER.info("[SuperChunk-Compat] byepregen detected — its raw chunk saves are off; chunks are saved "
+                    + "through SuperChunk's bundled C2ME (what Bye Pregen does itself when it finds C2ME).");
+        }
+        return true;
+    }
 }

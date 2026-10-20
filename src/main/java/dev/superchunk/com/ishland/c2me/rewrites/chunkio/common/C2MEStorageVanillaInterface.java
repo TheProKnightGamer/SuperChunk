@@ -18,11 +18,18 @@ import java.util.concurrent.CompletableFuture;
  */
 public class C2MEStorageVanillaInterface extends IOWorker implements IDirectStorage {
 
+    /**
+     * SuperChunk: set once this replaces vanilla's IOWorker, so code outside the chunk storage can
+     * tell that vanilla's write path (its mailbox) is not there ({@code ByePregenCompat}).
+     */
+    public static volatile boolean inUse;
+
     private final C2MEStorageThread backend;
 
     public C2MEStorageVanillaInterface(Path path, boolean dsync, String name) {
         super(path, dsync, name);
         this.backend = new C2MEStorageThread(path, dsync);
+        inUse = true;
     }
 
     @Override

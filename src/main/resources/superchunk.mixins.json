@@ -62,6 +62,7 @@
     "MixinWorldGenRegionInlineHeights",
     "MixinXoroshiroReseedInPlace",
     "compat.MixinSkeinCommands",
+    "compat.MixinByePregenRawSave",
     "compat.MixinSkeinConfig"
   ],
   "client": [

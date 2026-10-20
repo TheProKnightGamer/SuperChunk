@@ -1,5 +1,43 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## PERFORMANT, ECOPT AND BYE PREGEN (2026-10-20) — find + Bye Pregen also on neo
+
+GitHub #22 (Forge, one big pack) and #23 (NeoForge). Three of the four crashes were ours:
+
+- Performant: a world crashed with `ClassCastException: Collections$UnmodifiableCollection cannot
+  be cast to ArrayList` in `EntitySection.getEntities(EntityTypeTest, ...)` (`m_188348_`).
+  Performant replaces `ClassInstanceMultiMap.find` to hand back the type's list itself and casts
+  that to `ArrayList` in its `EntitySectionMixin`; the bundled Lithium's
+  `collections.entity_filtering` overwrote `find` at a higher priority (1000 vs Performant's
+  lower one), which silently replaced Performant's version. It is now a `@WrapMethod` that stands
+  down via `ForeignHooks` (probe on `ClassInstanceMultiMap`, `find -> m_13533_` in
+  `MixinTargetScan.SRG_NAMES`); with Lithium's `mixin.experimental` off by default every per-type
+  list stays an ArrayList.
+- Entity Collision Optimization (`ecopt` 1.20.1.1) `@Redirect`s the same `Level.getEntities` call
+  in `LivingEntity.pushEntities` as `unpushable_cramming`, both required, same priority: "Redirector
+  getOtherPushableEntities ... failed injection check". `ForgeMixinOverrides` turns
+  `mixin.entity.collisions.unpushable_cramming` off when `ecopt` is loaded
+  (`-Dsuperchunk.compat.ecopt=false` to keep it). Its 1.21.1 build wraps the call and yields, so
+  neo has no override.
+- Bye Pregen 1.1.3.3 (#23, NeoForge; its 1.20.1 build has the same code): its raw (GC-free) chunk
+  saves go through vanilla `IOWorker.submitTask`, whose mailbox the bundled C2ME's IOWorker never
+  creates; Bye Pregen turns those saves off when it finds C2ME, by the un-relocated class
+  `com.ishland.c2me.base.common.registry.SerializerAccess`. Every save failed ("this.mailbox is
+  null"), the chunk was lost, and each failure built a crash report (40 s ticks on Windows: OSHI's
+  hardware query). `compat.MixinByePregenRawSave` answers its `GcFreeChunkSerializer.shouldUseGcFree`
+  with false while `C2MEStorageVanillaInterface.inUse`, so those chunks are saved through C2ME.
+- The fourth (Simply Swords Overhaul 1.0.4: `@Inject` into `StormsEdgeSwordItem.m_5929_`) is
+  theirs: Simply Swords 1.70.2's `StormsEdgeSwordItem` has no `onUseTick` override.
+
+Tested with fixture mods, since the real jars are CurseForge-only (dedicated server, r128, Forge
+47.4.28; the Bye Pregen one also on NeoForge 21.1.248): one replaces `find` and casts as in the
+report, one redirects `pushEntities` with mod id `ecopt`, one is mod id `byepregen` with the same
+class and method and a raw save through `submitTask`. On 0.5.0 each fails the way its report did:
+the cast crash on an entity tick, the redirect conflict before boot, and 3,854 failed saves
+("this.f_63517_ is null"; 40 on NeoForge, "this.mailbox"). With these changes each logs its
+stand-down, rule-disabled or raw-saves-off line, generates 289 chunks and reports no errors.
+SuperChunk alone: the same, with no stand-down lines.
+
 ## SPAWN AND QLIPHOTH AWAKENING CRASHES (2026-10-19) — Forge only
 
 GitHub #20 ("Crash with Spawn"): the client failed at mod construction with `Registry Object not

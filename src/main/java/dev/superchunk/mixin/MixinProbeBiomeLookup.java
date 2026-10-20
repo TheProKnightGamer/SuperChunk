@@ -40,7 +40,9 @@ import org.spongepowered.asm.mixin.Mixin;
         "net.minecraft.world.level.levelgen.Aquifer$NoiseBasedAquifer",
         "net.minecraft.world.level.levelgen.material.MaterialRuleList",
         "net.minecraft.world.level.levelgen.OreVeinifier",
-        "net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator"
+        "net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator",
+        // the bundled Lithium's ClassInstanceMultiMap.find replica (collections.entity_filtering)
+        "net.minecraft.util.ClassInstanceMultiMap"
 }, priority = Integer.MAX_VALUE)
 public abstract class MixinProbeBiomeLookup {
 }
