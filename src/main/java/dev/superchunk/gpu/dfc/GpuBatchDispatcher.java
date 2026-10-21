@@ -102,9 +102,22 @@ public final class GpuBatchDispatcher implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicLong colDedupCols = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong colDedupUnique = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * COLUMN HOISTING ({@code -Dsuperchunk.gpu.colHoist}, default on): the corner program is
+     * emitted with {@link OpenCLAstEmitter#emitMultiChunk(List, NoiseRegistry, boolean)}'s
+     * per-column slots, so every batch runs {@code df_batch_columns_multichunk} over its
+     * {@code K*dimX*dimZ} columns before the corner kernel, which then reads the y-independent
+     * subtrees (continentalness, erosion, ridges, the offset/factor/jaggedness splines, ...)
+     * instead of recomputing them at each corner. Same {@code out}, bit for bit. Takes
+     * precedence over {@link #COL_DEDUP}, whose kernels a hoisted program does not carry.
+     */
+    static final boolean COL_HOIST = Boolean.parseBoolean(System.getProperty("superchunk.gpu.colHoist", "true"));
+
     private final String kernelName;
     private final int realBytes;
     private final int rootCount;
+    /** Per-column slots of a hoisted program (0 = standard program, no column kernel). */
+    private final int columnSlots;
 
     // Immutable noise-state device buffers (uploaded once, READ-ONLY, shared by all slots).
     private final long noiseDescMem;
@@ -188,8 +201,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
     private final AtomicLong slotWaitNanos = new AtomicLong();
     private final AtomicLong slotAcquires = new AtomicLong();
 
-    private GpuBatchDispatcher(CLProgram program, boolean fp32, int rootCount, boolean profilingQueues,
-                               int depth, String kernelName,
+    private GpuBatchDispatcher(CLProgram program, boolean fp32, int rootCount, int columnSlots,
+                               boolean profilingQueues, int depth, String kernelName,
                                long noiseDescMem, long noiseFactorsMem, long nPermMem, long nActiveMem,
                                long nXoMem, long nYoMem, long nZoMem, long nAmpMem) {
         this.program = program;
@@ -198,6 +211,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         this.kernelName = kernelName;
         this.realBytes = fp32 ? Float.BYTES : Double.BYTES;
         this.rootCount = rootCount;
+        this.columnSlots = columnSlots;
         this.noiseDescMem = noiseDescMem;
         this.noiseFactorsMem = noiseFactorsMem;
         this.nPermMem = nPermMem;
@@ -209,7 +223,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // The column-dedup kernels only exist in the standard emitMultiChunk source (the
         // fp32 climate variant has no use for them), so probe rather than assume.
         boolean dedupOk = false;
-        if (COL_DEDUP) {
+        if (COL_DEDUP && columnSlots == 0) {
             long probeA = NULL, probeB = NULL;
             try {
                 probeA = program.kernel("df_batch_lattice_uniqcol");
@@ -333,7 +347,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         try {
             multi = climF32d
                     ? OpenCLAstEmitter.emitMultiChunkF32D(roots, registry)
-                    : OpenCLAstEmitter.emitMultiChunk(roots, registry);
+                    : OpenCLAstEmitter.emitMultiChunk(roots, registry, COL_HOIST);
         } catch (Throwable t) {
             LOGGER.warn("[SuperChunk-GPU] [batch] emitMultiChunk failed — batched dispatch unavailable.", t);
             return null;
@@ -355,7 +369,11 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             LOGGER.info("[SuperChunk-GPU] === generated CROSS-CHUNK batched DF kernel (M={}) ===\n{}", multi.rootCount(), multi.source());
         }
 
-        CLProgram program = CLProgramCache.getOrBuild(fullSource, (climF32d || fp32) ? "-DUSE_FP32" : "");
+        String buildOptions = (climF32d || fp32) ? "-DUSE_FP32" : "";
+        if (!DUMP_BATCH_TO.isEmpty() && !climF32d) {
+            dumpForReplay(roots, noiseSrc + "\n" + supportSrc + "\n", fullSource, buildOptions, registry, multi);
+        }
+        CLProgram program = CLProgramCache.getOrBuild(fullSource, buildOptions);
         if (program == null) {
             LOGGER.warn("[SuperChunk-GPU] [batch] batched kernel build failed — batched dispatch unavailable.");
             return null;
@@ -380,11 +398,15 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // it back on when the decide-kernel metric is wanted in an `on` run.
             boolean profiling = CompactIds.PROBE && fused != null
                     && (!CompactIds.CONSUME || Boolean.getBoolean("superchunk.gpu.decideProfile"));
-            GpuBatchDispatcher d = new GpuBatchDispatcher(program, fp32, multi.rootCount(), profiling,
-                    Math.max(1, configPipelineDepth()),
+            GpuBatchDispatcher d = new GpuBatchDispatcher(program, fp32, multi.rootCount(), multi.columnSlots(),
+                    profiling, Math.max(1, configPipelineDepth()),
                     climF32d ? "df_batch_lattice_multichunk_f32d" : KERNEL_NAME,
                     descMem, factorsMem, permMem, activeMem, xoMem, yoMem, zoMem, ampMem);
             program.logKernelWorkGroupInfo(d.slots[0].kernel, "df_batch_lattice_multichunk (corner)");
+            if (multi.columnSlots() > 0) {
+                LOGGER.info("[SuperChunk-GPU] [batch] corner program hoists {} column slot(s) out of the corner kernel.",
+                        multi.columnSlots());
+            }
             // COMPACT-IDS (Stage 5): chain-build the decide kernel for this fused group.
             // Entirely fail-soft: any failure logs + counts and leaves d's corner path as-is.
             if (CompactIds.PROBE && fused != null) {
@@ -408,6 +430,79 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             program.close();
             return null;
         }
+    }
+
+    /**
+     * Diagnostic ({@code -Dsuperchunk.gpu.dumpBatchTo=<dir>}, default unset): writes each corner
+     * program as compiled here AND its counterpart with column hoisting the other way, each with
+     * its own noise state, so {@code tools/cornerbench.c} can replay both on the real router
+     * outside the game: bit-compare their outputs and time them interleaved.
+     */
+    private static final String DUMP_BATCH_TO = System.getProperty("superchunk.gpu.dumpBatchTo", "").trim();
+    private static final AtomicLong DUMP_SEQ = new AtomicLong();
+
+    private static void dumpForReplay(List<AstNode> roots, String prelude, String fullSource, String options,
+                                      NoiseRegistry registry, OpenCLAstEmitter.MultiResult multi) {
+        try {
+            java.nio.file.Path dir = java.nio.file.Path.of(DUMP_BATCH_TO);
+            java.nio.file.Files.createDirectories(dir);
+            long seq = DUMP_SEQ.incrementAndGet();
+            writeReplay(dir.resolve("batch" + seq + (multi.columnSlots() > 0 ? "-hoist" : "-plain")),
+                    fullSource, options, registry, multi);
+            NoiseRegistry otherRegistry = new NoiseRegistry();
+            OpenCLAstEmitter.MultiResult other =
+                    OpenCLAstEmitter.emitMultiChunk(roots, otherRegistry, multi.columnSlots() == 0);
+            if (other.columnSlots() != multi.columnSlots()) {
+                writeReplay(dir.resolve("batch" + seq + (other.columnSlots() > 0 ? "-hoist" : "-plain")),
+                        prelude + other.source(), options, otherRegistry, other);
+            }
+            LOGGER.info("[SuperChunk-GPU] [batch] dumped corner program #{} (M={}) for replay to {}",
+                    seq, multi.rootCount(), dir);
+        } catch (Throwable t) {
+            LOGGER.warn("[SuperChunk-GPU] [batch] replay dump failed.", t);
+        }
+    }
+
+    private static void writeReplay(java.nio.file.Path prefix, String source, String options,
+                                    NoiseRegistry r, OpenCLAstEmitter.MultiResult multi) throws java.io.IOException {
+        String p = prefix.toString();
+        boolean f32 = options.contains("-DUSE_FP32");   // reals are uploaded as float then
+        java.nio.file.Files.writeString(java.nio.file.Path.of(p + ".cl"), source);
+        java.nio.file.Files.writeString(java.nio.file.Path.of(p + ".meta"),
+                "options=" + CLProgram.effectiveOptions(options) + "\n"
+                        + "roots=" + multi.rootCount() + "\n"
+                        + "columnSlots=" + multi.columnSlots() + "\n"
+                        + "realBytes=" + (f32 ? 4 : 8) + "\n");
+        writeInts(p + ".desc", r.descArray());
+        writeReals(p + ".factors", r.factorArray(), f32);
+        java.nio.file.Files.write(java.nio.file.Path.of(p + ".perm"), PermFormat.active().encode(r.permArray()));
+        writeInts(p + ".active", r.activeArray());
+        writeReals(p + ".xo", r.xoArray(), f32);
+        writeReals(p + ".yo", r.yoArray(), f32);
+        writeReals(p + ".zo", r.zoArray(), f32);
+        writeReals(p + ".amp", r.ampArray(), f32);
+    }
+
+    private static void writeInts(String path, int[] a) throws java.io.IOException {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(Math.max(1, a.length) * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (int v : a) {
+            b.putInt(v);
+        }
+        java.nio.file.Files.write(java.nio.file.Path.of(path), b.array());
+    }
+
+    /** Little-endian reals, narrowed to float for an fp32 program exactly as uploadReals does. */
+    private static void writeReals(String path, double[] a, boolean f32) throws java.io.IOException {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(Math.max(1, a.length) * (f32 ? 4 : 8))
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (double v : a) {
+            if (f32) {
+                b.putFloat((float) v);
+            } else {
+                b.putDouble(v);
+            }
+        }
+        java.nio.file.Files.write(java.nio.file.Path.of(path), b.array());
     }
 
     // ----------------------------------------------------------------------
@@ -591,10 +686,29 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             program.setArgInt(s.kernel, a++, total);
             program.setArgPointer(s.kernel, a++, s.outMem);
 
+            // COLUMN HOISTING: the column slots for every (chunk, corner column) first, on the
+            // same in-order queue, so the corner kernel below reads finished values.
+            long[] colEvtOut = null;
+            if (columnSlots > 0) {
+                final int totalCols = K * dimX * dimZ;
+                s.ensureColSlotCapacity((long) totalCols * columnSlots);
+                int c = 8;   // args 0..7 are the immutable noise pointers, bound once per slot
+                program.setArgPointer(s.colKernel, c++, s.originsMem);
+                program.setArgInt(s.colKernel, c++, strx);
+                program.setArgInt(s.colKernel, c++, strz);
+                program.setArgInt(s.colKernel, c++, dimX);
+                program.setArgInt(s.colKernel, c++, dimZ);
+                program.setArgInt(s.colKernel, c++, totalCols);
+                program.setArgPointer(s.colKernel, c, s.colSlotMem);
+                colEvtOut = profilingQueues ? new long[1] : null;
+                program.enqueue1DAsync(s.queue, s.colKernel, CLProgram.roundUpGlobal(totalCols), colEvtOut);
+                program.setArgPointer(s.kernel, a++, s.colSlotMem);
+            }
+
             // One work-item per (chunk, cell); each writes all M roots for its chunk —
             // unless the column-dedup path takes over below and produces the same `out`.
             long[] cornerEvtOut = profilingQueues ? new long[1] : null;
-            if (!enqueueCornerDeduped(s, originsXYZ, K, strx, stry, strz, dimX, dimY, dimZ, n,
+            if (columnSlots > 0 || !enqueueCornerDeduped(s, originsXYZ, K, strx, stry, strz, dimX, dimY, dimZ, n,
                     total, cornerEvtOut)) {
                 program.enqueue1DAsync(s.queue, s.kernel, CLProgram.roundUpGlobal(total), cornerEvtOut);
             }
@@ -608,6 +722,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             inf = new InFlight(s, K, rootCount * n, outElems);
             if (cornerEvtOut != null) {
                 inf.cornerEvt = cornerEvtOut[0];
+            }
+            if (colEvtOut != null) {
+                inf.colEvt = colEvtOut[0];
             }
 
             // ---- COMPACT-IDS decide chain: aux upload (async) + chained decide
@@ -734,6 +851,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 inf.idsReadEvt = NULL;
                 CLProgram.releaseEvent(inf.cornerEvt);
                 inf.cornerEvt = NULL;
+                CLProgram.releaseEvent(inf.colEvt);
+                inf.colEvt = NULL;
             }
             return null;
         } finally {
@@ -783,6 +902,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // Before this existed the corner kernel and both DMAs were enqueued with a null
         // event, so ~40% of in-batch GPU time was structurally unattributable.
         long cornerEvt = NULL;
+        // Column-slot kernel event (hoisted programs, profiling queues only); it runs right
+        // before the corner kernel and is counted as part of it.
+        long colEvt = NULL;
         // 0 = unchecked, 1 = ids DMA verified CL_COMPLETE, -1 = failed (corner-only fallback)
         private int idsState;
         int decidePresent;
@@ -867,7 +989,14 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                     out[i] = seq[i][2] - seq[i][1];
                     last = seq[i];
                 }
-                out[4] = last[2] - seq[0][1];
+                long spanStart = seq[0][1];
+                long[] col = colEvt == NULL ? null : CLProgram.eventTimes(colEvt);
+                if (col != null) {
+                    // Hoisted program: the column kernel is the corner stage's first half.
+                    out[0] += col[2] - col[1];
+                    spanStart = col[1];
+                }
+                out[4] = last[2] - spanStart;
                 return out;
             } catch (Throwable t) {
                 return null;
@@ -1027,6 +1156,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             idsReadEvt = NULL;
             CLProgram.releaseEvent(cornerEvt);
             cornerEvt = NULL;
+            CLProgram.releaseEvent(colEvt);
+            colEvt = NULL;
             freeSlots.offer(slot);
         }
     }
@@ -1655,6 +1786,12 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         long[] colKeys;
         int[] colVals;
 
+        // COLUMN HOISTING (see COL_HOIST): the column-slot kernel and its K*dimX*dimZ*slots
+        // buffer, written and read on this slot's queue only. NULL when the program has none.
+        long colKernel = NULL;
+        long colSlotMem = NULL;
+        long colSlotCapacityElems = 0;
+
         // Growable per-dispatch buffers (slot-exclusive).
         long originsMem = NULL;        // K*3 ints, re-uploaded each batch
         int originsCapacityInts = 0;
@@ -1724,6 +1861,27 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             }
             this.queue = q;
             this.kernel = k;
+            if (columnSlots > 0) {
+                // Unlike the dedup kernels this is not optional: the corner kernel reads its
+                // output, so a failure here fails the slot (and compile() the dispatcher).
+                try {
+                    colKernel = program.kernel("df_batch_columns_multichunk");
+                    program.setArgPointer(colKernel, 0, noiseDescMem);
+                    program.setArgPointer(colKernel, 1, noiseFactorsMem);
+                    program.setArgPointer(colKernel, 2, nPermMem);
+                    program.setArgPointer(colKernel, 3, nActiveMem);
+                    program.setArgPointer(colKernel, 4, nXoMem);
+                    program.setArgPointer(colKernel, 5, nYoMem);
+                    program.setArgPointer(colKernel, 6, nZoMem);
+                    program.setArgPointer(colKernel, 7, nAmpMem);
+                } catch (Throwable t) {
+                    // The constructor never completes, so free() never runs for this slot.
+                    CLProgram.releaseKernel(colKernel);
+                    CLProgram.releaseKernel(k);
+                    CLProgram.releaseQueue(q);
+                    throw t;
+                }
+            }
             if (colDedupAvailable) {
                 try {
                     uniqKernel = program.kernel("df_batch_lattice_uniqcol");
@@ -1828,6 +1986,18 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         }
 
         /** Grows the distinct-column corner buffer to {@code elems} reals. */
+        /** Grows the column-slot buffer to {@code elems} reals. */
+        void ensureColSlotCapacity(long elems) {
+            if (elems <= colSlotCapacityElems) {
+                return;
+            }
+            CLProgram.releaseMem(colSlotMem);
+            colSlotMem = NULL;
+            colSlotCapacityElems = 0;
+            colSlotMem = program.createReadWriteBuffer(elems * realBytes);
+            colSlotCapacityElems = elems;
+        }
+
         void ensureUniqCapacity(long elems) {
             if (elems <= uniqCapacityElems) {
                 return;
@@ -2139,6 +2309,11 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             }
             CLProgram.releaseMem(outMem);
             outMem = NULL;
+            CLProgram.releaseKernel(colKernel);
+            colKernel = NULL;
+            CLProgram.releaseMem(colSlotMem);
+            colSlotMem = NULL;
+            colSlotCapacityElems = 0;
             // Column dedup (no-ops when it was never armed).
             CLProgram.releaseMem(colXZMem);
             colXZMem = NULL;

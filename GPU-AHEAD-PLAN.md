@@ -1,4 +1,4 @@
-# GPU-AHEAD PLAN — status and next steps (updated 2026-09-28)
+# GPU-AHEAD PLAN — status and next steps (updated 2026-10-21)
 
 The 2026-07-01 plan set out to move the per-block noise-stage decision onto the GPU: instead of
 reading back density corner grids for the CPU to interpolate and decide, a batched GPU kernel
@@ -69,6 +69,7 @@ Throughput (RTX 3070, i7-14700K; chunks/s):
 | 2026-08-08 | Round 10, r2048, interleaved, quiet box | GPU 1,258.2 vs CPU-only 836.1 vs vanilla 114.9 (11.0×). Kernel fp64 op count cut by exact IEEE identities: noise chain −22%, device time 1.542 → 1.354 ms/chunk |
 | 2026-09-21 | r1024, 12 workers | GPU 711–766 vs CPU 464–480 |
 | 2026-09-25 | r1024, 12 workers | GPU 903–959 (`analysis/worldgen-big-2026-09-25.md`) |
+| 2026-10-21 | Corner kernel: column hoisting + per-corner CSE (`analysis/gpu-corner-hoist-2026-10-21.md`) | Corner device time −83 to −89% (1.0–1.4 → 0.13–0.18 ms/chunk), bit-exact; r1024 at 22 workers 990 → 1,123 cps (+13.4%), CPU per chunk −9.8% |
 
 Round 8 also took the decide kernel to its floor (async id readback, a proven high-air fast path,
 lazy-staged vein evaluation): what remains is vanilla's own per-block 3D-noise math. Round 10 found
@@ -103,10 +104,16 @@ Decisions the measurements settled:
 
 Ranked by expected payoff (from `analysis/review-2026-09-25.md` and the GPU-mode A/Bs since):
 
-1. **Corner-kernel redundancy** (M–L). The fused corner kernel recomputes cached 2D and shared
-   subtrees, an inferred ~5–7× redundancy. This is the main GPU-capacity lever now that the GPU is
-   the scarce resource at high worker counts.
-2. **Cold start** (M). Per-DF programs compile on the server thread, plus a redundant fused
+1. ~~**Corner-kernel redundancy**~~ — done 2026-10-21 (`analysis/gpu-corner-hoist-2026-10-21.md`).
+   y-independent subtrees are computed once per corner column by a pre-pass kernel, and
+   `sloped_cheese` with its blended noise once per corner: corner device time −83 to −89%, output
+   bit-exact. What is left of the corner kernel is the blended noise (once per corner) and the cave
+   noises; the decide kernel is now a larger share of the GPU's time.
+2. **Cold start** (M). Updated 2026-10-21: with function dedup and the hoisted corner program, a
+   truly cold boot is 278 → 236 s; the hoisted corner program builds in ~5 s. The two largest
+   per-DF programs still take ~67 s each: dedup shrinks their text 10× but NVIDIA inlines the
+   shared functions back. Hoisting them like the corner program (a column pre-pass for
+   `df_batch_lattice`; `df_batch` would need per-point slots) is the remaining lever. Per-DF programs compile on the server thread, plus a redundant fused
    per-chunk program: ~6 min with a cold cache, ~1–2 min is reachable. Measured 2026-10-10
    (RTX 3070, driver 595, `tools/compilebench.c` on programs dumped with
    `-Dsuperchunk.gpu.dumpProgramsTo`):
