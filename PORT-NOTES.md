@@ -1,5 +1,25 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## GPU CORNER KERNEL: COLUMN HOISTING + PER-CORNER CSE (2026-10-21) — same as neo
+
+`OpenCLAstEmitter` and `GpuBatchDispatcher` are copied verbatim from neo (the files were identical
+before; the new code is Java 17-clean: records and instanceof patterns only). Full write-up in neo's
+`analysis/gpu-corner-hoist-2026-10-21.md`; `tools/cornerbench.c` is copied too.
+
+- The corner kernel computes every y-independent subtree that samples noise or a spline
+  (continentalness, erosion, ridges, the offset/factor/jaggedness splines; 28 slots in the
+  overworld) once per (chunk, corner column) in `df_batch_columns_multichunk`, and `sloped_cheese`
+  with its blended noise once per corner (`_cor`). Kill switches `-Dsuperchunk.gpu.colHoist`,
+  `-Dsuperchunk.gpu.cornerCse`, `-Dsuperchunk.gpu.dedupFunctions` (all default on).
+- Real router replayed with `cornerbench` (dump via `-Dsuperchunk.gpu.dumpBatchTo`): corner time
+  1.056 → 0.130 ms/chunk (−87.7%, K=16, 300 batches), bit-exact.
+- Parity (sc-forge-test, Forge 47.4.x template, r512, 5,490 chunk positions): compact ids off, GPU
+  plain = GPU hoisted = CPU on noise-fill and surface hashes, 0 mismatches; compact ids on, plain =
+  hoisted, both 2 chunks off CPU (the known fp32 decide flips). Boot self-tests with
+  `gpu.selftest.gpu_parity=true`: FP64 bit-exact PASS, `[batch-emit]` 88,200 values 0 mismatches.
+- Throughput, r1024, 22 workers, 16 GB, alternating legs on the same jar: plain 19.55 / 19.62 s,
+  hoisted 14.96 / 14.12 s: 849 → 1,144 cps (+34.7%), process CPU −8.1%. (Neo: +13.4%.)
+
 ## PERFORMANT, ECOPT AND BYE PREGEN (2026-10-20) — find + Bye Pregen also on neo
 
 GitHub #22 (Forge, one big pack) and #23 (NeoForge). Three of the four crashes were ours:
