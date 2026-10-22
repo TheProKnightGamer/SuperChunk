@@ -110,7 +110,12 @@ kernels — all ~104 density functions are compiled to OpenCL by a custom AST
 emitter — then a completer thread slices the results per chunk. A decide kernel
 chained after them picks every block of the batch (terrain, aquifer water and
 lava, ore veins) and reads back one byte per block, which the chunk is written
-from directly ("compact IDs", on by default with the GPU). Compiled program
+from directly ("compact IDs", on by default with the GPU). The corner kernel
+computes the terrain's 2D shape (continentalness, erosion, ridges and the
+offset/factor/jaggedness splines) once per corner column in a small pre-pass
+instead of at every corner, and `sloped_cheese` once per corner. That cut the
+corner kernel, most of the GPU's time, by 83–89%, with the same output bit for
+bit (`analysis/gpu-corner-hoist-2026-10-21.md`). Compiled program
 binaries are cached to disk, so the one-time JIT only recurs when your driver
 changes (warm boot is ~11–13 s; a cold cache takes several minutes). On NVIDIA,
 where most of a build is ptxas, SuperChunk compiles at ptxas level 1

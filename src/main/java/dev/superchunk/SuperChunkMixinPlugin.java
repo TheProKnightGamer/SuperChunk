@@ -87,6 +87,10 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
             return Boolean.parseBoolean(System.getProperty("superchunk.client.sodiumRenderDistanceCap", "true"))
                     && dev.superchunk.compat.OptionalTargets.present(targetClassName);
         }
+        if (mixinClassName.endsWith(".MixinByePregenRawSave")) {
+            return dev.superchunk.compat.ByePregenCompat.INSTALLED
+                    && dev.superchunk.compat.OptionalTargets.present(targetClassName);
+        }
         if (mixinClassName.startsWith("dev.superchunk.mixin.compat.MixinSkein")) {
             // Each Skein hook names every one of Skein's package roots; only one exists in any build.
             return dev.superchunk.compat.OptionalTargets.present(targetClassName);

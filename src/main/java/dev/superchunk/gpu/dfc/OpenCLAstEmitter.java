@@ -161,23 +161,80 @@ public final class OpenCLAstEmitter {
      */
     private final Map<AstNode, Integer> decideGrids;
 
+    /**
+     * COLUMN HOISTING mode ({@link #emitMultiChunk(List, NoiseRegistry, boolean)} only). Every
+     * subtree whose value cannot depend on {@code y} ({@link #yFree}) and that samples noise or
+     * a spline ({@link #costly}) becomes a per-column SLOT: a pre-pass kernel computes it once
+     * per (chunk, corner column) and the corner kernel reads {@code _col[slot]} instead of
+     * re-evaluating it at every one of the column's corners. This is the corner kernel's big
+     * redundancy: vanilla caches continentalness, erosion, ridges and the offset/factor/
+     * jaggedness splines per column ({@code flat_cache}/{@code cache_2d}), while the corner
+     * kernel inlines straight through those markers, so it recomputed all of them at each of
+     * the 49 corners of a column, and several times per corner (each nested spline level
+     * re-samples its coordinate noise, and {@code sloped_cheese} is read up to three times).
+     *
+     * <p>Bit-exact by construction: a slot is the same generated function, called at the same
+     * {@code (x, z)}, and FP_CONTRACT is off, so the value is identical wherever it is computed.
+     * The only {@code y} a slot function can see is a zero-scaled one ({@code (real) y * 0.0},
+     * i.e. +0.0 or -0.0), which every noise sampler absorbs at its first {@code y + yo} add.
+     * Always runs with {@link #dedupFunctions}, so the structurally identical copies of a
+     * subtree share one function and therefore one slot. Signatures carry two extra
+     * parameters, {@code __global const real* _col} and the per-corner values
+     * {@code real* _cor} ({@link #cornerCse}).
+     */
+    private final boolean hoistColumns;
+    /**
+     * FUNCTION DEDUP ({@code -Dsuperchunk.gpu.dedupFunctions}, default on; always on with
+     * {@link #hoistColumns}; never in decide mode). Node functions with the same expression,
+     * spline functions with the same body and spline constant arrays with the same bits are
+     * emitted once. Exact: a generated function is a pure function of {@code (x, y, z)} and the
+     * shared buffers, so the same text over the same (already deduped) callees is the same
+     * value. It matters for compile time: McToAst rebuilds every reference to a router DF as a
+     * fresh subtree, so the overworld programs carried many copies of the same splines, and
+     * NVIDIA's build time grows with the text.
+     */
+    private final boolean dedupFunctions;
+    private final Map<AstNode, Boolean> yFreeMemo = new IdentityHashMap<>();
+    private final Map<CubicSpline<?, ?>, Boolean> splineYFreeMemo = new IdentityHashMap<>();
+    private final Map<AstNode, Boolean> costlyMemo = new IdentityHashMap<>();
+    /** Hoisted slots: generated function name -> slot index, assigned in dependency order. */
+    private final Map<String, Integer> slotByFn = new java.util.LinkedHashMap<>();
+    private final Map<String, String> nodeBodyMemo = new java.util.HashMap<>();
+    private final Map<String, String> splineBodyMemo = new java.util.HashMap<>();
+    private final Map<String, Integer> floatArrayMemo = new java.util.HashMap<>();
+    /** Hoist mode: every committed function's full text by name, in commit order (for the corner CSE). */
+    private final Map<String, String> fnText = new java.util.LinkedHashMap<>();
+
     private OpenCLAstEmitter(NoiseRegistry noiseRegistry, String tag) {
-        this(noiseRegistry, tag, null);
+        this(noiseRegistry, tag, null, false);
     }
 
     private OpenCLAstEmitter(NoiseRegistry noiseRegistry, String tag, Map<AstNode, Integer> decideGrids) {
+        this(noiseRegistry, tag, decideGrids, false);
+    }
+
+    private OpenCLAstEmitter(NoiseRegistry noiseRegistry, String tag, Map<AstNode, Integer> decideGrids,
+                             boolean hoistColumns) {
         this.noiseRegistry = noiseRegistry;
         this.tag = tag == null ? "" : tag;
         this.decideGrids = decideGrids;
+        this.hoistColumns = hoistColumns && decideGrids == null;
+        this.dedupFunctions = this.hoistColumns
+                || (decideGrids == null && Boolean.parseBoolean(System.getProperty("superchunk.gpu.dedupFunctions", "true")));
         // Decide mode forces the flat-pointer form (its program is tiny — the
         // bundleNoiseState cold-compile lever is irrelevant there) and threads the
         // extra ScDecG value-struct through every generated function instead.
-        this.bundleNoise = decideGrids == null && bundleNoiseState();
+        this.bundleNoise = decideGrids == null && !this.hoistColumns && bundleNoiseState();
         if (decideGrids != null) {
             this.treeParams = NOISE_PARAMS + ", ScDecG _g";
             this.treeArgs = NOISE_ARGS + ", _g";
             this.noiseValueFn = "sc_dec_noise_value";
             this.blendedNoiseFn = "sc_dec_blended_noise";
+        } else if (this.hoistColumns) {
+            this.treeParams = NOISE_PARAMS + ", __global const real* _col, real* _cor";
+            this.treeArgs = NOISE_ARGS + ", _col, _cor";
+            this.noiseValueFn = "sc_col_noise_value";
+            this.blendedNoiseFn = "sc_col_blended_noise";
         } else if (this.bundleNoise) {
             this.treeParams = "NoiseState _ns";
             this.treeArgs = "_ns";
@@ -391,8 +448,15 @@ public final class OpenCLAstEmitter {
         return new MultiResult(src.toString(), rootFns.size());
     }
 
-    /** Result of multi-root (fused) emission: the generated source and the root count M. */
-    public record MultiResult(String source, int rootCount) {
+    /**
+     * Result of multi-root (fused) emission: the generated source, the root count M and, for a
+     * column-hoisted cross-chunk program, the number of per-column slots (0 = not hoisted: no
+     * {@code df_batch_columns_multichunk} kernel and no trailing {@code colIn} argument).
+     */
+    public record MultiResult(String source, int rootCount, int columnSlots) {
+        public MultiResult(String source, int rootCount) {
+            this(source, rootCount, 0);
+        }
     }
 
     /**
@@ -416,6 +480,24 @@ public final class OpenCLAstEmitter {
      * @throws UnsupportedDfNodeException if ANY root contains an untranslatable node
      */
     public static MultiResult emitMultiChunk(List<AstNode> roots, NoiseRegistry noiseRegistry) {
+        return emitMultiChunk(roots, noiseRegistry, false);
+    }
+
+    /**
+     * {@link #emitMultiChunk(List, NoiseRegistry)}, column-hoisted when {@code hoistColumns}
+     * (see {@link #hoistColumns}) and the roots have anything to hoist; otherwise the standard
+     * program, byte for byte. Read {@link MultiResult#columnSlots()} to tell which came back.
+     */
+    public static MultiResult emitMultiChunk(List<AstNode> roots, NoiseRegistry noiseRegistry,
+                                             boolean hoistColumns) {
+        if (hoistColumns) {
+            MultiResult hoisted = emitMultiChunkHoisted(roots, noiseRegistry);
+            if (hoisted != null) {
+                return hoisted;
+            }
+            // Nothing y-independent worth a slot. The attempt registered the same noises the
+            // standard pass registers (NoiseRegistry dedups by identity), so ids still agree.
+        }
         OpenCLAstEmitter e = new OpenCLAstEmitter(noiseRegistry, "");
         List<String> rootFns = new ArrayList<>(roots.size());
         for (AstNode root : roots) {
@@ -470,6 +552,283 @@ public final class OpenCLAstEmitter {
             appendUniqueColumnKernels(src, e, rootFns);
         }
         return new MultiResult(src.toString(), rootFns.size());
+    }
+
+    /**
+     * The column-hoisted cross-chunk program, or {@code null} when no subtree qualifies. Two
+     * kernels, enqueued in this order on one in-order queue:
+     * <ol>
+     *   <li>{@code df_batch_columns_multichunk} — one work-item per (chunk, corner column),
+     *       {@code K*dx*dz} of them, writing every slot in dependency order to
+     *       {@code colOut[gid*SC_COL_SLOTS + s]}. A slot's function reads the lower slots it
+     *       depends on back from the same row.</li>
+     *   <li>{@code df_batch_lattice_multichunk} — the standard corner kernel (same name, same
+     *       arguments, same {@code out} layout) plus a trailing {@code colIn}, pointing each
+     *       work-item's {@code _col} at its column's row. It starts by computing the per-corner
+     *       shared values ({@link #cornerCse}) into {@code _cor}.</li>
+     * </ol>
+     * Never carries the column-dedup kernels: their root calls have no {@code _col} to pass.
+     */
+    private static MultiResult emitMultiChunkHoisted(List<AstNode> roots, NoiseRegistry noiseRegistry) {
+        OpenCLAstEmitter e = new OpenCLAstEmitter(noiseRegistry, "", null, true);
+        List<String> rootExprs = new ArrayList<>(roots.size());
+        for (AstNode root : roots) {
+            rootExprs.add(e.call(root));
+        }
+        final int slots = e.slotByFn.size();
+        if (slots == 0) {
+            return null;
+        }
+        CornerCse cse = CORNER_CSE ? e.cornerCse(rootExprs) : null;
+
+        StringBuilder src = new StringBuilder();
+        // Noise forwarders that drop _col/_cor (the generated tree passes treeArgs to every noise
+        // call), forwarding to the UNTOUCHED flat samplers: same pointers, same values.
+        src.append("inline real sc_col_noise_value(int id, ").append(NOISE_PARAMS)
+                .append(", __global const real* _col, real* _cor, real x, real y, real z) {\n")
+                .append("    return df_noise_value(id, ").append(NOISE_ARGS).append(", x, y, z);\n")
+                .append("}\n")
+                .append("inline real sc_col_blended_noise(").append(NOISE_PARAMS)
+                .append(", __global const real* _col, real* _cor, int permBase, int octBase, int nLimit, int nMain, ")
+                .append("real xzMult, real yMult, real xzFactor, real yFactor, real smear, ")
+                .append("real x, real y, real z) {\n")
+                .append("    return df_blended_noise(").append(NOISE_ARGS)
+                .append(", permBase, octBase, nLimit, nMain, xzMult, yMult, xzFactor, yFactor, smear, x, y, z);\n")
+                .append("}\n");
+        e.appendFloatConstants(src);
+        if (cse == null) {
+            src.append(e.functions);
+        } else {
+            for (String fn : cse.functions()) {
+                src.append(fn);
+            }
+            rootExprs = cse.rootExprs();
+        }
+        src.append("#define SC_COL_SLOTS ").append(slots).append('\n');
+        src.append("__kernel void df_batch_columns_multichunk(\n")
+                .append("        ").append(NOISE_PARAMS).append(",\n")
+                .append("        __global const int* origins,\n")
+                .append("        const int strx, const int strz,\n")
+                .append("        const int dx, const int dz,\n")
+                .append("        const int totalCols,\n")
+                .append("        __global real* colOut) {\n")
+                .append("    int gid = get_global_id(0);\n")
+                .append("    if (gid >= totalCols) return;\n")
+                .append("    int plane = dx * dz;\n")
+                .append("    int chunkIdx = gid / plane;\n")
+                .append("    int rem = gid - chunkIdx * plane;\n")
+                .append("    int ix = rem / dz;\n")
+                .append("    int iz = rem - ix * dz;\n")
+                .append("    int x = origins[chunkIdx * 3 + 0] + ix * strx;\n")
+                // Slots never read y (that is what qualified them); any value would do.
+                .append("    int y = origins[chunkIdx * 3 + 1];\n")
+                .append("    int z = origins[chunkIdx * 3 + 2] + iz * strz;\n")
+                .append("    __global real* _w = colOut + gid * SC_COL_SLOTS;\n")
+                .append("    __global const real* _col = _w;\n")
+                // No per-corner value is reachable from a slot (cornerCse excludes them).
+                .append("    real _corv[1];\n")
+                .append("    real* _cor = _corv;\n");
+        for (Map.Entry<String, Integer> slot : e.slotByFn.entrySet()) {
+            src.append("    _w[").append(slot.getValue()).append("] = ")
+                    .append(slot.getKey()).append("(x, y, z, ").append(e.treeArgs).append(");\n");
+        }
+        src.append("}\n");
+        // Same decode as the standard kernel; x/y/z (not xx/yy/zz) because the root
+        // expressions came from call(), which writes "(x, y, z, ...)".
+        src.append("__kernel void df_batch_lattice_multichunk(\n")
+                .append("        ").append(NOISE_PARAMS).append(",\n")
+                .append("        __global const int* origins,\n")
+                .append("        const int strx, const int stry, const int strz,\n")
+                .append("        const int dx, const int dz,\n")
+                .append("        const int n, const int M, const int total,\n")
+                .append("        __global real* out,\n")
+                .append("        __global const real* colIn) {\n")
+                .append("    int gid = get_global_id(0);\n")
+                .append("    if (gid >= total) return;\n")
+                .append("    int chunkIdx = gid / n;\n")
+                .append("    int cellIdx = gid - chunkIdx * n;\n")
+                .append("    int ox = origins[chunkIdx * 3 + 0];\n")
+                .append("    int oy = origins[chunkIdx * 3 + 1];\n")
+                .append("    int oz = origins[chunkIdx * 3 + 2];\n")
+                .append("    int plane = dx * dz;\n")
+                .append("    int iy = cellIdx / plane;\n")
+                .append("    int rem = cellIdx - iy * plane;\n")
+                .append("    int ix = rem / dz;\n")
+                .append("    int iz = rem - ix * dz;\n")
+                .append("    int x = ox + ix * strx;\n")
+                .append("    int y = oy + iy * stry;\n")
+                .append("    int z = oz + iz * strz;\n")
+                .append("    int base = chunkIdx * M * n + cellIdx;\n")
+                .append("    __global const real* _col = colIn + (chunkIdx * plane + rem) * SC_COL_SLOTS;\n");
+        List<String> shared = cse == null ? List.of() : cse.compute();
+        src.append("    real _corv[").append(Math.max(1, shared.size())).append("];\n")
+                .append("    real* _cor = _corv;\n");
+        for (int i = 0; i < shared.size(); i++) {
+            src.append("    _corv[").append(i).append("] = ").append(shared.get(i))
+                    .append("(x, y, z, ").append(e.treeArgs).append(");\n");
+        }
+        for (int k = 0; k < rootExprs.size(); k++) {
+            src.append("    out[base + ").append(k).append(" * n] = ").append(rootExprs.get(k)).append(";\n");
+        }
+        src.append("}\n");
+        return new MultiResult(src.toString(), rootExprs.size(), slots);
+    }
+
+    /** Per-corner CSE in hoisted programs ({@code -Dsuperchunk.gpu.cornerCse}, default on). */
+    private static final boolean CORNER_CSE =
+            Boolean.parseBoolean(System.getProperty("superchunk.gpu.cornerCse", "true"));
+    /** Cap on per-corner values: each is a private slot in every corner work-item. */
+    private static final int MAX_CORNER_SLOTS = 32;
+
+    /** {@link #cornerCse} result: rewritten functions (commit order), values to compute (in order), roots. */
+    private record CornerCse(List<String> functions, List<String> compute, List<String> rootExprs) {
+    }
+
+    private record CallSite(String callee, boolean conditional) {
+    }
+
+    /**
+     * PER-CORNER CSE over a finished hoisted program. Some y-dependent subtrees are evaluated
+     * more than once per corner: vanilla's final density reads {@code sloped_cheese} as its
+     * range_choice input and again inside either branch, and with it the blended 3D noise, the
+     * most expensive sampler left after hoisting. A function that is called on two or more paths
+     * from the corner roots, and on at least one path that no branch can skip, is computed once
+     * at the top of the corner kernel into {@code _cor[i]}, and every call to it reads that.
+     *
+     * <p>Exact whatever the branch analysis says: the generated functions are pure, so a value
+     * computed early at the same {@code (x, y, z)} with the same {@code _col}/{@code _cor} inputs
+     * is the same value. Values are computed callees first, so a function only reads lower
+     * {@code _cor} entries. The branch analysis only decides where eager evaluation cannot cost
+     * extra work: a call after an {@code if}/{@code switch}/{@code ?:} line of its function is
+     * conditional, except the Mul short-circuit, which only skips the right side when the left is
+     * exactly 0 (e.g. vanilla's bottom-row {@code y_clamped_gradient}). Functions reachable from a
+     * column slot are never shared, because the column kernel has no per-corner values.
+     */
+    private CornerCse cornerCse(List<String> rootExprs) {
+        java.util.regex.Pattern callPat = java.util.regex.Pattern.compile(
+                "\\b([A-Za-z_][A-Za-z0-9_]*)\\(x, y, z, " + java.util.regex.Pattern.quote(treeArgs) + "\\)");
+        Map<String, List<CallSite>> sites = new java.util.HashMap<>();
+        for (Map.Entry<String, String> f : fnText.entrySet()) {
+            List<CallSite> list = new ArrayList<>();
+            String text = f.getValue();
+            boolean conditional = false;
+            for (String line : text.substring(text.indexOf('\n') + 1).split("\n")) {
+                String t = line.trim();
+                if (!t.equals("if (l == REAL_C(0.0)) return REAL_C(0.0);")
+                        && (t.startsWith("if") || t.startsWith("switch") || line.contains(" ? "))) {
+                    conditional = true;
+                }
+                java.util.regex.Matcher m = callPat.matcher(line);
+                while (m.find()) {
+                    if (fnText.containsKey(m.group(1))) {
+                        list.add(new CallSite(m.group(1), conditional));
+                    }
+                }
+            }
+            sites.put(f.getKey(), list);
+        }
+        List<String> rootFns = new ArrayList<>();
+        for (String expr : rootExprs) {
+            java.util.regex.Matcher m = callPat.matcher(expr);
+            if (m.matches() && fnText.containsKey(m.group(1))) {
+                rootFns.add(m.group(1));
+            }
+        }
+        // Post-order (callees first) over everything the corner roots reach.
+        List<String> post = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (String r : rootFns) {
+            postOrder(r, sites, seen, post);
+        }
+        // Path counts (saturating at 2), callers before callees.
+        Map<String, Integer> paths = new java.util.HashMap<>();
+        for (String r : rootFns) {
+            paths.merge(r, 1, (a, b) -> Math.min(2, a + b));
+        }
+        for (int i = post.size() - 1; i >= 0; i--) {
+            String f = post.get(i);
+            int p = paths.getOrDefault(f, 0);
+            for (CallSite c : sites.get(f)) {
+                paths.merge(c.callee(), p, (a, b) -> Math.min(2, a + b));
+            }
+        }
+        java.util.Set<String> always = new java.util.HashSet<>();
+        java.util.ArrayDeque<String> work = new java.util.ArrayDeque<>(rootFns);
+        while (!work.isEmpty()) {
+            String f = work.pop();
+            if (always.add(f)) {
+                for (CallSite c : sites.get(f)) {
+                    if (!c.conditional()) {
+                        work.push(c.callee());
+                    }
+                }
+            }
+        }
+        java.util.Set<String> columnReach = new java.util.HashSet<>();
+        List<String> ignored = new ArrayList<>();
+        for (String slotFn : slotByFn.keySet()) {
+            if (fnText.containsKey(slotFn)) {
+                postOrder(slotFn, sites, columnReach, ignored);
+            }
+        }
+        Map<String, Boolean> samples = new java.util.HashMap<>();
+        Map<String, Integer> index = new java.util.LinkedHashMap<>();
+        for (String f : post) {
+            if (index.size() < MAX_CORNER_SLOTS && paths.getOrDefault(f, 0) >= 2 && always.contains(f)
+                    && !columnReach.contains(f) && samplesNoise(f, sites, samples)) {
+                index.put(f, index.size());
+            }
+        }
+        if (index.isEmpty()) {
+            return null;
+        }
+        java.util.function.Function<String, String> rewrite = text -> {
+            java.util.regex.Matcher m = callPat.matcher(text);
+            StringBuilder out = new StringBuilder(text.length());
+            while (m.find()) {
+                Integer i = index.get(m.group(1));
+                m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(
+                        i != null ? "_cor[" + i + "]" : m.group()));
+            }
+            m.appendTail(out);
+            return out.toString();
+        };
+        List<String> functions = new ArrayList<>(fnText.size());
+        for (String text : fnText.values()) {
+            int nl = text.indexOf('\n') + 1;   // the signature line is never rewritten
+            functions.add(text.substring(0, nl) + rewrite.apply(text.substring(nl)));
+        }
+        List<String> roots = new ArrayList<>(rootExprs.size());
+        for (String expr : rootExprs) {
+            roots.add(rewrite.apply(expr));
+        }
+        return new CornerCse(functions, new ArrayList<>(index.keySet()), roots);
+    }
+
+    private static void postOrder(String f, Map<String, List<CallSite>> sites, java.util.Set<String> seen,
+                                  List<String> out) {
+        if (!seen.add(f)) {
+            return;
+        }
+        for (CallSite c : sites.get(f)) {
+            postOrder(c.callee(), sites, seen, out);
+        }
+        out.add(f);
+    }
+
+    private boolean samplesNoise(String f, Map<String, List<CallSite>> sites, Map<String, Boolean> memo) {
+        Boolean known = memo.get(f);
+        if (known != null) {
+            return known;
+        }
+        memo.put(f, false);   // no cycles in generated code; this only bounds the recursion
+        String text = fnText.get(f);
+        boolean r = text.contains("sc_col_noise_value(") || text.contains("sc_col_blended_noise(");
+        for (CallSite c : sites.get(f)) {
+            r = r || samplesNoise(c.callee(), sites, memo);
+        }
+        memo.put(f, r);
+        return r;
     }
 
     /** Mirrors {@code GpuBatchDispatcher.COL_DEDUP} — the host and the kernel must agree. */
@@ -785,19 +1144,164 @@ public final class OpenCLAstEmitter {
         String name = tag + "n" + (fnCounter++);
         nodeFns.put(node, name);
 
+        String expr = emitExpr(node);
+        if (dedupFunctions) {
+            // Same expression over the same (already deduped) callees = the same value.
+            String prior = nodeBodyMemo.putIfAbsent(expr, name);
+            if (prior != null) {
+                nodeFns.put(node, prior);
+                return prior;
+            }
+        }
         // Build the function body into a temporary, then commit.
         StringBuilder body = new StringBuilder();
         body.append("real ").append(name).append("(int x, int y, int z, ").append(treeParams).append(") {\n");
-        body.append("    return ").append(emitExpr(node)).append(";\n");
+        body.append("    return ").append(expr).append(";\n");
         body.append("}\n");
         functions.append(body);
+        if (hoistColumns) {
+            fnText.put(name, body.toString());
+        }
         return name;
     }
 
-    /** Forwards x,y,z + noise buffers to a node function and returns the call expression. */
+    /**
+     * Forwards x,y,z + noise buffers to a node function and returns the call expression. In
+     * column-hoisting mode a y-independent, noise-sampling node is read from its slot instead.
+     */
     private String call(AstNode node) {
+        if (hoistColumns) {
+            AstNode t = unwrapTransparent(node);
+            if (yFree(t) && costly(t)) {
+                return "_col[" + columnSlot(t) + "]";
+            }
+        }
         String fn = emitNode(node);
         return fn + "(x, y, z, " + treeArgs + ")";
+    }
+
+    /**
+     * The slot holding {@code node}'s value, assigned on first use. Emitting the node first
+     * assigns every slot its body reads, so a slot only ever reads lower-numbered ones, which
+     * the column kernel has already written.
+     */
+    private int columnSlot(AstNode node) {
+        String fn = emitNode(node);
+        Integer slot = slotByFn.get(fn);
+        if (slot == null) {
+            slot = slotByFn.size();
+            slotByFn.put(fn, slot);
+        }
+        return slot;
+    }
+
+    /** Strips the wrappers whose emission is just {@code call(child)} (outside decide mode). */
+    private AstNode unwrapTransparent(AstNode node) {
+        while (true) {
+            if (node instanceof RootNode r) {
+                node = child(r, 0);
+            } else if (node instanceof CacheLikeNode cn && decideGrids == null) {
+                node = cn.getDelegate();
+            } else {
+                return node;
+            }
+        }
+    }
+
+    /**
+     * Whether {@code node}'s emitted value is the same at every {@code y} of a column. Exact,
+     * and conservative: a node type not listed here counts as y-dependent. Noise sampled with
+     * {@code yScale == 0} qualifies: its y coordinate is {@code (real) y * 0.0}, a signed zero,
+     * and the sign is gone after the sampler's first {@code y + yo} add (and {@code fabs} in
+     * the wrap bound), so the result does not depend on it.
+     */
+    private boolean yFree(AstNode node) {
+        Boolean memo = yFreeMemo.get(node);
+        if (memo != null) {
+            return memo;
+        }
+        boolean r = computeYFree(node);
+        yFreeMemo.put(node, r);
+        return r;
+    }
+
+    private boolean computeYFree(AstNode node) {
+        if (node instanceof ConstantNode || node instanceof DFTShiftANode || node instanceof DFTShiftBNode) {
+            return true;
+        }
+        if (node instanceof RootNode || node instanceof CacheLikeNode || node instanceof RangeChoiceNode
+                || node instanceof AddNode || node instanceof MulNode || node instanceof MinNode
+                || node instanceof MaxNode || node instanceof MinShortNode || node instanceof MaxShortNode
+                || node instanceof AbsNode || node instanceof SquareNode || node instanceof CubeNode
+                || node instanceof NegMulNode || node instanceof SqueezeNode) {
+            if (node instanceof CacheLikeNode cn) {
+                return decideGrids == null && yFree(cn.getDelegate());
+            }
+            for (AstNode c : node.getChildren()) {
+                if (!yFree(c)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (node instanceof DFTNoiseNode dn) {
+            return readDoubleField(dn, "yScale") == 0.0;
+        }
+        if (node instanceof ShiftedNoiseNode sn) {
+            return readDoubleField(sn, "yScale") == 0.0
+                    && yFree(child(sn, 0)) && yFree(child(sn, 1)) && yFree(child(sn, 2));
+        }
+        if (node instanceof SplineAstNode sp) {
+            return splineYFree(readSpline(sp));
+        }
+        // BlendedNoise, YClampedGradient, DFTShift, WeirdScaledSampler (x/d, y/d, z/d),
+        // DelegateNode and anything unknown.
+        return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean splineYFree(CubicSpline<DensityFunctions.Spline.Point, DensityFunctions.Spline.Coordinate> spline) {
+        Boolean memo = splineYFreeMemo.get(spline);
+        if (memo != null) {
+            return memo;
+        }
+        boolean r;
+        if (spline instanceof CubicSpline.Constant<?, ?>) {
+            r = true;
+        } else if (spline instanceof CubicSpline.Multipoint<?, ?> impl0) {
+            CubicSpline.Multipoint<DensityFunctions.Spline.Point, DensityFunctions.Spline.Coordinate> impl =
+                    (CubicSpline.Multipoint<DensityFunctions.Spline.Point, DensityFunctions.Spline.Coordinate>) impl0;
+            r = yFree(coordAstMemo.computeIfAbsent(impl.coordinate().function().value(), McToAst::toAst));
+            for (CubicSpline<DensityFunctions.Spline.Point, DensityFunctions.Spline.Coordinate> v : impl.values()) {
+                r = r && splineYFree(v);
+            }
+        } else {
+            r = false;
+        }
+        splineYFreeMemo.put(spline, r);
+        return r;
+    }
+
+    /** Whether {@code node} samples noise or a spline somewhere, i.e. is worth a slot. */
+    private boolean costly(AstNode node) {
+        Boolean memo = costlyMemo.get(node);
+        if (memo != null) {
+            return memo;
+        }
+        boolean r = node instanceof DFTNoiseNode || node instanceof ShiftedNoiseNode || node instanceof DFTShiftNode
+                || node instanceof DFTShiftANode || node instanceof DFTShiftBNode
+                || node instanceof DFTWeirdScaledSamplerNode || node instanceof BlendedNoiseNode
+                || node instanceof SplineAstNode;
+        if (!r) {
+            for (AstNode c : node.getChildren()) {
+                if (costly(c)) {
+                    r = true;
+                    break;
+                }
+            }
+        }
+        costlyMemo.put(node, r);
+        return r;
     }
 
     /**
@@ -925,6 +1429,9 @@ public final class OpenCLAstEmitter {
         functions.append("real ").append(name).append("(int x, int y, int z, ").append(treeParams).append(") {\n");
         functions.append(bodyStatements);
         functions.append("}\n");
+        if (hoistColumns) {
+            fnText.put(name, "real " + name + "(int x, int y, int z, " + treeParams + ") {\n" + bodyStatements + "}\n");
+        }
         helperBodyMemo.put(bodyStatements, name);
         return name + "(x, y, z, " + treeArgs + ")";
     }
@@ -1146,14 +1653,14 @@ public final class OpenCLAstEmitter {
         String name = tag + "spl" + (splineCounter++);
         splineFns.put(spline, name);
 
+        // The body (everything after the signature line) is built on its own so that it can be
+        // deduped by text; the committed function text is unchanged.
         StringBuilder b = new StringBuilder();
-        b.append("float ").append(name).append("(int x, int y, int z, ").append(treeParams).append(") {\n");
 
         if (spline instanceof CubicSpline.Constant<?, ?> c) {
             b.append("    return ").append(floatLit(c.value())).append(";\n");
             b.append("}\n");
-            functions.append(b);
-            return name;
+            return commitSpline(spline, name, b);
         }
         if (!(spline instanceof CubicSpline.Multipoint<?, ?> impl0)) {
             throw new UnsupportedDfNodeException("Unsupported spline implementation: " + spline.getClass().getName());
@@ -1175,7 +1682,9 @@ public final class OpenCLAstEmitter {
         // whole multi-octave subtree per sub-spline).
         AstNode coordAst = coordAstMemo.computeIfAbsent(
                 impl.coordinate().function().value(), McToAst::toAst);
-        String coordFn = emitNode(coordAst);
+        // Hoist mode reads a y-independent coordinate from its column slot (call() decides).
+        String coordExpr = hoistColumns ? call(coordAst)
+                : emitNode(coordAst) + "(x, y, z, " + treeArgs + ")";
 
         // pre-emit child spline functions
         String[] childFns = new String[values.size()];
@@ -1185,7 +1694,7 @@ public final class OpenCLAstEmitter {
 
         int lastConst = locations.length - 1;
         // point = (float) coordFn(...)
-        b.append("    float point = (float) ").append(coordFn).append("(x, y, z, ").append(treeArgs).append(");\n");
+        b.append("    float point = (float) ").append(coordExpr).append(";\n");
 
         if (childFns.length == 1) {
             b.append("    return spline_sample_outside(point, ").append(fa(locIdx)).append(", ")
@@ -1228,11 +1737,39 @@ public final class OpenCLAstEmitter {
             b.append("    return spline_lerp(k, nv, ov) + k * (1.0f - k) * spline_lerp(k, p, q);\n");
         }
         b.append("}\n");
-        functions.append(b);
+        return commitSpline(spline, name, b);
+    }
+
+    /** Appends spline function {@code name} with {@code body}, or reuses an identical one ({@link #dedupFunctions}). */
+    private String commitSpline(CubicSpline<?, ?> spline, String name, StringBuilder body) {
+        if (dedupFunctions) {
+            String prior = splineBodyMemo.putIfAbsent(body.toString(), name);
+            if (prior != null) {
+                splineFns.put(spline, prior);
+                return prior;
+            }
+        }
+        functions.append("float ").append(name).append("(int x, int y, int z, ").append(treeParams).append(") {\n");
+        functions.append(body);
+        if (hoistColumns) {
+            fnText.put(name, "float " + name + "(int x, int y, int z, " + treeParams + ") {\n" + body);
+        }
         return name;
     }
 
     private int addFloatArray(float[] arr) {
+        if (dedupFunctions) {
+            // Keyed on raw bits so 0.0f and -0.0f (and NaN payloads) stay distinct.
+            StringBuilder key = new StringBuilder(arr.length * 9);
+            for (float f : arr) {
+                key.append(Integer.toHexString(Float.floatToRawIntBits(f))).append(',');
+            }
+            Integer prior = floatArrayMemo.get(key.toString());
+            if (prior != null) {
+                return prior;
+            }
+            floatArrayMemo.put(key.toString(), floatArrays.size());
+        }
         int idx = floatArrays.size();
         floatArrays.add(arr);
         return idx;
