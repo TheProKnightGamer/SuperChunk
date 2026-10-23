@@ -1,6 +1,7 @@
 package dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer;
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.NoiseRouter;
 
@@ -24,15 +25,22 @@ import net.minecraft.world.level.levelgen.NoiseRouter;
  * <p><b>Scoping.</b> Each {@code RandomState} owns its cache ({@link Owner}) and hands it to every
  * {@code NoiseChunk} built from it ({@link Holder}); it goes away with the {@code RandomState}.
  *
- * <p><b>Boundedness.</b> Each cache is a set of striped, per-stripe access-ordered
- * (LRU) fastutil primitive-keyed maps with a per-stripe size cap; eviction removes the
- * least-recently-used cell, i.e. the cells trailing the generation frontier. Total memory is capped
- * at {@code superchunk.worldgen.aquiferCellCacheSize} entries (default 262144).
+ * <p><b>Boundedness.</b> A 4-way set-associative table of
+ * {@code superchunk.worldgen.aquiferCellCacheSize} entries (default 524288, about 14 MB full),
+ * least recently used last in each set: a put goes into the first way and shifts the others down
+ * to the old copy of the key, an empty way or the last (dropped); a hit moves its entry to the
+ * first way. Until 2026-10-22 this was 64 locked, access-ordered (LRU) maps of 4,096 (about
+ * 10.5 MB); keeping their order on every hit cost about 0.4% of all worldgen CPU in GPU mode, which
+ * asks for every cell of a chunk up front. The lookups themselves (random memory reads, about 0.5%)
+ * cost the same either way. Measured hit rates, r1024 GPU pregen: LRU 262,144 83.6-83.7%; this
+ * table 262,144 82.2%, 524,288 83.4%, 1,048,576 83.9%; a miss recomputes the cell (about 2 us).
  *
  * <p><b>Thread-safety / determinism.</b> Multiple c2me worker threads share one cache
- * concurrently; each stripe guards its map with its own monitor. Stored values are the immutable
- * {@link Aquifer.FluidStatus} objects produced by {@code computeFluid}, so a hit returns a
- * byte-identical result to the per-instance path.
+ * concurrently without locks. An entry is an immutable (key, status) object, so a read sees a whole
+ * entry or another one, never half of one; racing writes can only drop or repeat an entry, which
+ * costs a later miss.
+ * Stored values are the immutable {@link Aquifer.FluidStatus} objects produced by
+ * {@code computeFluid}, so a hit returns a byte-identical result to the per-instance path.
  */
 public final class ScAquiferCellCache {
 
@@ -65,49 +73,81 @@ public final class ScAquiferCellCache {
         return ((l & 0x3FFFFFFL) << 38) | ((n & 0x3FFFFFFL) << 12) | ((m & 0x7FFL) << 1) | (inFlatGrid ? 1L : 0L);
     }
 
-    private static final int STRIPES = 64;                 // power of two
-    private static final int STRIPE_MASK = STRIPES - 1;
-    private static final int MAX_TOTAL =
-            Math.max(STRIPES, Integer.getInteger("superchunk.worldgen.aquiferCellCacheSize", 1 << 18));
-    private static final int MAX_PER_STRIPE = Math.max(1, MAX_TOTAL / STRIPES);
+    /** Hit/miss counters, reported at server stop ({@code -Dsuperchunk.worldgen.aquiferCellCache.metrics=true}). */
+    public static final boolean METRICS = Boolean.getBoolean("superchunk.worldgen.aquiferCellCache.metrics");
+    private static final java.util.concurrent.atomic.LongAdder HITS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder MISSES = new java.util.concurrent.atomic.LongAdder();
+
+    public static void report() {
+        if (METRICS) {
+            long h = HITS.sum(), m = MISSES.sum();
+            org.slf4j.LoggerFactory.getLogger("SuperChunk-Aquifer").info(
+                    "[aquifer-cell-cache] hits={} misses={} hit rate={}%", h, m,
+                    h + m == 0 ? "n/a" : String.format("%.2f", 100.0 * h / (h + m)));
+        }
+    }
+
+    private static final int WAYS = 4;
+    private static final int SETS = Integer.highestOneBit(
+            Math.max(WAYS, Integer.getInteger("superchunk.worldgen.aquiferCellCacheSize", 1 << 19)) / WAYS);
+    private static final VarHandle SLOTS = MethodHandles.arrayElementVarHandle(Entry[].class);
+
+    private record Entry(long key, Aquifer.FluidStatus status) {
+    }
 
     /** The same RandomState's shared preliminary surface levels (valid under the same proof). */
     public final PreliminarySurfaceLevels surfaceLevels = new PreliminarySurfaceLevels();
 
-    private final Long2ObjectLinkedOpenHashMap<Aquifer.FluidStatus>[] stripes;
-    private final Object[] locks;
+    private final Entry[] slots = new Entry[WAYS * SETS];
 
-    @SuppressWarnings("unchecked")
-    public ScAquiferCellCache() {
-        this.stripes = new Long2ObjectLinkedOpenHashMap[STRIPES];
-        this.locks = new Object[STRIPES];
-        for (int i = 0; i < STRIPES; i++) {
-            this.stripes[i] = new Long2ObjectLinkedOpenHashMap<>();
-            this.locks[i] = new Object();
-        }
-    }
-
-    // Fibonacci hashing so spatially-adjacent cells spread across stripes (reduces contention).
-    private static int stripeOf(long key) {
-        return (int) ((key * 0x9E3779B97F4A7C15L) >>> 58) & STRIPE_MASK;
+    // Fibonacci hashing (the product's top bits) so spatially-adjacent cells spread over the sets.
+    private static int setOf(long key) {
+        return (int) ((key * 0x9E3779B97F4A7C15L) >>> (64 - Integer.numberOfTrailingZeros(SETS)));
     }
 
     /** @return the cached status for the cell, or {@code null} on a miss. */
     public Aquifer.FluidStatus get(long key) {
-        int s = stripeOf(key);
-        synchronized (this.locks[s]) {
-            return this.stripes[s].getAndMoveToFirst(key); // access => most-recently-used
+        int i = setOf(key) * WAYS;
+        Aquifer.FluidStatus hit = null;
+        for (int w = 0; w < WAYS; w++) {
+            Entry e = (Entry) SLOTS.getAcquire(this.slots, i + w);
+            if (e == null) {
+                break;
+            }
+            if (e.key == key) {
+                hit = e.status;
+                if (w > 0) {
+                    // Most recently used goes first, as in an LRU (cells shared by chunks generated
+                    // far apart in time stay cached).
+                    for (int v = w; v > 0; v--) {
+                        SLOTS.setRelease(this.slots, i + v, SLOTS.getAcquire(this.slots, i + v - 1));
+                    }
+                    SLOTS.setRelease(this.slots, i, e);
+                }
+                break;
+            }
         }
+        if (METRICS) {
+            (hit != null ? HITS : MISSES).increment();
+        }
+        return hit;
     }
 
     public void put(long key, Aquifer.FluidStatus value) {
-        int s = stripeOf(key);
-        Long2ObjectLinkedOpenHashMap<Aquifer.FluidStatus> map = this.stripes[s];
-        synchronized (this.locks[s]) {
-            map.putAndMoveToFirst(key, value);
-            if (map.size() > MAX_PER_STRIPE) {
-                map.removeLast(); // evict least-recently-used (trailing the generation frontier)
+        int i = setOf(key) * WAYS;
+        // Already there (another worker computed the same cell, or the other variant of a cell the
+        // picker answers): keep the one copy, so a set holds WAYS distinct cells.
+        int w = 0;
+        while (w < WAYS - 1) {
+            Entry e = (Entry) SLOTS.getAcquire(this.slots, i + w);
+            if (e == null || e.key == key) {
+                break;
             }
+            w++;
         }
+        for (; w > 0; w--) {
+            SLOTS.setRelease(this.slots, i + w, SLOTS.getAcquire(this.slots, i + w - 1));
+        }
+        SLOTS.setRelease(this.slots, i, new Entry(key, value));
     }
 }

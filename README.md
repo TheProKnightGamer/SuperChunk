@@ -115,7 +115,14 @@ computes the terrain's 2D shape (continentalness, erosion, ridges and the
 offset/factor/jaggedness splines) once per corner column in a small pre-pass
 instead of at every corner, and `sloped_cheese` once per corner. That cut the
 corner kernel, most of the GPU's time, by 83–89%, with the same output bit for
-bit (`analysis/gpu-corner-hoist-2026-10-21.md`). Compiled program
+bit (`analysis/gpu-corner-hoist-2026-10-21.md`). The decide kernel also adds
+the terrain adaptation around structures (the Beardifier) from lookup tables the
+CPU fills with its own functions, so chunks with villages and other structures no
+longer fall back to the CPU's per-block loop (`analysis/gpu-beard-2026-10-22.md`).
+Kernels launch one warp per work-group, so the small batches a server usually
+sends spread over the whole GPU instead of a few of its cores
+(`analysis/gpu-small-batches-2026-10-22.md`).
+Compiled program
 binaries are cached to disk, so the one-time JIT only recurs when your driver
 changes (warm boot is ~11–13 s; a cold cache takes several minutes). On NVIDIA,
 where most of a build is ptxas, SuperChunk compiles at ptxas level 1

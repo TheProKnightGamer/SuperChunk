@@ -94,7 +94,7 @@ public final class GpuChunkBatcher implements AutoCloseable {
                 && CompactConsume.willConsume()
                 && r.ids != null
                 && r.aux != null
-                && !r.aux.hasBeard;
+                && !r.aux.beardOnCpu();
     }
 
     private static final Logger LOGGER = OpenCLBackend.LOGGER;
