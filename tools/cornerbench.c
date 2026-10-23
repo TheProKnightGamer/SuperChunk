@@ -48,7 +48,7 @@ typedef struct {
     cl_kernel corner, cols;
     cl_mem st[8];          // desc factors perm active xo yo zo amp
     cl_mem out, colbuf;
-    double t[MAXR];
+    double t[MAXR], tcol[MAXR];
     uint64_t hash[MAXR];
 } Variant;
 
@@ -195,12 +195,19 @@ int main(int argc, char **argv) {
             cl_ulong s0, s1;
             CK(clGetEventProfilingInfo(e0 ? e0 : e1, CL_PROFILING_COMMAND_START, sizeof s0, &s0, NULL));
             CK(clGetEventProfilingInfo(e1, CL_PROFILING_COMMAND_END, sizeof s1, &s1, NULL));
-            if (e0) clReleaseEvent(e0);
+            double colMs = 0;
+            if (e0) {
+                cl_ulong c0, c1;
+                CK(clGetEventProfilingInfo(e0, CL_PROFILING_COMMAND_START, sizeof c0, &c0, NULL));
+                CK(clGetEventProfilingInfo(e0, CL_PROFILING_COMMAND_END, sizeof c1, &c1, NULL));
+                colMs = (c1 - c0) * 1e-6;
+                clReleaseEvent(e0);
+            }
             clReleaseEvent(e1);
             CK(clEnqueueReadBuffer(q, x->out, CL_TRUE, 0, outBytes, host, 0, NULL, NULL));
             uint64_t h = 1469598103934665603ULL;
             for (size_t b = 0; b < outBytes; b++) { h ^= host[b]; h *= 1099511628211ULL; }
-            if (r >= 0) { x->t[r] = (s1 - s0) * 1e-6; x->hash[r] = h; }
+            if (r >= 0) { x->t[r] = (s1 - s0) * 1e-6; x->tcol[r] = colMs; x->hash[r] = h; }
         }
     }
 
@@ -224,8 +231,10 @@ int main(int argc, char **argv) {
         qsort(s, reps, sizeof(double), cmpd);
         double med = s[reps / 2], p10 = s[reps / 10], p90 = s[(reps * 9) / 10];
         if (i == 0) base = med;
-        printf("  %-28s median %8.3f  p10 %8.3f  p90 %8.3f  per chunk %.4f ms  (%+.1f%% vs %s)\n",
-               v[i].name, med, p10, p90, med / K, 100.0 * (med - base) / base, v[0].name);
+        memcpy(s, v[i].tcol, sizeof(double) * reps);
+        qsort(s, reps, sizeof(double), cmpd);
+        printf("  %-28s median %8.3f  p10 %8.3f  p90 %8.3f  per chunk %.4f ms  (%+.1f%% vs %s)  column pass %.3f\n",
+               v[i].name, med, p10, p90, med / K, 100.0 * (med - base) / base, v[0].name, s[reps / 2]);
     }
     printf("bit-exact: %s (%d of %d reps differ)\n", mismatchReps ? "NO" : "yes", mismatchReps, reps);
     return mismatchReps ? 3 : 0;

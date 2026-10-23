@@ -100,6 +100,84 @@ public abstract class MixinStructureWeightSampler implements dev.superchunk.gpu.
         return true;
     }
 
+    @Override
+    public int[] superchunk$beardTerms(int maxInts) {
+        if (this.c2me$pieceArray == null || this.c2me$junctionArray == null) {
+            this.c2me$initArrays();
+        }
+        int pieces = 0;
+        for (Beardifier.Rigid piece : this.c2me$pieceArray) {
+            if (piece.terrainAdjustment() != TerrainAdjustment.NONE) {
+                pieces++;
+            }
+        }
+        long len = 2L + 8L * pieces + 3L * this.c2me$junctionArray.length;
+        if (len > maxInts) {
+            return null;
+        }
+        int[] out = new int[(int) len];
+        out[0] = pieces;
+        out[1] = this.c2me$junctionArray.length;
+        int w = 2;
+        for (Beardifier.Rigid piece : this.c2me$pieceArray) {
+            // FORGE 1.20.1 PORT: no ENCAPSULATE. BURY's kernel term (decide.cl sc_bury_contribution
+            // of (m, p / 2.0, n)) is this tree's getBuryContribution(m, p, n): m and n are >= 0, so
+            // its |x|, |z| > 6 early-outs and (x*x + (y/2)*(y/2)) + z*z are the same operations.
+            int code = switch (piece.terrainAdjustment()) {
+                case NONE -> 0;
+                case BURY -> 1;
+                case BEARD_THIN -> 2;
+                case BEARD_BOX -> 3;
+                default -> -1;   // an added constant: compute() would not know it either
+            };
+            if (code == 0) {
+                continue;
+            }
+            if (code < 0) {
+                return null;
+            }
+            BoundingBox b = piece.box();
+            out[w++] = b.minX();
+            out[w++] = b.minY();
+            out[w++] = b.minZ();
+            out[w++] = b.maxX();
+            out[w++] = b.maxY();
+            out[w++] = b.maxZ();
+            out[w++] = piece.groundLevelDelta();
+            out[w++] = code;
+        }
+        for (JigsawJunction jj : this.c2me$junctionArray) {
+            out[w++] = jj.getSourceX();
+            out[w++] = jj.getSourceGroundY();
+            out[w++] = jj.getSourceZ();
+        }
+        return out;
+    }
+
+    @Override
+    public double[] superchunk$beardTables() {
+        double[] t = new double[dev.superchunk.gpu.dfc.ScBeardBoxAccess.BEARD_TABLES_LEN];
+        for (int x = -12; x < 12; x++) {
+            for (int y = -12; y < 12; y++) {
+                for (int z = -12; z < 12; z++) {
+                    int idx = ((x + 12) * 24 + (y + 12)) * 24 + (z + 12);
+                    double b = getBeardContribution(x, y, z, y);
+                    t[idx] = b * 0.4;           // junction: getBeardContribution(r, l, m, l) * 0.4
+                    t[13824 + idx] = b * 0.8;   // BEARD_THIN: getBeardContribution(m, p, n, p) * 0.8
+                }
+            }
+        }
+        // FORGE 1.20.1 PORT: BURY is getBuryContribution(m, p, n) on raw ints; no ENCAPSULATE (zeros).
+        for (int i1 = 0; i1 <= 6; i1++) {
+            for (int l1 = -12; l1 <= 12; l1++) {
+                for (int j1 = 0; j1 <= 6; j1++) {
+                    t[27648 + (i1 * 25 + (l1 + 12)) * 7 + j1] = getBuryContribution(i1, l1, j1);
+                }
+            }
+        }
+        return t;
+    }
+
     @Unique
     private void c2me$computeBeardBounds() {
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;

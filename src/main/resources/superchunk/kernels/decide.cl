@@ -54,9 +54,13 @@
 // ---- per-chunk aux int-table layout (K * SC_AUX_INTS ints) ----
 //  0 hasAux  1 minGridX  2 minGridY  3 minGridZ  4 gridSizeX  5 gridSizeZ
 //  6 seaLevel  7 lavaLevel  8 defaultFluidId
-//  9 hasBeard  10..15 beard AABB minX,minY,minZ,maxX,maxY,maxZ (inclusive)
+//  9 beard mode (0 none, SC_BEARD_CPU sentinel, SC_BEARD_GPU summed here)
+// 10..15 beard AABB minX,minY,minZ,maxX,maxY,maxZ (inclusive)
 // 16 veinsEnabled  17 airSkipY (high-air fast-path floor — aq_airpath_similarity)
-#define SC_AUX_INTS 18
+// 18 beard terms offset into beardData  19 pieces  20 junctions (SC_BEARD_GPU only)
+#define SC_AUX_INTS 21
+#define SC_BEARD_CPU 1
+#define SC_BEARD_GPU 2
 
 // In-register 8-corner fetch + X->Y->Z Mth.lerp3 (the finalDensity cell-cache
 // order). Same corner flat index (Y-outer/X-mid/Z-inner) and n[X][Y][Z] naming
@@ -153,4 +157,157 @@ inline void sc_dec_value_prefix(__global const double* corners, int base,
     real vXZ11 = mc_lerp(dy, n101, n111);
     *p0 = mc_lerp(dx, vXZ00, vXZ10);
     *p1 = mc_lerp(dx, vXZ01, vXZ11);
+}
+
+// =====================================================================
+// BEARDIFIER on the GPU (SC_BEARD_GPU). The CPU's per-block density is
+// finalDensity + Beardifier.compute (NoiseChunk adds the beardifier after the
+// router), and compute() sums one term per structure piece, then one per jigsaw
+// junction, in list order (C2ME's compute() overwrite, MixinStructureWeightSampler).
+//
+// Each term is looked up, not computed: except for BEARD_BOX, a term depends only on
+// the block's small integer distances to its piece or junction, so the CPU fills
+// tables of every such term once (ScBeardBoxAccess.superchunk$beardTables), each
+// computed by the same functions and factor compute() uses — a lookup IS that term's
+// double. The sum stays double in every build (like aq_decide). BEARD_BOX terms also
+// depend on the piece's height and are computed here: op-for-op vanilla
+// getBeardContribution and Mth.fastInvSqrt, FP_CONTRACT OFF from aquifer.cl, on
+// vanilla's own BEARD_KERNEL floats.
+//
+// A term that is exactly 0.0 is skipped: the sum starts at +0.0, an IEEE add only
+// produces -0.0 from two -0.0 operands, so the sum is never -0.0 and leaving out a
+// 0.0 term changes nothing. These integer tests each mark a range where it is 0.0:
+//   getBeardContribution: an argument outside [-12, 11] (x + 12 outside [0, 24)).
+//   getBuryContribution(x, y, z): x > 6 or z > 6 returns 0.0; |y| > 6 makes the length
+//     exceed 6, which returns 0.0. ENCAPSULATE passes halves, so an integer distance
+//     of 12 gives exactly 6 (length >= 6, 1 - d / 6 <= 0.0: 0.0 at 6, 0.0 beyond) and
+//     13 or more exceeds it.
+// The table index ranges match: junction and BEARD_THIN [-12, 11]^3, BURY i1, j1 in
+// [0, 6] with l1 in [-12, 12], ENCAPSULATE all three in [0, 12].
+// =====================================================================
+#define SC_BT_JUNC  0
+#define SC_BT_THIN  13824
+#define SC_BT_BURY  27648
+#define SC_BT_ENCAP 28873
+
+inline double sc_fast_inv_sqrt(double number) {
+    double d0 = 0.5 * number;
+    long i = as_long(number);
+    i = 6910469410427058090L - (i >> 1);
+    number = as_double(i);
+    return number * (1.5 - d0 * number * number);
+}
+
+// Vanilla getBeardContribution, for arguments already inside the kernel range.
+inline double sc_beard_contribution(int x, int y, int z, int height, __global const float* kern) {
+    double d0 = (double) height + 0.5;
+    double d1 = (double) x * (double) x + d0 * d0 + (double) z * (double) z;
+    double d2 = -d0 * sc_fast_inv_sqrt(d1 / 2.0) / 2.0;
+    return d2 * (double) kern[(z + 12) * 24 * 24 + (x + 12) * 24 + (y + 12)];
+}
+
+// One piece's term at block (i, j, k), or 0.0 (skipped by the caller's test first).
+// Returns whether the term may be nonzero; *v is the term.
+inline int sc_beard_piece(__global const int* bd, int i1, int j1, int j, int k1, int l1,
+                          __global const float* kern, __global const double* bt, double* v) {
+    int adj = bd[7];
+    if (adj == 1) {                                             // BURY
+        if (i1 > 6 || j1 > 6 || l1 > 12 || l1 < -12) {
+            return 0;
+        }
+        *v = bt[SC_BT_BURY + (i1 * 25 + (l1 + 12)) * 7 + j1];
+    } else if (adj == 2) {                                      // BEARD_THIN
+        if (l1 < -12 || l1 > 11) {
+            return 0;
+        }
+        *v = bt[SC_BT_THIN + (i1 + 12) * 576 + (l1 + 12) * 24 + (j1 + 12)];
+    } else if (adj == 3) {                                      // BEARD_BOX
+        int q = max(0, max(k1 - j, j - bd[4]));
+        if (q > 11) {
+            return 0;
+        }
+        *v = sc_beard_contribution(i1, q, j1, l1, kern) * 0.8;
+    } else {                                                    // ENCAPSULATE
+        int q = max(0, max(bd[1] - j, j - bd[4]));
+        if (q > 12) {
+            return 0;
+        }
+        *v = bt[SC_BT_ENCAP + (i1 * 13 + q) * 13 + j1];
+    }
+    return 1;
+}
+
+// Beardifier.compute at block (i, j, k) over this chunk's packed terms (layout:
+// ScBeardBoxAccess.superchunk$beardTerms, without its two-int header).
+inline double sc_beard(int i, int j, int k, __global const int* bd, int nPieces, int nJunctions,
+                       __global const float* kern, __global const double* bt) {
+    double d0 = 0.0;
+    for (int p = 0; p < nPieces; ++p, bd += 8) {
+        int i1 = max(0, max(bd[0] - i, i - bd[3]));
+        int j1 = max(0, max(bd[2] - k, k - bd[5]));
+        if (i1 >= 12 || j1 >= 12) {
+            continue;
+        }
+        int k1 = bd[1] + bd[6];
+        double v;
+        if (sc_beard_piece(bd, i1, j1, j, k1, j - k1, kern, bt, &v)) {
+            d0 += v;
+        }
+    }
+    for (int n = 0; n < nJunctions; ++n, bd += 3) {
+        int j2 = i - bd[0];
+        int k2 = j - bd[1];
+        int l2 = k - bd[2];
+        if (j2 < -12 || j2 > 11 || k2 < -12 || k2 > 11 || l2 < -12 || l2 > 11) {
+            continue;
+        }
+        d0 += bt[SC_BT_JUNC + (j2 + 12) * 576 + (k2 + 12) * 24 + (l2 + 12)];
+    }
+    return d0;
+}
+
+// sc_beard for the n <= SC_BEARD_RUN blocks (i, j, k0 + l) of one z-run: the same terms,
+// with the same zero tests, summed in the same order for each block (out[l] gets the
+// pieces in list order, then the junctions). Only the tests that depend on x or y are
+// done once for the run instead of once per block.
+#define SC_BEARD_RUN 8
+inline void sc_beard_run(int i, int j, int k0, int n, __global const int* bd, int nPieces, int nJunctions,
+                         __global const float* kern, __global const double* bt, __private double* out) {
+    for (int l = 0; l < n; ++l) {
+        out[l] = 0.0;
+    }
+    for (int p = 0; p < nPieces; ++p, bd += 8) {
+        int i1 = max(0, max(bd[0] - i, i - bd[3]));
+        if (i1 >= 12) {
+            continue;
+        }
+        int k1 = bd[1] + bd[6];
+        int l1 = j - k1;
+        int adj = bd[7];
+        if ((adj == 1 && (i1 > 6 || l1 > 12 || l1 < -12)) || (adj == 2 && (l1 < -12 || l1 > 11))) {
+            continue;
+        }
+        for (int l = 0; l < n; ++l) {
+            int k = k0 + l;
+            int j1 = max(0, max(bd[2] - k, k - bd[5]));
+            double v;
+            if (j1 < 12 && sc_beard_piece(bd, i1, j1, j, k1, l1, kern, bt, &v)) {
+                out[l] += v;
+            }
+        }
+    }
+    for (int m = 0; m < nJunctions; ++m, bd += 3) {
+        int j2 = i - bd[0];
+        int k2 = j - bd[1];
+        if (j2 < -12 || j2 > 11 || k2 < -12 || k2 > 11) {
+            continue;
+        }
+        __global const double* row = bt + SC_BT_JUNC + (j2 + 12) * 576 + (k2 + 12) * 24 + 12;
+        for (int l = 0; l < n; ++l) {
+            int l2 = k0 + l - bd[2];
+            if (l2 >= -12 && l2 <= 11) {
+                out[l] += row[l2];
+            }
+        }
+    }
 }

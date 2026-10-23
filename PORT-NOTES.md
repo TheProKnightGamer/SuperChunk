@@ -1,5 +1,22 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## BEARDIFIER ON THE GPU (2026-10-22) — same as neo
+
+`CompactIds`, `GpuBatchDispatcher`, `GpuChunkBatcher`, `ScBeardBoxAccess`, `IStructureWeightSampler`
+and `decide.cl` are copied verbatim from neo; `tools/decidebench.c` too. Full write-up in neo's
+`analysis/gpu-beard-2026-10-22.md`.
+
+- The decide kernel adds each structure chunk's beard to the density inside its beard box, so those
+  blocks no longer come back as sentinels for the CPU. Terms are looked up from tables the CPU fills
+  once with its own functions (`superchunk$beardTables`); BEARD_BOX terms are computed in-kernel.
+  Kill switch `-Dsuperchunk.gpu.beardOnGpu=false`.
+- Tree-specific: `MixinStructureWeightSampler.superchunk$beardTerms` / `superchunk$beardTables`.
+  1.20.1 has no ENCAPSULATE (its table range stays zero), and its `getBuryContribution(int, int,
+  int)` halves y inside, so the BURY table calls `getBuryContribution(i1, l1, j1)`; the kernel's
+  lookup is the same. The `BEARD_KERNEL` accessor maps to `f_158062_` in the refmap.
+- Parity (sc-forge-test, r1024, `gpu.decideFp32=false`, `compactIds=verify`): 18,393 chunks,
+  1,808,105,472 blocks, 506 structure chunks summed on the GPU, 0 mismatches in every class.
+
 ## GPU CORNER KERNEL: COLUMN HOISTING + PER-CORNER CSE (2026-10-21) — same as neo
 
 `OpenCLAstEmitter` and `GpuBatchDispatcher` are copied verbatim from neo (the files were identical

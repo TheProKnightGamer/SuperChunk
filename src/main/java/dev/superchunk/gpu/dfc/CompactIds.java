@@ -338,6 +338,15 @@ public final class CompactIds {
     private static final java.util.concurrent.atomic.AtomicLong cpuAssistCounter =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * Sum each structure chunk's beard on the GPU instead of sending the blocks in its beard box to
+     * the CPU (-Dsuperchunk.gpu.beardOnGpu=false restores the sentinel path).
+     */
+    private static final boolean BEARD_ON_GPU =
+            !"false".equalsIgnoreCase(System.getProperty("superchunk.gpu.beardOnGpu", "true"));
+    /** Chunks with more beard data than this (ints; 8 per piece, 3 per junction) keep the sentinel path. */
+    private static final int BEARD_MAX_INTS = 1 << 16;
+
     /** One chunk's full decide-kernel aux (attached to the batch request). */
     public static final class ChunkAux {
         final Route route;
@@ -345,13 +354,16 @@ public final class CompactIds {
         final boolean veinsEnabled;
         final boolean hasBeard;
         final int bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ;
+        /** Beard terms for the kernel (ScBeardBoxAccess layout), or null: no beard, or CPU-decided. */
+        final int[] beardTerms;
 
         ChunkAux(Route route, AquiferAux aq, boolean veinsEnabled,
-                 boolean hasBeard, int[] box6) {
+                 boolean hasBeard, int[] box6, int[] beardTerms) {
             this.route = route;
             this.aq = aq;
             this.veinsEnabled = veinsEnabled;
             this.hasBeard = hasBeard;
+            this.beardTerms = hasBeard ? beardTerms : null;
             this.bMinX = hasBeard ? box6[0] : 0;
             this.bMinY = hasBeard ? box6[1] : 0;
             this.bMinZ = hasBeard ? box6[2] : 0;
@@ -359,6 +371,54 @@ public final class CompactIds {
             this.bMaxY = hasBeard ? box6[4] : 0;
             this.bMaxZ = hasBeard ? box6[5] : 0;
         }
+
+        /** Whether the blocks in this chunk's beard box come back as sentinels for the CPU to decide. */
+        boolean beardOnCpu() {
+            return hasBeard && beardTerms == null;
+        }
+    }
+
+    private static volatile float[] beardKernel;
+
+    /**
+     * Vanilla's beard kernel table, read once, or null when it cannot be read (then every
+     * structure chunk keeps the CPU sentinel path).
+     */
+    static float[] beardKernel() {
+        float[] k = beardKernel;
+        if (k == null) {
+            try {
+                k = dev.superchunk.com.ishland.c2me.base.mixin.access.IStructureWeightSampler.superchunk$beardKernel();
+            } catch (Throwable t) {
+                k = null;
+            }
+            beardKernel = k = (k != null && k.length == 24 * 24 * 24) ? k.clone() : new float[0];
+        }
+        return k.length == 0 ? null : k;
+    }
+
+    private static volatile double[] beardTables;
+
+    /** The decide kernel's beard lookup tables ({@link ScBeardBoxAccess#superchunk$beardTables}), once read. */
+    static double[] beardTables() {
+        return beardTables;
+    }
+
+    /** Whether beard terms can be shipped: both tables read (the first structure chunk reads the lookups). */
+    private static boolean beardTablesOk(ScBeardBoxAccess bb) {
+        if (beardKernel() == null) {
+            return false;
+        }
+        double[] t = beardTables;
+        if (t == null) {
+            try {
+                t = bb.superchunk$beardTables();
+            } catch (Throwable e) {
+                t = null;
+            }
+            beardTables = t = (t != null && t.length == ScBeardBoxAccess.BEARD_TABLES_LEN) ? t : new double[0];
+        }
+        return t.length != 0;
     }
 
     /**
@@ -421,9 +481,13 @@ public final class CompactIds {
             }
             boolean hasBeard = false;
             int[] box = new int[6];
+            int[] beardTerms = null;
             DensityFunctions.BeardifierOrMarker beard = ((IChunkNoiseSampler) nc).getBeardifier();
             if (beard instanceof ScBeardBoxAccess bb) {
                 hasBeard = bb.superchunk$beardBox(box);
+                if (hasBeard && BEARD_ON_GPU && beardTablesOk(bb)) {
+                    beardTerms = bb.superchunk$beardTerms(BEARD_MAX_INTS);
+                }
             } else if (beard != DensityFunctions.BeardifierMarker.INSTANCE) {
                 // A modded beardifier type: its density cannot be bounded here, and deciding
                 // without it would drop that mod's terrain adaptation.
@@ -446,7 +510,10 @@ public final class CompactIds {
                 return null;
             }
             auxCaptured.increment();
-            return new ChunkAux(route, aq, veins, hasBeard, box);
+            if (hasBeard) {
+                (beardTerms != null ? auxBeardGpu : auxBeardCpu).increment();
+            }
+            return new ChunkAux(route, aq, veins, hasBeard, box, beardTerms);
         } catch (Throwable t) {
             auxFailOther.increment();
             if (LOG.isDebugEnabled()) {
@@ -777,7 +844,10 @@ public final class CompactIds {
                 .append("        __global const int* fluidTypeId,\n")  // K*cellN
                 .append("        const int cellN,\n")
                 .append("        const double flowingUpdateSimilarity,\n")
-                .append("        __global uchar* outIds) {\n")
+                .append("        __global uchar* outIds,\n")
+                .append("        __global const int* beardData,\n")     // per-chunk beard terms (aux[18..20])
+                .append("        __global const float* beardKernel,\n")    // vanilla BEARD_KERNEL, 24^3
+                .append("        __global const double* beardTables) {\n")  // ScBeardBoxAccess.superchunk$beardTables
                 // Z-RUN decomposition: one work-item per sz-block z-cell run.
                 // fullZ = (dimZ-1)*sz, so runs are always exact z-cells: every block
                 // in a run shares (bx, by, cx, cy, cz, ddx, ddy) and all 8 corners of
@@ -838,14 +908,27 @@ public final class CompactIds {
                         .append(slot).append(" = REAL_C(0.0);\n");
             }
         }
+        // GPU beard for the whole run at once when it fits (sc_beard_run); the per-block
+        // sc_beard below is the fallback for wider cells.
+        k.append("    double beardRun[SC_BEARD_RUN];\n")
+                .append("    int beardRunOk = 0;\n")
+                .append("    if (aux[9] == SC_BEARD_GPU && sz <= SC_BEARD_RUN\n")
+                .append("            && x >= aux[10] && x <= aux[13] && y >= aux[11] && y <= aux[14]\n")
+                .append("            && z0 + sz - 1 >= aux[12] && z0 <= aux[15]) {\n")
+                .append("        sc_beard_run(x, y, z0, sz, beardData + aux[18], aux[19], aux[20], beardKernel, beardTables,\n")
+                .append("                beardRun);\n")
+                .append("        beardRunOk = 1;\n")
+                .append("    }\n");
         k.append("    for (int lz = 0; lz < sz; ++lz) {\n")
                 .append("        int z = z0 + lz;\n")
-                // Beard AABB: CPU decides these (the density here would need the CPU-only
-                // per-block beard contribution) -> sentinel byte.
-                .append("        if (aux[9] != 0\n")
+                // Beard AABB (every block that can get a nonzero beard term). SC_BEARD_GPU:
+                // the beard is summed here (sc_beard, decide.cl). SC_BEARD_CPU (terms not
+                // shipped): the CPU decides these -> sentinel byte.
+                .append("        int inBeard = aux[9] != 0\n")
                 .append("                && x >= aux[10] && x <= aux[13]\n")
                 .append("                && y >= aux[11] && y <= aux[14]\n")
-                .append("                && z >= aux[12] && z <= aux[15]) {\n")
+                .append("                && z >= aux[12] && z <= aux[15];\n")
+                .append("        if (inBeard && aux[9] == SC_BEARD_CPU) {\n")
                 .append("            outIds[outBase + lz] = SC_DEC_BEARD;\n")
                 .append("            continue;\n")
                 .append("        }\n")
@@ -855,8 +938,16 @@ public final class CompactIds {
             k.append("        _g.v[").append(slot).append("] = mc_lerp(ddz, t0_").append(slot)
                     .append(", t1_").append(slot).append(");\n");
         }
+        // The decisions read the CPU's density: finalDensity + Beardifier.compute. Outside the
+        // beard box the beard is 0.0, which changes no comparison below, so it is only added
+        // inside (in double, as the CPU adds it). (double) is exact from either `real`.
         k.append("        real density = ").append(emitted.tailFn())
                 .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
+                .append("        double dens = (double) density;\n")
+                .append("        if (inBeard) {\n")
+                .append("            dens = dens + (beardRunOk ? beardRun[lz]\n")
+                .append("                    : sc_beard(x, y, z, beardData + aux[18], aux[19], aux[20], beardKernel, beardTables));\n")
+                .append("        }\n")
                 .append("        int id = 0;\n")
                 .append("        int sched = 0;\n")
                 // vanilla computeSubstance: density>0 -> early null (stone), sched=false;
@@ -868,7 +959,7 @@ public final class CompactIds {
                 // router barrierNoise AST (only on the full path — the fast path's whole
                 // point is skipping it). All aq-null paths return sched=0 (matches every
                 // vanilla null return).
-                .append("        if (!(density > REAL_C(0.0))) {\n")
+                .append("        if (!(dens > 0.0)) {\n")
                 // HIGH-AIR FAST PATH. `id` here is unconditionally AQ_AIR, and bit7 (sched)
                 // on an AIR byte is DEAD on every consumer:
                 //   - CompactConsume.marksFromIds gates on m.nonAir[b] && m.fluid[b]; AIR is
@@ -892,7 +983,7 @@ public final class CompactIds {
                 .append("                double barrier = (double) ").append(emitted.barrierFn())
                 .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
                 .append("                double m; int dg1; int flg1; int ixg1; long pg1;\n")
-                .append("                id = aq_decide(x, y, z, (double) density, barrier,\n")
+                .append("                id = aq_decide(x, y, z, dens, barrier,\n")
                 .append("                        locCache + c * cellN, fluidLevel + c * cellN, fluidTypeId + c * cellN,\n")
                 .append("                        aux[1], aux[2], aux[3], aux[4], aux[5],\n")
                 .append("                        aux[6], aux[7], aux[8],\n")
@@ -987,6 +1078,8 @@ public final class CompactIds {
     private static final LongAdder auxFailFluidType = new LongAdder();
     private static final LongAdder auxFailOther = new LongAdder();
     private static final LongAdder auxFailForeign = new LongAdder();
+    private static final LongAdder auxBeardGpu = new LongAdder();      // structure chunks summed on the GPU
+    private static final LongAdder auxBeardCpu = new LongAdder();      // structure chunks left to the CPU (sentinels)
 
     /**
      * Compact ids stand in for the whole per-block fill: the fast path writes decided ids without
@@ -1153,12 +1246,13 @@ public final class CompactIds {
         double wallMsPerDispatch = disp == 0 ? 0.0 : decideWallNanos.sum() / 1.0e6 / disp;
         LOG.info("[compact-ids] ({}) chunks with ids={} / without={} | id bytes read back={} ({} KB) | "
                         + "decide dispatches={} (chunks decided={}, skipped veinless-plan={}), decide kernel mean={} ms/chunk, "
-                        + "ids slice mean={} ms/dispatch | aux: captured={} failures: noAquifer={} blending={} "
+                        + "ids slice mean={} ms/dispatch | aux: captured={} (structure chunks: beard on GPU={} on CPU={}) "
+                        + "failures: noAquifer={} blending={} "
                         + "noRoute={} veinSeed={} fluidType={} other={} foreignHook={} | decide faults={}{}",
                 reason, with, without, idBytes.sum(), idBytes.sum() / 1024,
                 disp, dChunks, decideSkipVeinless.sum(),
                 kernelMsPerChunk, String.format("%.3f", wallMsPerDispatch),
-                auxCaptured.sum(), auxFailNoAquifer.sum(), auxFailBlending.sum(),
+                auxCaptured.sum(), auxBeardGpu.sum(), auxBeardCpu.sum(), auxFailNoAquifer.sum(), auxFailBlending.sum(),
                 auxFailNoRoute.sum(), auxFailVeinSeed.sum(), auxFailFluidType.sum(), auxFailOther.sum(),
                 auxFailForeign.sum(), decideFaults.sum(),
                 (planFailReason == null ? "" : " | plan: " + planFailReason) + timelineLine());
