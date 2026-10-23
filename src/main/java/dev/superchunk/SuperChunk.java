@@ -111,6 +111,7 @@ public final class SuperChunk {
                 dev.superchunk.worldgen.RegionCenterChunk.report();
                 dev.superchunk.worldgen.CornerColumns.report();
                 dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.PreliminarySurfaceLevels.report();
+                dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCellCache.report();
                 if (Boolean.getBoolean("superchunk.worldgen.biomeFiddleCache.verify")) {
                     dev.superchunk.worldgen.BiomeFiddleCache.reportVerify();
                 }
