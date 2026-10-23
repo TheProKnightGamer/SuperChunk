@@ -75,6 +75,7 @@ Throughput (RTX 3070, i7-14700K; chunks/s):
 | 2026-09-21 | r1024, 12 workers | GPU 711–766 vs CPU 464–480 |
 | 2026-09-25 | r1024, 12 workers | GPU 903–959 (`analysis/worldgen-big-2026-09-25.md`) |
 | 2026-10-21 | Corner kernel: column hoisting + per-corner CSE (`analysis/gpu-corner-hoist-2026-10-21.md`) | Corner device time −83 to −89% (1.0–1.4 → 0.13–0.18 ms/chunk), bit-exact; r1024 at 22 workers 990 → 1,123 cps (+13.4%), CPU per chunk −9.8% |
+| 2026-10-22 | One warp per work-group (`analysis/gpu-small-batches-2026-10-22.md`) | The driver's 256-wide groups packed small batches onto a few SMs: device time per batch −42% in game at mean K≈4 (corner −44%, decide −33%), replay −52% at K=1 to −12% at K=32, bit-exact |
 | 2026-10-22 | Beardifier on the GPU (`analysis/gpu-beard-2026-10-22.md`) | Structure chunks (7.8% at r1024) no longer go to the CPU hybrid path: CPU per chunk −3.7 to −4.2%, +2.5 to +3.5% cps (two A/Bs of four concurrent pairs); fp64 verify 0 mismatches over 1.75B blocks (forge 1.81B) |
 
 Round 8 also took the decide kernel to its floor (async id readback, a proven high-air fast path,
@@ -116,8 +117,10 @@ Ranked by expected payoff (from `analysis/review-2026-09-25.md` and the GPU-mode
    bit-exact. What is left of the corner kernel is the blended noise (once per corner) and the cave
    noises. On this box a GPU-mode pregen is now CPU-bound (GPU busy about a third of the run), so
    the levers are CPU work the GPU can take: the Beardifier was the first (done 2026-10-22). Small
-   batches (mean 4–5 chunks at 22 workers) cost the corner kernel up to 9x per chunk (1.2 ms for
-   one chunk vs 0.13 ms/chunk at 32; `tools/cornerbench.c`), which matters on GPU-bound setups.
+   batches (mean 4–5 chunks at 22 workers) were latency-bound because the driver's 256-wide
+   work-groups packed them onto a few SMs; one warp per group (done 2026-10-22) cut a 1-chunk batch
+   from 1.17 to 0.57 ms. What is left at small K is the serial chain inside one corner (blended
+   noise, then the cave noises) and the 12-level column-slot chain.
 2. **Cold start** (M). Updated 2026-10-21: with function dedup and the hoisted corner program, a
    truly cold boot is 278 → 236 s; the hoisted corner program builds in ~5 s. The two largest
    per-DF programs still take ~67 s each: dedup shrinks their text 10× but NVIDIA inlines the
@@ -141,9 +144,9 @@ Ranked by expected payoff (from `analysis/review-2026-09-25.md` and the GPU-mode
    (`-Dsuperchunk.gpu.colDedup`: removes 19% of corner column evaluations, no device-time win at
    round-10 batch sizes).
 5. **Worker-side aux capture** (S–M). In GPU mode the per-chunk 315-cell FluidStatus capture is
-   one of the few noise-stage costs left on the workers. Profiled 2026-10-22: 1.8% of worldgen CPU,
-   about 1.1% of it the access-ordered LRU of the cross-chunk cell cache (`ScAquiferCellCache`,
-   `getAndMoveToFirst`/`moveIndexToFirst`), which a cheaper eviction order could remove.
+   one of the few noise-stage costs left on the workers. Profiled 2026-10-22: 1.8% of worldgen CPU.
+   The cross-chunk cell cache's LRU upkeep (0.4%) is gone (lock-free 4-way table, 2026-10-22); its
+   lookups (0.5%) are random memory reads either way.
 6. **fp32 decide default** (decision). One stone/air flip per ~143M blocks on one seed; decide
    whether the default should be fp64 decide (measure its throughput cost first).
 7. **Stage 7 remainder** (S). An always-on 1-in-N chunk re-verify with auto-disable, since ids are

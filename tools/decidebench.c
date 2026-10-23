@@ -15,7 +15,8 @@
 // decide NDRange's device time (OpenCL event profiling), summed over the batches of one rep.
 //
 //   gcc -O2 -o decidebench decidebench.c -lOpenCL -lm
-//   ./decidebench <reps> <dump-dir> <nbatches> <variant.cl>...
+//   ./decidebench <reps> <dump-dir> <nbatches> <variant.cl>[@local]...
+// A variant may name a work-group size (variant.cl@32); without one the driver picks.
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 #include <stdio.h>
@@ -61,6 +62,7 @@ static const char *EXT[18] = {"desc", "factors", "perm", "active", "xo", "yo", "
 
 typedef struct {
     char name[256];
+    size_t local;
     cl_program prog;
     cl_kernel k;
     double t[MAXR];
@@ -133,9 +135,12 @@ int main(int argc, char **argv) {
 
     Variant *v = calloc(nv, sizeof *v);
     for (int i = 0; i < nv; i++) {
-        const char *p = argv[4 + i];
-        const char *base = strrchr(p, '/');
-        snprintf(v[i].name, sizeof v[i].name, "%s", base ? base + 1 : p);
+        char p[1024];
+        snprintf(p, sizeof p, "%s", argv[4 + i]);
+        char *at = strchr(p, '@');
+        if (at) { *at = 0; v[i].local = (size_t) atoi(at + 1); }
+        const char *base = strrchr(argv[4 + i], '/');
+        snprintf(v[i].name, sizeof v[i].name, "%s", base ? base + 1 : argv[4 + i]);
         size_t len;
         char *src = slurp(p, &len);
         const char *srcs[] = { src };
@@ -175,9 +180,10 @@ int main(int argc, char **argv) {
                 CK(clSetKernelArg(k, a++, sizeof(cl_mem), &B->in[15]));                             // beard
                 CK(clSetKernelArg(k, a++, sizeof(cl_mem), &B->in[16]));                             // bkern
                 CK(clSetKernelArg(k, a++, sizeof(cl_mem), &B->in[17]));                             // btab
-                size_t g = ((size_t) (B->total / B->sz) + 63) / 64 * 64;
+                size_t lc = x->local ? x->local : 64;
+                size_t g = ((size_t) (B->total / B->sz) + lc - 1) / lc * lc;
                 cl_event e;
-                CK(clEnqueueNDRangeKernel(q, k, 1, NULL, &g, NULL, 0, NULL, &e));
+                CK(clEnqueueNDRangeKernel(q, k, 1, NULL, &g, x->local ? &x->local : NULL, 0, NULL, &e));
                 CK(clFinish(q));
                 cl_ulong s0, s1;
                 CK(clGetEventProfilingInfo(e, CL_PROFILING_COMMAND_START, sizeof s0, &s0, NULL));

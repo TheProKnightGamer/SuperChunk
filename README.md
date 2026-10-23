@@ -119,6 +119,9 @@ bit (`analysis/gpu-corner-hoist-2026-10-21.md`). The decide kernel also adds
 the terrain adaptation around structures (the Beardifier) from lookup tables the
 CPU fills with its own functions, so chunks with villages and other structures no
 longer fall back to the CPU's per-block loop (`analysis/gpu-beard-2026-10-22.md`).
+Kernels launch one warp per work-group, so the small batches a server usually
+sends spread over the whole GPU instead of a few of its cores
+(`analysis/gpu-small-batches-2026-10-22.md`).
 Compiled program
 binaries are cached to disk, so the one-time JIT only recurs when your driver
 changes (warm boot is ~11–13 s; a cold cache takes several minutes). On NVIDIA,
