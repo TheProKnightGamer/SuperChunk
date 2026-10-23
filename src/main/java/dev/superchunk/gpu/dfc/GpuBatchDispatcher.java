@@ -139,6 +139,14 @@ public final class GpuBatchDispatcher implements AutoCloseable {
     private CLProgram decideProgram;               // null = decide chain unavailable
     // the decide program's OWN read-only noise state (its registry != the corner program's)
     private final long[] decideNoiseMems = new long[8];
+    // vanilla's BEARD_KERNEL table for the BEARD_BOX terms sc_beard computes (24^3 floats)
+    private long decideBeardKernelMem = NULL;
+    // the beard lookup tables (CompactIds.beardTables), uploaded by the first batch that needs
+    // them; until then (and if they never come) a one-element placeholder fills the argument
+    private long decideBeardTablesMem = NULL, decideBeardTablesPlaceholder = NULL;
+    // what the decide program was built from (-Dsuperchunk.gpu.dumpDecideTo replays it)
+    private String decideSource, decideOptions;
+    private boolean decideReal32;
     /**
      * Sticky OFF switch for the decide chain: flipped (never cleared) on any decide
      * enqueue/map fault so subsequent batches ride corner-only. The chain's native
@@ -147,7 +155,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
      */
     private volatile boolean decideDisabled = false;
     /** Per-chunk aux int-table stride — MUST match SC_AUX_INTS in decide.cl. */
-    private static final int AUX_INTS = 18;
+    private static final int AUX_INTS = 21;
+    /** aux[9] beard modes — MUST match SC_BEARD_CPU / SC_BEARD_GPU in decide.cl. */
+    private static final int BEARD_CPU = 1, BEARD_GPU = 2;
 
     // ------------------------------------------------------------------
     // CLIMATE CHAIN (2026-07-07, the "free ride" architecture): a SECOND
@@ -481,6 +491,98 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         writeReals(p + ".yo", r.yoArray(), f32);
         writeReals(p + ".zo", r.zoArray(), f32);
         writeReals(p + ".amp", r.ampArray(), f32);
+    }
+
+    /**
+     * Diagnostic ({@code -Dsuperchunk.gpu.dumpDecideTo=<dir>}, default unset): writes the first
+     * {@code -Dsuperchunk.gpu.dumpDecideCount} (8) decide batches that hold a GPU-beard chunk, with
+     * the program as built and every input, so {@code tools/decidebench.c} can replay variants of
+     * the decide kernel on real batches: bit-compare their ids and time them interleaved. Blocks on
+     * the slot queue to read the corner buffer back.
+     */
+    private static final String DUMP_DECIDE_TO = System.getProperty("superchunk.gpu.dumpDecideTo", "").trim();
+    private static final int DUMP_DECIDE_COUNT = Integer.getInteger("superchunk.gpu.dumpDecideCount", 8);
+    private static final AtomicLong DUMP_DECIDE_SEQ = new AtomicLong();
+
+    private void dumpDecide(Slot s, int K, int M, int cornerN, int dimX, int dimZ, int sx, int sy, int sz,
+                            int fullX, int fullY, int fullZ, int fullN, int total, int cellN, double flowingSim,
+                            int beardInts) {
+        long seq = DUMP_DECIDE_SEQ.incrementAndGet();
+        if (seq > DUMP_DECIDE_COUNT) {
+            return;
+        }
+        try {
+            java.nio.file.Path dir = java.nio.file.Path.of(DUMP_DECIDE_TO);
+            java.nio.file.Files.createDirectories(dir);
+            String p = dir.resolve("decide" + seq).toString();
+            java.nio.file.Files.writeString(java.nio.file.Path.of(p + ".cl"), decideSource);
+            java.nio.file.Files.writeString(java.nio.file.Path.of(p + ".meta"),
+                    "options=" + CLProgram.effectiveOptions(decideOptions) + "\n"
+                            + "realBytes=" + (decideReal32 ? 4 : 8) + "\n"
+                            + "K=" + K + "\nM=" + M + "\ncornerN=" + cornerN + "\ndimX=" + dimX + "\ndimZ=" + dimZ
+                            + "\nsx=" + sx + "\nsy=" + sy + "\nsz=" + sz + "\nfullX=" + fullX + "\nfullY=" + fullY
+                            + "\nfullZ=" + fullZ + "\nfullN=" + fullN + "\ntotal=" + total + "\ncellN=" + cellN
+                            + "\nflowingSimBits=" + Long.toHexString(Double.doubleToRawLongBits(flowingSim))
+                            + "\nbeardInts=" + beardInts + "\n");
+            NoiseRegistry r = decidePlan.registry;
+            writeInts(p + ".desc", r.descArray());
+            writeReals(p + ".factors", r.factorArray(), decideReal32);
+            java.nio.file.Files.write(java.nio.file.Path.of(p + ".perm"), PermFormat.active().encode(r.permArray()));
+            writeInts(p + ".active", r.activeArray());
+            writeReals(p + ".xo", r.xoArray(), decideReal32);
+            writeReals(p + ".yo", r.yoArray(), decideReal32);
+            writeReals(p + ".zo", r.zoArray(), decideReal32);
+            writeReals(p + ".amp", r.ampArray(), decideReal32);
+            java.nio.DoubleBuffer corners = MemoryUtil.memAllocDouble(K * M * cornerN);
+            try {
+                program.readBufferBlocking(s.queue, s.outMem, corners);
+                double[] c = new double[K * M * cornerN];
+                corners.get(0, c);
+                writeReals(p + ".corners", c, false);
+            } finally {
+                MemoryUtil.memFree(corners);
+            }
+            int[] origins = new int[K * 3];
+            s.hOrigins.get(0, origins);
+            writeInts(p + ".origins", origins);
+            int[] auxi = new int[K * AUX_INTS];
+            s.hAuxInts.get(0, auxi);
+            writeInts(p + ".auxi", auxi);
+            long[] auxl = new long[K * 2];
+            s.hAuxLongs.get(0, auxl);
+            writeLongs(p + ".auxl", auxl);
+            long[] loc = new long[K * cellN];
+            s.hAuxLoc.get(0, loc);
+            writeLongs(p + ".loc", loc);
+            int[] fl = new int[K * cellN];
+            s.hAuxFl.get(0, fl);
+            writeInts(p + ".fl", fl);
+            int[] ft = new int[K * cellN];
+            s.hAuxFt.get(0, ft);
+            writeInts(p + ".ft", ft);
+            int[] beard = new int[beardInts];
+            s.hBeard.get(0, beard);
+            writeInts(p + ".beard", beard);
+            float[] bk = CompactIds.beardKernel();
+            double[] bkd = new double[bk != null ? bk.length : 1];
+            for (int i = 0; bk != null && i < bk.length; i++) {
+                bkd[i] = bk[i];
+            }
+            writeReals(p + ".bkern", bkd, true);
+            writeReals(p + ".btab", CompactIds.beardTables(), false);
+            LOGGER.info("[SuperChunk-GPU] [compact-ids] dumped decide batch #{} (K={}, beard ints={}) for replay to {}",
+                    seq, K, beardInts, dir);
+        } catch (Throwable t) {
+            LOGGER.warn("[SuperChunk-GPU] [compact-ids] decide replay dump failed.", t);
+        }
+    }
+
+    private static void writeLongs(String path, long[] a) throws java.io.IOException {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(Math.max(1, a.length) * 8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (long v : a) {
+            b.putLong(v);
+        }
+        java.nio.file.Files.write(java.nio.file.Path.of(path), b.array());
     }
 
     private static void writeInts(String path, int[] a) throws java.io.IOException {
@@ -1305,6 +1407,15 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             decideNoiseMems[5] = p.uploadReals(decFp32, plan.registry.yoArray());
             decideNoiseMems[6] = p.uploadReals(decFp32, plan.registry.zoArray());
             decideNoiseMems[7] = p.uploadReals(decFp32, plan.registry.ampArray());
+            // BEARD_BOX's table; without it the kernel still needs a valid argument, and every
+            // structure chunk keeps the CPU sentinel path (CompactIds.captureAux ships no terms).
+            float[] beardKernel = CompactIds.beardKernel();
+            double[] bk = new double[beardKernel != null ? beardKernel.length : 1];
+            for (int i = 0; beardKernel != null && i < beardKernel.length; i++) {
+                bk[i] = beardKernel[i];
+            }
+            decideBeardKernelMem = p.uploadReals(true, bk);
+            decideBeardTablesPlaceholder = p.uploadReals(false, new double[1]);
             for (Slot s : slots) {
                 long k = p.kernel(plan.kernelName);
                 for (int i = 0; i < 8; i++) {
@@ -1315,6 +1426,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             p.logKernelWorkGroupInfo(slots[0].decideKernel, "sc_decide_multichunk");
             decideProgram = p;
             decidePlan = plan;
+            decideSource = decFp32 ? fp32Src : plan.source;
+            decideOptions = decFp32 ? opts : (decInline ? CLProgram.FORCE_INLINE_MARKER : "");
+            decideReal32 = decFp32;
             CompactIds.noteDecideFp(decFp32 ? "fp32" : "fp64");
             LOGGER.info("[SuperChunk-GPU] [compact-ids] decide chain READY on the batched dispatcher "
                     + "(kernel={}, gridSlots={}, veins={}, slots={}, decideFp={}, fmaContract={}). Batched chunks with "
@@ -1329,6 +1443,10 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 CLProgram.releaseMem(decideNoiseMems[i]);
                 decideNoiseMems[i] = NULL;
             }
+            CLProgram.releaseMem(decideBeardKernelMem);
+            decideBeardKernelMem = NULL;
+            CLProgram.releaseMem(decideBeardTablesPlaceholder);
+            decideBeardTablesPlaceholder = NULL;
             try {
                 p.close();
             } catch (Throwable ignored) {
@@ -1552,6 +1670,16 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         }
         s.ensureAuxCapacity(K, cellN);
         s.ensureIdsCapacity((long) K * fullN);
+        int beardInts = 0;
+        for (int c = 0; c < K; c++) {
+            CompactIds.ChunkAux a = auxes.length > c ? auxes[c] : null;
+            if (a != null && a.beardTerms != null) {
+                beardInts += a.beardTerms.length - 2;
+            }
+        }
+        s.ensureBeardCapacity(beardInts);
+        s.hBeard.clear();
+        int beardAt = 0;
 
         // Host staging (absolute puts; zero the absent slices so uploads are defined).
         s.hAuxInts.clear();
@@ -1588,7 +1716,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             s.hAuxInts.put(ib + 6, aq.seaLevel);
             s.hAuxInts.put(ib + 7, aq.lavaLevel);
             s.hAuxInts.put(ib + 8, aq.defaultFluidId);
-            s.hAuxInts.put(ib + 9, a.hasBeard ? 1 : 0);
+            int[] bt = a.beardTerms;
+            s.hAuxInts.put(ib + 9, bt != null ? BEARD_GPU : a.hasBeard ? BEARD_CPU : 0);
             s.hAuxInts.put(ib + 10, a.bMinX);
             s.hAuxInts.put(ib + 11, a.bMinY);
             s.hAuxInts.put(ib + 12, a.bMinZ);
@@ -1597,6 +1726,13 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             s.hAuxInts.put(ib + 15, a.bMaxZ);
             s.hAuxInts.put(ib + 16, a.veinsEnabled && plan.veins ? 1 : 0);
             s.hAuxInts.put(ib + 17, aq.airSkipY);
+            s.hAuxInts.put(ib + 18, beardAt);
+            s.hAuxInts.put(ib + 19, bt != null ? bt[0] : 0);
+            s.hAuxInts.put(ib + 20, bt != null ? bt[1] : 0);
+            if (bt != null) {
+                s.hBeard.put(beardAt, bt, 2, bt.length - 2);
+                beardAt += bt.length - 2;
+            }
             s.hAuxLongs.put(c * 2, a.route.oreSeedLo);
             s.hAuxLongs.put(c * 2 + 1, a.route.oreSeedHi);
             // Absolute BULK puts (Java 13+): three memcpys instead of 3*cellN = 945
@@ -1619,6 +1755,10 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         program.writeBufferAsync(s.queue, s.auxFlMem, s.hAuxFl);
         s.hAuxFt.position(0).limit(K * cellN);
         program.writeBufferAsync(s.queue, s.auxFtMem, s.hAuxFt);
+        if (beardAt > 0) {
+            s.hBeard.position(0).limit(beardAt);
+            program.writeBufferAsync(s.queue, s.beardMem, s.hBeard);
+        }
 
         // Args 0..7 (decide noise state) bound once per slot kernel in initDecide.
         int a2 = 8;
@@ -1643,11 +1783,23 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         decideProgram.setArgPointer(s.decideKernel, a2++, s.auxFtMem);
         decideProgram.setArgInt(s.decideKernel, a2++, cellN);
         decideProgram.setArgDouble(s.decideKernel, a2++, flowingSim);
-        decideProgram.setArgPointer(s.decideKernel, a2, s.idsMem);
+        decideProgram.setArgPointer(s.decideKernel, a2++, s.idsMem);
+        decideProgram.setArgPointer(s.decideKernel, a2++, s.beardMem);
+        decideProgram.setArgPointer(s.decideKernel, a2++, decideBeardKernelMem);
+        if (beardAt > 0 && decideBeardTablesMem == NULL && CompactIds.beardTables() != null) {
+            // Drainer thread only (every decide enqueue runs there): a one-time upload.
+            decideBeardTablesMem = decideProgram.uploadReals(false, CompactIds.beardTables());
+        }
+        decideProgram.setArgPointer(s.decideKernel, a2,
+                decideBeardTablesMem != NULL ? decideBeardTablesMem : decideBeardTablesPlaceholder);
         // Z-RUN decomposition: one work-item per sz-block z-cell run (fullZ =
         // (dimZ-1)*strz makes total/strz exact) — the kernel derives totalRuns
         // from the same (total, sz) args.
         decideProgram.enqueue1DAsync(s.queue, s.decideKernel, CLProgram.roundUpGlobal(total / strz), evtOut);
+        if (!DUMP_DECIDE_TO.isEmpty() && beardAt > 0) {
+            dumpDecide(s, K, rootCount, cornerN, dimX, dimZ, strx, stry, strz, fullX, fullY, fullZ, fullN, total,
+                    cellN, flowingSim, beardAt);
+        }
         // Async readback of the K*fullN id bytes into the slot's map-once pinned
         // staging (mirrors the corner readback at the end of doEnqueue). In-order
         // queue: it orders after the decide NDRange above, and the corner readback
@@ -1712,6 +1864,12 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 CLProgram.releaseMem(decideNoiseMems[i]);
                 decideNoiseMems[i] = NULL;
             }
+            CLProgram.releaseMem(decideBeardKernelMem);
+            decideBeardKernelMem = NULL;
+            CLProgram.releaseMem(decideBeardTablesMem);
+            decideBeardTablesMem = NULL;
+            CLProgram.releaseMem(decideBeardTablesPlaceholder);
+            decideBeardTablesPlaceholder = NULL;
             if (decideProgram != null) {
                 try {
                     decideProgram.close();
@@ -1818,6 +1976,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         long auxFtMem = NULL;                  // K * cellN ints
         int auxCapacityChunks = 0;
         int auxCellCapacity = 0;               // capacity in K*cellN cells
+        long beardMem = NULL;                  // the batch's packed beard terms (sc_beard)
+        int beardCapacityInts = 0;
         // 1-byte/block id output: the kernel writes a device-local buffer, which is
         // async-read into map-once pinned staging (hIds) right after the decide NDRange —
         // the same pattern as the corner buffer (outMem/pinnedMem). The previous design
@@ -1836,6 +1996,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         LongBuffer hAuxLoc;
         IntBuffer hAuxFl;
         IntBuffer hAuxFt;
+        IntBuffer hBeard;
 
         Slot(boolean profiling) {
             long q = program.createQueue(profiling);
@@ -2131,6 +2292,24 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             }
         }
 
+        /** Beard-term staging for {@code ints} ints (never empty: the kernel argument must be a buffer). */
+        void ensureBeardCapacity(int ints) {
+            if (ints <= beardCapacityInts && beardMem != NULL) {
+                return;
+            }
+            int cap = Math.max(4096, Integer.highestOneBit(Math.max(1, ints - 1)) << 1);
+            CLProgram.releaseMem(beardMem);
+            beardMem = NULL;
+            beardCapacityInts = 0;
+            beardMem = decideProgram.createReusableInputBuffer((long) cap * Integer.BYTES);
+            if (hBeard != null) {
+                MemoryUtil.memFree(hBeard);
+                hBeard = null;
+            }
+            hBeard = MemoryUtil.memAllocInt(cap);
+            beardCapacityInts = cap;
+        }
+
         void ensureIdsCapacity(long bytes) {
             if (bytes <= idsCapacityBytes) {
                 return;
@@ -2296,6 +2475,13 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             if (hAuxFt != null) {
                 MemoryUtil.memFree(hAuxFt);
                 hAuxFt = null;
+            }
+            CLProgram.releaseMem(beardMem);
+            beardMem = NULL;
+            beardCapacityInts = 0;
+            if (hBeard != null) {
+                MemoryUtil.memFree(hBeard);
+                hBeard = null;
             }
             CLProgram.releaseMem(originsMem);
             originsMem = NULL;

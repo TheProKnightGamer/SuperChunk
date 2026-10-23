@@ -1,4 +1,4 @@
-# GPU-AHEAD PLAN — status and next steps (updated 2026-10-21)
+# GPU-AHEAD PLAN — status and next steps (updated 2026-10-22)
 
 The 2026-07-01 plan set out to move the per-block noise-stage decision onto the GPU: instead of
 reading back density corner grids for the CPU to interpolate and decide, a batched GPU kernel
@@ -30,7 +30,12 @@ planned" below.
   byte per block (id, bit 7 = fluid-update flag), about 96 KB per chunk.
 - **Per-chunk aux, CPU-authoritative.** Captured worker-side at the prefetch seam: the 315-cell
   aquifer FluidStatus table, the preloaded location cache, grid geometry and picker parameters,
-  the beard AABB (blocks inside it get a sentinel and are decided on the CPU), and the ore seed.
+  the beard AABB and the chunk's beard terms, and the ore seed.
+- **Beardifier (structure terrain)** (2026-10-22, `analysis/gpu-beard-2026-10-22.md`): the decide
+  kernel adds each structure chunk's beard to the density inside its beard box, from lookup tables
+  the CPU fills with its own beard functions (BEARD_BOX terms computed in-kernel). Exact in fp64.
+  Chunks whose terms cannot be shipped keep the old path: their beard-box blocks come back as
+  sentinels and are decided on the CPU (`-Dsuperchunk.gpu.beardOnGpu=false` forces it).
   `computeFluid` and the surface scan stay on the CPU, so carvers and the GPU read the same
   FluidStatus.
 - **Consumer.** `CompactConsume` replaces `doFill`'s per-block loop for batched chunks: bulk
@@ -70,6 +75,7 @@ Throughput (RTX 3070, i7-14700K; chunks/s):
 | 2026-09-21 | r1024, 12 workers | GPU 711–766 vs CPU 464–480 |
 | 2026-09-25 | r1024, 12 workers | GPU 903–959 (`analysis/worldgen-big-2026-09-25.md`) |
 | 2026-10-21 | Corner kernel: column hoisting + per-corner CSE (`analysis/gpu-corner-hoist-2026-10-21.md`) | Corner device time −83 to −89% (1.0–1.4 → 0.13–0.18 ms/chunk), bit-exact; r1024 at 22 workers 990 → 1,123 cps (+13.4%), CPU per chunk −9.8% |
+| 2026-10-22 | Beardifier on the GPU (`analysis/gpu-beard-2026-10-22.md`) | Structure chunks (7.8% at r1024) no longer go to the CPU hybrid path: CPU per chunk −3.7 to −4.2%, +2.5 to +3.5% cps (two A/Bs of four concurrent pairs); fp64 verify 0 mismatches over 1.75B blocks (forge 1.81B) |
 
 Round 8 also took the decide kernel to its floor (async id readback, a proven high-air fast path,
 lazy-staged vein evaluation): what remains is vanilla's own per-block 3D-noise math. Round 10 found
@@ -108,7 +114,10 @@ Ranked by expected payoff (from `analysis/review-2026-09-25.md` and the GPU-mode
    y-independent subtrees are computed once per corner column by a pre-pass kernel, and
    `sloped_cheese` with its blended noise once per corner: corner device time −83 to −89%, output
    bit-exact. What is left of the corner kernel is the blended noise (once per corner) and the cave
-   noises; the decide kernel is now a larger share of the GPU's time.
+   noises. On this box a GPU-mode pregen is now CPU-bound (GPU busy about a third of the run), so
+   the levers are CPU work the GPU can take: the Beardifier was the first (done 2026-10-22). Small
+   batches (mean 4–5 chunks at 22 workers) cost the corner kernel up to 9x per chunk (1.2 ms for
+   one chunk vs 0.13 ms/chunk at 32; `tools/cornerbench.c`), which matters on GPU-bound setups.
 2. **Cold start** (M). Updated 2026-10-21: with function dedup and the hoisted corner program, a
    truly cold boot is 278 → 236 s; the hoisted corner program builds in ~5 s. The two largest
    per-DF programs still take ~67 s each: dedup shrinks their text 10× but NVIDIA inlines the
@@ -132,7 +141,9 @@ Ranked by expected payoff (from `analysis/review-2026-09-25.md` and the GPU-mode
    (`-Dsuperchunk.gpu.colDedup`: removes 19% of corner column evaluations, no device-time win at
    round-10 batch sizes).
 5. **Worker-side aux capture** (S–M). In GPU mode the per-chunk 315-cell FluidStatus capture is
-   one of the few noise-stage costs left on the workers; profile it before changing anything.
+   one of the few noise-stage costs left on the workers. Profiled 2026-10-22: 1.8% of worldgen CPU,
+   about 1.1% of it the access-ordered LRU of the cross-chunk cell cache (`ScAquiferCellCache`,
+   `getAndMoveToFirst`/`moveIndexToFirst`), which a cheaper eviction order could remove.
 6. **fp32 decide default** (decision). One stone/air flip per ~143M blocks on one seed; decide
    whether the default should be fp64 decide (measure its throughput cost first).
 7. **Stage 7 remainder** (S). An always-on 1-in-N chunk re-verify with auto-disable, since ids are
