@@ -1,5 +1,18 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## ONE WARP PER WORK-GROUP + LOCK-FREE AQUIFER CELL CACHE (2026-10-22) — same as neo
+
+`CLProgram`, `ScAquiferCellCache` and `tools/decidebench.c` are copied verbatim from neo; the cache
+report line is added to `SuperChunk`'s server-stopping hook. Write-up in neo's
+`analysis/gpu-small-batches-2026-10-22.md`.
+
+- Every 1-D dispatch launches with the kernel's preferred multiple (at least 32) instead of the
+  driver's 256, so a small batch spreads over all SMs (`-Dsuperchunk.gpu.localSize=0` restores the
+  driver's choice). fp64 `compactIds=verify`, r512: 537,231,360 blocks, 0 mismatches.
+- The cross-chunk FluidStatus cache is a lock-free 4-way table (default 524,288 entries) instead of
+  64 locked LRU maps. CPU-mode noise-fill and surface hashes against the old cache, r512: 0
+  mismatches over 5,490 chunks.
+
 ## BEARDIFIER ON THE GPU (2026-10-22) — same as neo
 
 `CompactIds`, `GpuBatchDispatcher`, `GpuChunkBatcher`, `ScBeardBoxAccess`, `IStructureWeightSampler`

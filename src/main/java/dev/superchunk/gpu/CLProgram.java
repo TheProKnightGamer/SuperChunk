@@ -486,15 +486,72 @@ public final class CLProgram implements AutoCloseable {
     }
 
     /**
-     * Enqueues a 1-D NDRange of {@code globalWorkSize} work-items (auto local
-     * size), then blocks on {@link org.lwjgl.opencl.CL10#clFinish}.
+     * Work-group size for every 1-D dispatch ({@code -Dsuperchunk.gpu.localSize}): {@code auto}
+     * (default) is the kernel's preferred multiple (a warp on NVIDIA, a wavefront on AMD) but at
+     * least 32; a number forces that size; {@code 0} leaves it to the driver, as before 2026-10-22.
+     * The driver picked 256 on NVIDIA, which packs a small batch's few warps onto a few SMs: their
+     * fp64 units are shared, so latency grew with the warps per SM. One warp per group spreads them
+     * over all SMs. Replayed corner program (RTX 3070): -52% device time for 1 chunk, -44% for 4,
+     * -20% for 16, -12% for 32; decide kernel -7%. No kernel uses local memory or barriers, so the
+     * size changes no result. A size that does not divide the global size falls back to the driver.
      */
-    public void enqueue1D(long kernel, long globalWorkSize) {
+    private static final long LOCAL_SIZE = parseLocalSize(System.getProperty("superchunk.gpu.localSize", "auto"));
+    private static final java.util.concurrent.ConcurrentHashMap<Long, Long> LOCAL_BY_KERNEL =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static long parseLocalSize(String v) {
+        if (v == null || v.isBlank() || "auto".equalsIgnoreCase(v.trim())) {
+            return -1L;
+        }
+        try {
+            return Math.max(0L, Long.parseLong(v.trim()));
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
+    }
+
+    /** The local size to launch {@code kernel} with over {@code globalWorkSize} items, or 0 for the driver's. */
+    private long localSizeFor(long kernel, long globalWorkSize) {
+        if (LOCAL_SIZE == 0L || kernel == NULL) {
+            return 0L;
+        }
+        long local = LOCAL_BY_KERNEL.computeIfAbsent(kernel, k -> {
+            try (MemoryStack stack = stackPush()) {
+                PointerBuffer p = stack.mallocPointer(1);
+                if (CL10.clGetKernelWorkGroupInfo(k, device, CL10.CL_KERNEL_WORK_GROUP_SIZE, p, null) != CL_SUCCESS) {
+                    return 0L;
+                }
+                long max = p.get(0);
+                long want = LOCAL_SIZE;
+                if (want < 0) {
+                    long preferred = CL10.clGetKernelWorkGroupInfo(k, device,
+                            CL11.CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, p, null) == CL_SUCCESS ? p.get(0) : 0L;
+                    want = Math.max(32L, preferred);
+                }
+                return want <= max ? want : 0L;
+            } catch (Throwable t) {
+                return 0L;
+            }
+        });
+        return local > 0 && globalWorkSize % local == 0 ? local : 0L;
+    }
+
+    private void enqueue1DOn(long q, long kernel, long globalWorkSize, PointerBuffer ev) {
         try (MemoryStack stack = stackPush()) {
             PointerBuffer global = stack.mallocPointer(1).put(0, globalWorkSize);
-            checkCL(clEnqueueNDRangeKernel(queue, kernel, 1, null, global, null, null, null));
-            checkCL(clFinish(queue));
+            long local = localSizeFor(kernel, globalWorkSize);
+            PointerBuffer localBuf = local > 0 ? stack.mallocPointer(1).put(0, local) : null;
+            checkCL(clEnqueueNDRangeKernel(q, kernel, 1, null, global, localBuf, null, ev));
         }
+    }
+
+    /**
+     * Enqueues a 1-D NDRange of {@code globalWorkSize} work-items (local size per
+     * {@code superchunk.gpu.localSize}), then blocks on {@link org.lwjgl.opencl.CL10#clFinish}.
+     */
+    public void enqueue1D(long kernel, long globalWorkSize) {
+        enqueue1DOn(queue, kernel, globalWorkSize, null);
+        checkCL(clFinish(queue));
     }
 
     /** Blocking read of {@code mem} into {@code dst} (offset 0). */
@@ -589,11 +646,8 @@ public final class CLProgram implements AutoCloseable {
      * Thread-safe when {@code q} and {@code kernel} are owned by the calling thread.
      */
     public void enqueue1D(long q, long kernel, long globalWorkSize) {
-        try (MemoryStack stack = stackPush()) {
-            PointerBuffer global = stack.mallocPointer(1).put(0, globalWorkSize);
-            checkCL(clEnqueueNDRangeKernel(q, kernel, 1, null, global, null, null, null));
-            checkCL(clFinish(q));
-        }
+        enqueue1DOn(q, kernel, globalWorkSize, null);
+        checkCL(clFinish(q));
     }
 
     /** Blocking read of {@code mem} into {@code dst} on the GIVEN queue (fp32). */
@@ -622,9 +676,8 @@ public final class CLProgram implements AutoCloseable {
      */
     public void enqueue1DAsync(long q, long kernel, long globalWorkSize, long[] outEvent) {
         try (MemoryStack stack = stackPush()) {
-            PointerBuffer global = stack.mallocPointer(1).put(0, globalWorkSize);
             PointerBuffer ev = outEvent != null ? stack.mallocPointer(1) : null;
-            checkCL(clEnqueueNDRangeKernel(q, kernel, 1, null, global, null, null, ev));
+            enqueue1DOn(q, kernel, globalWorkSize, ev);
             if (outEvent != null) {
                 outEvent[0] = ev.get(0);
             }
@@ -1102,6 +1155,7 @@ public final class CLProgram implements AutoCloseable {
     /** Releases a kernel. Swallows errors. */
     public static void releaseKernel(long kernel) {
         if (kernel != NULL) {
+            LOCAL_BY_KERNEL.remove(kernel);   // the driver may hand the handle out again
             try {
                 clReleaseKernel(kernel);
             } catch (Throwable ignored) {
