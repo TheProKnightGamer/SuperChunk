@@ -301,21 +301,15 @@ public final class SkyStarLightEngine extends StarLightEngine {
         }
 
         final int sectionOffset = this.chunkSectionIndexOffset;
-        final BlockState centerState = this.getBlockState(worldX, worldY, worldZ);
-        int opacity = ((ExtendedAbstractBlockState)centerState).getOpacityIfCached();
-
-        final BlockState conditionallyOpaqueState;
-        if (opacity < 0) {
-            this.recalcCenterPos.set(worldX, worldY, worldZ);
-            opacity = Math.max(1, centerState.getLightBlock(lightAccess.getLevel(), this.recalcCenterPos));
-            if (((ExtendedAbstractBlockState)centerState).isConditionallyFullOpaque()) {
-                conditionallyOpaqueState = centerState;
-            } else {
-                conditionallyOpaqueState = null;
-            }
-        } else {
-            conditionallyOpaqueState = null;
-            opacity = Math.max(1, opacity);
+        // SuperChunk: the block here only matters once a neighbour is bright enough to pass light into it, so it
+        // is read when the first one is (at the edges most are dark, and the answer is then 0 whatever it is).
+        // Without the shortcut it is read first, as upstream does.
+        int opacity = 0; // 0: the block here is not read yet
+        BlockState conditionallyOpaqueState = null;
+        if ((this.fastPaths & FAST_PALETTE_SKIPS) == 0) {
+            final BlockState centerState = this.getBlockState(worldX, worldY, worldZ);
+            opacity = this.getCenterOpacity(lightAccess, centerState, worldX, worldY, worldZ);
+            conditionallyOpaqueState = ((ExtendedAbstractBlockState)centerState).isConditionallyFullOpaque() ? centerState : null;
         }
 
         int level = 0;
@@ -334,9 +328,17 @@ public final class SkyStarLightEngine extends StarLightEngine {
                 continue;
             }
 
-            final BlockState neighbourState = this.getBlockState(offX, offY, offZ);
+            if (opacity == 0) {
+                final BlockState centerState = this.getBlockState(worldX, worldY, worldZ);
+                opacity = this.getCenterOpacity(lightAccess, centerState, worldX, worldY, worldZ);
+                conditionallyOpaqueState = ((ExtendedAbstractBlockState)centerState).isConditionallyFullOpaque() ? centerState : null;
+            }
 
-            if (((ExtendedAbstractBlockState)neighbourState).isConditionallyFullOpaque()) {
+            // SuperChunk: a section whose palette holds no conditionally opaque block needs no read to say so
+            final BlockState neighbourState = (this.fastPaths & FAST_PALETTE_SKIPS) != 0 && (this.getPaletteFlags(sectionIndex) & PALETTE_CONDITIONALLY_OPAQUE) == 0
+                    ? null : this.getBlockState(offX, offY, offZ);
+
+            if (neighbourState != null && ((ExtendedAbstractBlockState)neighbourState).isConditionallyFullOpaque()) {
                 // here the block can be conditionally opaque (i.e light cannot propagate from it), so we need to test that
                 // we don't read the blockstate because most of the time this is false, so using the faster
                 // known transparency lookup results in a net win
@@ -357,6 +359,17 @@ public final class SkyStarLightEngine extends StarLightEngine {
         }
 
         return level;
+    }
+
+    // the light a neighbour's level loses entering this block (at least 1). A block that can be conditionally
+    // opaque never has its opacity cached, so recalcCenterPos is set for its face tests.
+    private int getCenterOpacity(final LightChunkGetter lightAccess, final BlockState centerState, final int worldX, final int worldY, final int worldZ) {
+        final int opacity = ((ExtendedAbstractBlockState)centerState).getOpacityIfCached();
+        if (opacity < 0) {
+            this.recalcCenterPos.set(worldX, worldY, worldZ);
+            return Math.max(1, centerState.getLightBlock(lightAccess.getLevel(), this.recalcCenterPos));
+        }
+        return Math.max(1, opacity);
     }
 
     @Override
@@ -542,10 +555,16 @@ public final class SkyStarLightEngine extends StarLightEngine {
             final int minZ = chunkPos.z << 4;
             final int maxZ = chunkPos.z << 4 | 15;
             final int startY = highestNonEmptySection << 4 | 15;
+            final int columnQueueStart = this.increaseQueueInitialLength;
             for (int currZ = minZ; currZ <= maxZ; ++currZ) {
                 for (int currX = minX; currX <= maxX; ++currX) {
-                    this.tryPropagateSkylight(world, currX, startY + 1, currZ, false, false);
+                    this.columnLowestLit[(currX & 15) | ((currZ & 15) << 4)] =
+                            this.tryPropagateSkylight(world, currX, startY + 1, currZ, false, false) + 1;
                 }
+            }
+            if ((this.fastPaths & FAST_SKY_COLUMNS) != 0) {
+                // with edge checks the propagation comes next; without, checkNullSection runs first
+                this.dropColumnNoOps(columnQueueStart, needsEdgeChecks);
             }
         } // else: apparently the chunk is empty
 
@@ -566,6 +585,52 @@ public final class SkyStarLightEngine extends StarLightEngine {
 
             this.performLightIncrease(lightAccess);
         }
+    }
+
+    // SuperChunk: per column of the chunk being lit, the lowest y tryPropagateSkylight reached (its return + 1);
+    // every block from there up to where it started is now 15, or in a null section the propagation skips.
+    // index = x | (z << 4)
+    protected final int[] columnLowestLit = new int[16 * 16];
+
+    // SuperChunk: drops the column entries (queued from columnQueueStart on) that cannot raise anything. An entry
+    // sends 15 down and sideways, and does nothing where the neighbour is already 14 or 15 or in a null section,
+    // which the column pass leaves true of every block of its column's lit run. So an entry is needed only at its
+    // column's lowest lit block, below a side neighbour's lowest lit block, or beside a block of a neighbouring
+    // chunk that is not yet 14 or 15. The dropped entries would be read and discarded without a write, so what
+    // the propagation does is unchanged. A neighbouring chunk's block is judged by its level now, which holds
+    // until the propagation reads it only if nothing initialises a null section first: pass false for
+    // neighboursSettled when something will (the border columns then keep their entries).
+    protected final void dropColumnNoOps(final int columnQueueStart, final boolean neighboursSettled) {
+        final long[] queue = this.increaseQueue;
+        final int[] lowest = this.columnLowestLit;
+        final int decodeOffsetX = -this.encodeOffsetX;
+        final int decodeOffsetY = -this.encodeOffsetY;
+        final int decodeOffsetZ = -this.encodeOffsetZ;
+        int write = columnQueueStart;
+        for (int read = columnQueueStart, len = this.increaseQueueInitialLength; read < len; ++read) {
+            final long queueValue = queue[read];
+            final int posX = ((int)queueValue & 63) + decodeOffsetX;
+            final int posZ = (((int)queueValue >>> 6) & 63) + decodeOffsetZ;
+            final int posY = (((int)queueValue >>> 12) & ((1 << 16) - 1)) + decodeOffsetY;
+            final int x = posX & 15;
+            final int z = posZ & 15;
+            final int column = x | (z << 4);
+            if (posY != lowest[column]
+                    && (x == 0 ? neighboursSettled && this.cannotRaiseFrom15(posX - 1, posY, posZ) : posY >= lowest[column - 1])
+                    && (x == 15 ? neighboursSettled && this.cannotRaiseFrom15(posX + 1, posY, posZ) : posY >= lowest[column + 1])
+                    && (z == 0 ? neighboursSettled && this.cannotRaiseFrom15(posX, posY, posZ - 1) : posY >= lowest[column - 16])
+                    && (z == 15 ? neighboursSettled && this.cannotRaiseFrom15(posX, posY, posZ + 1) : posY >= lowest[column + 16])) {
+                continue;
+            }
+            queue[write++] = queueValue;
+        }
+        this.increaseQueueInitialLength = write;
+    }
+
+    // whether propagating 15 into this block does nothing: it is in a null section, or already at 14 or 15
+    private boolean cannotRaiseFrom15(final int worldX, final int worldY, final int worldZ) {
+        final SWMRNibbleArray nibble = this.nibbleCache[(worldX >> 4) + 5 * (worldZ >> 4) + (5 * 5) * (worldY >> 4) + this.chunkSectionIndexOffset];
+        return nibble == null || nibble.getUpdating((worldX & 15) | ((worldZ & 15) << 4) | ((worldY & 15) << 8)) >= (15 - 1);
     }
 
     protected final void processDelayedIncreases() {
