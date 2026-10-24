@@ -450,6 +450,29 @@ public final class StarLightInterface {
         final BlockStarLightEngine blockEngine = this.getBlockLightEngine();
 
         try {
+            if (LightVerify.ENABLED) {
+                LightVerify.lightChunk(this.lightAccess, chunk, emptySections, skyEngine, blockEngine);
+                return;
+            }
+            if (dev.superchunk.worldgen.LightTiming.ENABLED) {
+                final int half = dev.superchunk.worldgen.LightTiming.half(chunk.getPos().x, chunk.getPos().z);
+                final int fastPaths = half == 0 ? StarLightEngine.FAST_DEFAULT
+                        : StarLightEngine.FAST_DEFAULT & ~dev.superchunk.worldgen.LightTiming.AB_MASK;
+                final long t0 = dev.superchunk.worldgen.LightTiming.now();
+                if (skyEngine != null) {
+                    skyEngine.fastPaths = fastPaths;
+                    skyEngine.light(this.lightAccess, chunk, emptySections);
+                    skyEngine.fastPaths = StarLightEngine.FAST_DEFAULT;
+                }
+                final long t1 = dev.superchunk.worldgen.LightTiming.now();
+                if (blockEngine != null) {
+                    blockEngine.fastPaths = fastPaths;
+                    blockEngine.light(this.lightAccess, chunk, emptySections);
+                    blockEngine.fastPaths = StarLightEngine.FAST_DEFAULT;
+                }
+                dev.superchunk.worldgen.LightTiming.add(half, t1 - t0, dev.superchunk.worldgen.LightTiming.now() - t1);
+                return;
+            }
             if (skyEngine != null) {
                 skyEngine.light(this.lightAccess, chunk, emptySections);
             }

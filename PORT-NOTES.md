@@ -1,5 +1,23 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## LIGHTING NEW CHUNKS (2026-10-23) — same as neo
+
+The light engine's changes (`StarLightEngine`, `SkyStarLightEngine`, `BlockStarLightEngine`,
+`StarLightInterface`) are neo's diff applied as is; the files differ from neo only in 1.20.1's
+`ChunkStatus` package and `getStatus()`. `LightVerify` takes the same two substitutions, and
+`LightTiming` is copied verbatim; both report from `SuperChunk`'s server-stopping hook. Write-up in
+neo's `analysis/lighting-2026-10-23.md`.
+
+- Sky column entries that cannot raise anything are dropped before propagation; block light sources
+  are found from the palette and raw storage; edge checks skip block reads the palette answers.
+  Kill switches `-Dsuperchunk.lighting.skyColumns=false`, `-Dsuperchunk.lighting.paletteSkips=false`.
+- The emitter test is the existing one: forge's `BlockStateBaseMixin` marks a state dynamic when its
+  `IForgeBlockState`/`IForgeBlock` `getLightEmission(level, pos)` is overridden, and otherwise
+  that call returns `state.getLightEmission()`, as on neo.
+- `-Dsuperchunk.lighting.verify=true`, r1024 GPU: 17,170 chunks, 16,088 compared, 0 mismatches.
+  In-run A/B (`-Dsuperchunk.debug.lightTimingAB=3`): light 902 -> 707 us/chunk (-21.6%; sky -21%,
+  block -22.5%).
+
 ## ONE WARP PER WORK-GROUP + LOCK-FREE AQUIFER CELL CACHE (2026-10-22) — same as neo
 
 `CLProgram`, `ScAquiferCellCache` and `tools/decidebench.c` are copied verbatim from neo; the cache

@@ -5,16 +5,22 @@ import dev.superchunk.ca.spottedleaf.starlight.common.chunk.ExtendedChunk;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.util.BitStorage;
+import net.minecraft.util.SimpleBitStorage;
+import net.minecraft.util.ZeroBitStorage;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.GlobalPalette;
 import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.LightChunkGetter;
+import net.minecraft.world.level.chunk.Palette;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -131,13 +137,16 @@ public final class BlockStarLightEngine extends StarLightEngine {
                                       final int expect) {
         final BlockState centerState = this.getBlockState(worldX, worldY, worldZ);
         this.recalcCenterPos.set(worldX, worldY, worldZ);
-        int level = centerState.getLightEmission(lightAccess.getLevel(), this.recalcCenterPos) & 0xF;
+        final int sectionOffset = this.chunkSectionIndexOffset;
+        // SuperChunk: in a section whose palette holds no light source every block emits 0
+        int level = (this.fastPaths & FAST_PALETTE_SKIPS) != 0
+                && (this.getPaletteFlags((worldX >> 4) + 5 * (worldZ >> 4) + (5 * 5) * (worldY >> 4) + sectionOffset) & PALETTE_EMITTER) == 0
+                ? 0 : centerState.getLightEmission(lightAccess.getLevel(), this.recalcCenterPos) & 0xF;
 
         if (level >= (15 - 1) || level > expect) {
             return level;
         }
 
-        final int sectionOffset = this.chunkSectionIndexOffset;
         final BlockState conditionallyOpaqueState;
         int opacity = ((ExtendedAbstractBlockState)centerState).getOpacityIfCached();
 
@@ -169,8 +178,10 @@ public final class BlockStarLightEngine extends StarLightEngine {
                 continue;
             }
 
-            final BlockState neighbourState = this.getBlockState(offX, offY, offZ);
-            if (((ExtendedAbstractBlockState)neighbourState).isConditionallyFullOpaque()) {
+            // SuperChunk: a section whose palette holds no conditionally opaque block needs no read to say so
+            final BlockState neighbourState = (this.fastPaths & FAST_PALETTE_SKIPS) != 0 && (this.getPaletteFlags(sectionIndex) & PALETTE_CONDITIONALLY_OPAQUE) == 0
+                    ? null : this.getBlockState(offX, offY, offZ);
+            if (neighbourState != null && ((ExtendedAbstractBlockState)neighbourState).isConditionallyFullOpaque()) {
                 // here the block can be conditionally opaque (i.e light cannot propagate from it), so we need to test that
                 // we don't read the blockstate because most of the time this is false, so using the faster
                 // known transparency lookup results in a net win
@@ -224,6 +235,10 @@ public final class BlockStarLightEngine extends StarLightEngine {
             final PalettedContainer<BlockState> states = section.states;
             final int offY = sectionY << 4;
 
+            if ((this.fastPaths & FAST_PALETTE_SKIPS) != 0 && this.getSourcesByPalette(lightAccess, states.data, offX, offY, offZ, sources)) {
+                continue;
+            }
+
             for (int index = 0; index < (16 * 16 * 16); ++index) {
                 final BlockState state = states.get(index);
                 this.mutablePos4.set(offX | (index & 15), offY | (index >>> 8), offZ | ((index >>> 4) & 15));
@@ -237,6 +252,66 @@ public final class BlockStarLightEngine extends StarLightEngine {
         }
 
         return sources;
+    }
+
+    // SuperChunk: per palette id, whether the block may emit light (StarLightEngine#mayEmitLight); ids at or past
+    // the palette's size are marked too, so a broken storage still fails in valueFor as states.get would
+    private final boolean[] sourceCandidates = new boolean[1 << 8];
+
+    // SuperChunk: getSources' scan of one section, reading only the blocks whose palette entry may emit light: the
+    // others emit 0 wherever they are (the same test that lets getSources skip whole sections). Walks the raw
+    // storage in index order and treats each candidate exactly as the full scan does. Returns false, having added
+    // nothing, for storage or palettes it does not read (the global palette); the caller then does the full scan.
+    private boolean getSourcesByPalette(final LightChunkGetter lightAccess, final PalettedContainer.Data<BlockState> data,
+                                        final int offX, final int offY, final int offZ, final List<BlockPos> sources) {
+        final Palette<BlockState> palette = data.palette();
+        final BitStorage storage = data.storage();
+        final int bits = storage.getBits();
+        if (bits > 8 || palette instanceof GlobalPalette || !(storage instanceof SimpleBitStorage || storage instanceof ZeroBitStorage)) {
+            return false;
+        }
+        final boolean[] candidates = this.sourceCandidates;
+        final int paletteSize = Math.min(palette.getSize(), candidates.length);
+        for (int id = 0; id < paletteSize; ++id) {
+            candidates[id] = mayEmitLight(palette.valueFor(id));
+        }
+        Arrays.fill(candidates, paletteSize, candidates.length, true);
+
+        if (bits == 0) {
+            // ZeroBitStorage: every block has id 0
+            if (candidates[0]) {
+                final BlockState state = palette.valueFor(0);
+                for (int index = 0; index < (16 * 16 * 16); ++index) {
+                    this.addSourceIfEmitting(lightAccess, state, index, offX, offY, offZ, sources);
+                }
+            }
+            return true;
+        }
+
+        final long[] raw = storage.getRaw();
+        final int perWord = 64 / bits;
+        final int mask = (1 << bits) - 1;
+        int index = 0;
+        for (int w = 0; w < raw.length && index < (16 * 16 * 16); ++w) {
+            long word = raw[w];
+            for (int i = 0; i < perWord && index < (16 * 16 * 16); ++i, ++index, word >>>= bits) {
+                final int id = (int)word & mask;
+                if (candidates[id]) {
+                    this.addSourceIfEmitting(lightAccess, palette.valueFor(id), index, offX, offY, offZ, sources);
+                }
+            }
+        }
+        return true;
+    }
+
+    private void addSourceIfEmitting(final LightChunkGetter lightAccess, final BlockState state, final int index,
+                                     final int offX, final int offY, final int offZ, final List<BlockPos> sources) {
+        // as the full scan: emission is asked at mutablePos1, which the scan never moves
+        if (state.getLightEmission(lightAccess.getLevel(), this.mutablePos1) <= 0) {
+            return;
+        }
+        // index = x | (z << 4) | (y << 8)
+        sources.add(new BlockPos(offX | (index & 15), offY | (index >>> 8), offZ | ((index >>> 4) & 15)));
     }
 
     @Override
