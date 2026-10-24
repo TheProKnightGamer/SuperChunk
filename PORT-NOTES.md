@@ -1,5 +1,37 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## SURFACE BUILDING (2026-10-24) — same as neo
+
+These are copied verbatim from neo:
+- `DeepSurfaceRules`, `SurfaceColumn`, `SurfaceTiming` and `BiomeQuartCache`;
+- `MixinSurfaceSystemFast`, `MixinSurfaceDeepRules`, `MixinSurfaceContextDeep`,
+  `MixinSurfaceBiomeConditionMemo`, `MixinSurfaceBuildTiming`, `MixinSurfaceColumnMemo` and
+  `MixinNoiseFillHash`;
+- the `ISurface*Access` accessors and `ISurfaceRulesContextAccess`.
+
+`ProtoChunkWrites` gains neo's `setInColumn`. 1.20.1's `buildSurface`, the surface rule classes and
+`ProtoChunk.getBlockState` match 1.21.1's. Write-up in neo's `analysis/surface-2026-10-24.md`.
+
+- **One difference: the uniform biome cells.** 1.21.1 reads a cell's 8 corners only within the
+  radius where the region's `ChunkStep` guarantees biomes, since its `WorldGenRegion.getChunk` throws
+  beyond it. 1.20.1 has no `ChunkStep`, and its `getChunk(x, z, BIOMES, false)` returns null there,
+  so `getNoiseBiome` falls back to the uncached biome and never throws. `MixinBiomeManagerQuartCache`
+  sets the radius to `Integer.MAX_VALUE`, and `IWorldGenRegionAccess` keeps no `generatingStep`
+  accessor.
+- `SequenceRuleSource` is package-private in 1.20.1 (public in 1.21.1), so both ports read it
+  through `ISurfaceSequenceSourceAccess`.
+- **SRG names** added to `MixinTargetScan.SRG_NAMES`:
+  - `ProtoChunk#getBlockState` `m_8055_`, `ChunkAccess#getSection` `m_183278_`,
+    `LevelChunkSection#hasOnlyAir` `m_188008_`;
+  - `SurfaceRules$Context#updateY` `m_189576_`, `#getMinSurfaceLevel` `m_189583_`;
+  - `SurfaceSystem#buildSurface` `m_224648_`;
+  - `Holder$Reference#is` `m_203425_` (the `Predicate` overload).
+
+  The refmap carries every accessor, invoker and redirect. The copy's shadows reobfuscate to
+  `f_189904_`, `m_189952_`, `m_189954_` and `m_189934_`.
+- **Gate:** `-Dsuperchunk.debug.surfaceHash`, r512 overworld plus r192 nether and end, everything off
+  vs on: 6,551 chunks, 0 mismatches. Surface 4,383 -> 3,330 us per chunk.
+
 ## ORE PLACEMENT (2026-10-24) — same as neo
 
 `MixinOreFeatureFast`, `MixinHeightmapTop`, `MixinProbeBiomeLookup`, `OreRuns`, `OreTiming` and

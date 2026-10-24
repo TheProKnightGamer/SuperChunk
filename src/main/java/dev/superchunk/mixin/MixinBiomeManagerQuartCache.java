@@ -54,6 +54,13 @@ import org.spongepowered.asm.mixin.injection.At;
  * repeats vanilla's arithmetic and corner order exactly. If any other mod mixes into
  * {@code BiomeManager}, the vanilla method (with the per-corner hooks above) always runs.
  * Kill switch: {@code -Dsuperchunk.worldgen.biomeCellPath=false}.
+ *
+ * <p>On the cell path, a cell whose 8 corner quarts all hold the same biome answers with that biome without
+ * scoring the corners: {@code getBiome} returns one of those 8, whichever wins. The cell's answer is kept in
+ * {@link BiomeQuartCache}'s cell table, next to the quarts. (On 1.21.1 its corners are read only within the radius the
+ * region's generation step has biomes for, where a read cannot throw; here {@code getNoiseBiome} never throws.) Kill
+ * switch:
+ * {@code -Dsuperchunk.worldgen.biomeUniformCells=false}.
  */
 @Mixin(BiomeManager.class)
 public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worldgen.BiomeCellLookup {
@@ -77,6 +84,10 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
     @Unique
     private static final boolean SUPERCHUNK$CELL_PATH = SUPERCHUNK$FIDDLE_CACHE
             && !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.biomeCellPath", "true"));
+
+    @Unique
+    private static final boolean SUPERCHUNK$UNIFORM_CELLS = SUPERCHUNK$ENABLED
+            && !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.biomeUniformCells", "true"));
 
     /** 0 = not yet checked, 1 = only SuperChunk mixins target BiomeManager, -1 = another mod's do. */
     @Unique
@@ -112,6 +123,14 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
     @Unique
     private Thread superchunk$owner;
 
+    /** The region's center chunk, and the chessboard radius around it within which every chunk has its biomes. */
+    @Unique
+    private int superchunk$centerX;
+    @Unique
+    private int superchunk$centerZ;
+    @Unique
+    private int superchunk$biomeRadius = -1;
+
     /** Publish the owner, table and ticket together before enabling the fast path. */
     @Unique
     private synchronized void superchunk$initializeCache() {
@@ -126,6 +145,9 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
             if (SUPERCHUNK$FIDDLE_CACHE) {
                 superchunk$fiddles = BiomeFiddleCache.local();
             }
+            // 1.20.1: WorldGenRegion.getChunk(x, z, BIOMES, false) answers null instead of throwing outside the
+            // region, and getNoiseBiome then takes the uncached biome, so every corner can be read
+            superchunk$biomeRadius = Integer.MAX_VALUE;
             superchunk$owner = Thread.currentThread();
             superchunk$mode = 1;
         } else {
@@ -135,7 +157,7 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
 
     @WrapMethod(method = "getBiome", require = 0)
     private Holder<Biome> superchunk$cellPathBiome(BlockPos pos, Operation<Holder<Biome>> original) {
-        Holder<Biome> biome = superchunk$cellPath(pos);
+        Holder<Biome> biome = superchunk$cellPath(pos, false);
         if (biome == null) {
             return original.call(pos); // the per-corner hook runs the copy self-check first
         }
@@ -147,15 +169,29 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         return biome;
     }
 
-    /** Direct callers (surface rules) take the cell path without the wrapper; verify keeps them on it. */
+    /**
+     * Direct callers (surface rules) take the cell path without the wrapper, with the uniform-cell shortcut: the rules
+     * ask about every block down a column, so they come back to the same cells. Other callers (placement filters)
+     * mostly ask once per cell, where reading 8 corners would cost more than it saves. In verify mode each answer is
+     * compared with {@code getBiome}'s (which itself compares with vanilla's) and that one is returned.
+     */
     @Override
     public Holder<Biome> superchunk$cellBiome(BlockPos pos) {
-        return SUPERCHUNK$FIDDLE_VERIFY ? null : superchunk$cellPath(pos);
+        Holder<Biome> biome = superchunk$cellPath(pos, true);
+        if (SUPERCHUNK$FIDDLE_VERIFY && biome != null) {
+            Holder<Biome> checked = ((BiomeManager) (Object) this).getBiome(pos);
+            BiomeFiddleCache.recordCellVerify(pos.getX(), pos.getY(), pos.getZ(), biome, checked);
+            return checked;
+        }
+        return biome;
     }
 
-    /** The cell path's biome, or {@code null} when it does not apply (see {@link #superchunk$cellPathBiome}). */
+    /**
+     * The cell path's biome, or {@code null} when it does not apply (see {@link #superchunk$cellPathBiome}); with
+     * {@code uniform}, a cell whose corners all hold one biome answers first.
+     */
     @Unique
-    private Holder<Biome> superchunk$cellPath(BlockPos pos) {
+    private Holder<Biome> superchunk$cellPath(BlockPos pos, boolean uniform) {
         if (!SUPERCHUNK$CELL_PATH || superchunk$fiddleCopy <= 0) {
             return null;
         }
@@ -172,12 +208,74 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         int x = pos.getX();
         int y = pos.getY();
         int z = pos.getZ();
+        if (uniform && SUPERCHUNK$UNIFORM_CELLS
+                && (dev.superchunk.worldgen.SurfaceTiming.off() & dev.superchunk.worldgen.SurfaceTiming.UNIFORM_CELLS) == 0) {
+            Holder<Biome> cellBiome = superchunk$uniformCell((x - 2) >> 2, (y - 2) >> 2, (z - 2) >> 2);
+            if (cellBiome != null) {
+                return cellBiome;
+            }
+        }
         int corner = fiddles.nearestCorner(this.biomeZoomSeed, x, y, z);
         if (corner < 0) {
             return null;
         }
         return superchunk$quartDirect(
                 ((x - 2) >> 2) + (corner >> 2), ((y - 2) >> 2) + ((corner >> 1) & 1), ((z - 2) >> 2) + (corner & 1));
+    }
+
+    /**
+     * The biome all 8 corners of the zoom cell at quart {@code (x, y, z)} hold, or {@code null} when they hold more than
+     * one or cannot all be read (see the class javadoc).
+     */
+    @Unique
+    @SuppressWarnings("unchecked")
+    private Holder<Biome> superchunk$uniformCell(int x, int y, int z) {
+        BiomeQuartCache cache = superchunk$cache;
+        if (cache == null) {
+            return null;
+        }
+        if (!cache.isCurrentGeneration(superchunk$generation)) {
+            superchunk$generation = cache.claimGeneration();
+        }
+        long generation = superchunk$generation;
+        long encoded = BiomeQuartCache.encode(generation, x, y, z);
+        if (encoded == BiomeQuartCache.UNCACHEABLE) {
+            return null;
+        }
+        Object cell = cache.getCell(encoded);
+        if (cell == null) {
+            cell = superchunk$readCell(x, y, z);
+            if (cell == null) {
+                return null;
+            }
+            if (cache.isCurrentGeneration(generation)) {
+                cache.putCell(encoded, cell);
+            }
+        }
+        return cell == BiomeQuartCache.MIXED ? null : (Holder<Biome>) cell;
+    }
+
+    /** The one biome of the cell's 8 corners, {@link BiomeQuartCache#MIXED}, or {@code null} when not all can be read. */
+    @Unique
+    private Object superchunk$readCell(int x, int y, int z) {
+        int radius = superchunk$biomeRadius;
+        int cx0 = (x >> 2) - superchunk$centerX;
+        int cz0 = (z >> 2) - superchunk$centerZ;
+        int cx1 = ((x + 1) >> 2) - superchunk$centerX;
+        int cz1 = ((z + 1) >> 2) - superchunk$centerZ;
+        if (Math.max(Math.max(Math.abs(cx0), Math.abs(cx1)), Math.max(Math.abs(cz0), Math.abs(cz1))) > radius) {
+            return null;
+        }
+        Holder<Biome> first = superchunk$quartDirect(x, y, z);
+        if (first == null) {
+            return null;
+        }
+        for (int c = 1; c < 8; c++) {
+            if (superchunk$quartDirect(x + (c >> 2), y + ((c >> 1) & 1), z + (c & 1)) != first) {
+                return BiomeQuartCache.MIXED;
+            }
+        }
+        return first;
     }
 
     /** The quart memo of {@link #superchunk$cacheQuartBiome}, resolving misses on the source itself. */

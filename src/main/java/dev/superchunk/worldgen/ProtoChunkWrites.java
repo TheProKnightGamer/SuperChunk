@@ -66,6 +66,33 @@ public final class ProtoChunkWrites {
         return maps;
     }
 
+    /**
+     * {@link #set} for one column at a time: {@code firstAvailable[m]} is heightmap {@code m}'s current value for the
+     * column (or {@code Integer.MIN_VALUE} when not known yet). {@code Heightmap.update} returns at once, changing
+     * nothing, for a block at or below two under that value, which is where nearly every surface write lands (the
+     * deepslate); the value is read again whenever an update changes it.
+     */
+    public static BlockState setInColumn(ProtoChunk chunk, Heightmap[] maps, BlockPos pos, BlockState state, int[] firstAvailable) {
+        int y = pos.getY();
+        LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(y));
+        if (section.hasOnlyAir() && state.is(Blocks.AIR)) {
+            return state;
+        }
+        int x = pos.getX() & 15;
+        int z = pos.getZ() & 15;
+        BlockState old = section.setBlockState(x, y & 15, z, state);
+        for (int m = 0; m < maps.length; m++) {
+            Heightmap map = maps[m];
+            if (firstAvailable[m] == Integer.MIN_VALUE) {
+                firstAvailable[m] = map.getFirstAvailable(x, z);
+            }
+            if (y > firstAvailable[m] - 2 && map.update(x, y, z, state)) {
+                firstAvailable[m] = map.getFirstAvailable(x, z);
+            }
+        }
+        return old;
+    }
+
     /** Vanilla's pre-light {@code setBlockState} with the heightmaps resolved; y must be in range. */
     public static BlockState set(ProtoChunk chunk, Heightmap[] maps, BlockPos pos, BlockState state) {
         int y = pos.getY();
