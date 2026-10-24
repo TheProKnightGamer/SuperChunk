@@ -1,5 +1,33 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## ORE PLACEMENT (2026-10-24) — same as neo
+
+`MixinOreFeatureFast`, `MixinHeightmapTop`, `MixinProbeBiomeLookup`, `OreRuns`, `OreTiming` and
+`OreRunsTest` are copied verbatim from neo, except for one line in `OreRuns`. 1.20.1's `OreFeature`
+(`place`, `doPlace`, `canPlaceOre`, `shouldSkipAirCheck`) and the chunk and heightmap methods used
+are the same as 1.21.1's. Write-up in neo's `analysis/ores-2026-10-24.md`.
+
+- `place`'s column scan looks each chunk up once and reads `ProtoChunk` heightmaps directly. It skips
+  a chunk whose highest column, cached on the heightmap against a copy of its raw words, is below the
+  box. `doPlace` finds each row's run of blocks instead of testing every block, with the taken bits
+  in a `long[]`. Plain block and tag targets keep their answer per block state. Kill switches
+  `-Dsuperchunk.worldgen.oreHeightScan=false`, `.oreRuns=false`, `.oreTargetMemo=false`.
+- **SRG names.** `MixinTargetScan.SRG_NAMES` gains the methods these replicas ask about:
+  - `OreFeature#place` `m_142674_`, `#canPlaceOre` `m_225186_`;
+  - `WorldGenRegion#getHeight` `m_6924_`;
+  - the four rule tests' `test` `m_213865_`;
+  - `ChunkAccess#getHeight` `m_5885_`, `#hasPrimedHeightmap` `m_187658_`,
+    `#getOrCreateHeightmapUnprimed` `m_6005_`; `ProtoChunk#getHeight` `m_5885_`;
+  - `Heightmap#getFirstAvailable` `m_64242_`, `#getRawData` `m_64239_`.
+
+  The map holds one name per method, so `OreRuns` also asks for the private
+  `getFirstAvailable(int)` by its SRG name `m_64240_` directly. That is the one line that differs
+  from neo.
+- `-Dsuperchunk.worldgen.oreVerify=true`, r1024 GPU: 4,307,084 height checks, 1,572,635 placements,
+  122,233,778 blocks, 0 mismatches. The heightmaps were read directly and every block went through
+  the target memo. Three concurrent pairs, shortcuts off vs on: ore CPU 5.87 -> 4.17 us per call
+  (-29%).
+
 ## LIGHTING NEW CHUNKS (2026-10-23) — same as neo
 
 The light engine's changes (`StarLightEngine`, `SkyStarLightEngine`, `BlockStarLightEngine`,

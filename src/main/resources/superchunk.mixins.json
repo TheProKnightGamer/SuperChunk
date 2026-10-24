@@ -33,6 +33,7 @@
     "MixinClimateSampler",
     "MixinFeatureOutsideRegion",
     "MixinHeightmapPrimeFast",
+    "MixinHeightmapTop",
     "MixinLevelChunkPostProcessSkip",
     "MixinNoiseBasedChunkGeneratorGpuSeam",
     "MixinNoiseChunkClimateColumns",

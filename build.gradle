@@ -308,7 +308,8 @@ sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
     configDocsRegressionTest: 'dev.superchunk.config.SuperChunkConfigDocsTest',
     mixinTargetScanRegressionTest: 'dev.superchunk.MixinTargetScanTest',
     skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest',
-    featureRegionReadsRegressionTest: 'dev.superchunk.worldgen.FeatureRegionReadsTest'
+    featureRegionReadsRegressionTest: 'dev.superchunk.worldgen.FeatureRegionReadsTest',
+    oreRunsRegressionTest: 'dev.superchunk.worldgen.OreRunsTest'
 ].each { taskName, testMain ->
     def regression = tasks.register(taskName, JavaExec) {
         group = 'verification'
