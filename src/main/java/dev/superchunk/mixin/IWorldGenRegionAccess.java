@@ -5,10 +5,16 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
-/** Accessor for {@link WorldGenRegion}'s private center chunk (used by {@code MixinOreFeatureFast}). */
+/**
+ * Accessor for {@link WorldGenRegion}'s private center chunk (used by {@code MixinOreFeatureFast}) and generation step
+ * (used by {@code MixinBiomeManagerQuartCache}).
+ */
 @Mixin(WorldGenRegion.class)
 public interface IWorldGenRegionAccess {
 
     @Accessor("center")
     ChunkAccess superchunk$center();
+
+    @Accessor("generatingStep")
+    net.minecraft.world.level.chunk.status.ChunkStep superchunk$generatingStep();
 }

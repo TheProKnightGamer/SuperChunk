@@ -95,12 +95,16 @@ for the tested versions and limitations.
 ## What's inside
 
 - **C2ME** — multithreaded chunk generation, IO, and loading
-- **ScalableLux** — Starlight lighting engine, parallel light updates
+- **ScalableLux** — Starlight lighting engine, parallel light updates; new chunks light about 20%
+  faster here, skipping work whose result is already known (`analysis/lighting-2026-10-23.md`)
 - **Lithium** — general game-logic optimizations
 - **Noisium** — worldgen noise, biomes, direct palette placement
 - **VMP** — area-based player watching and chunk sending
 - **FlowSched** — the async scheduler C2ME and ScalableLux build on
 - **`dev.superchunk.gpu`** — original OpenCL worldgen offload
+- **`dev.superchunk.worldgen`** — CPU worldgen shortcuts that keep vanilla's output; ore placement
+  is about a third cheaper and surface building about a quarter, with the same blocks
+  (`analysis/ores-2026-10-24.md`, `analysis/surface-2026-10-24.md`)
 
 ## How the GPU path works
 

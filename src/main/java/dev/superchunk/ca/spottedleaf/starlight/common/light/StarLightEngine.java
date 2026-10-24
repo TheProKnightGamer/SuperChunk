@@ -145,6 +145,7 @@ public abstract class StarLightEngine {
         this.maxSection = WorldUtil.getMaxSection(world);
 
         this.sectionCache = new LevelChunkSection[5 * 5 * ((this.maxLightSection - this.minLightSection + 1) + 2)]; // add two extra sections for buffer
+        this.sectionPaletteFlags = new byte[this.sectionCache.length];
         this.nibbleCache = new SWMRNibbleArray[5 * 5 * ((this.maxLightSection - this.minLightSection + 1) + 2)]; // add two extra sections for buffer
         this.notifyUpdateCache = new boolean[5 * 5 * ((this.maxLightSection - this.minLightSection + 1) + 2)]; // add two extra sections for buffer
     }
@@ -245,6 +246,50 @@ public abstract class StarLightEngine {
 
     protected final void setChunkSectionInCache(final int chunkX, final int chunkY, final int chunkZ, final LevelChunkSection section) {
         this.sectionCache[chunkX + 5*chunkZ + 5*5*chunkY + this.chunkSectionIndexOffset] = section;
+        this.sectionPaletteFlags[chunkX + 5*chunkZ + 5*5*chunkY + this.chunkSectionIndexOffset] = 0;
+    }
+
+    // SuperChunk: what a cached section's palette says about every block in it, so callers can skip block
+    // reads whose answer it already gives. Computed on first use and dropped with the section cache, so it
+    // describes the section as it was during this update, like the block reads it stands in for.
+    // index = the sectionCache index; 0 = not computed yet
+    protected final byte[] sectionPaletteFlags;
+    protected static final int PALETTE_KNOWN = 1;
+    // some block may emit light, as getSources tests it (a block outside the palette test emits nothing)
+    protected static final int PALETTE_EMITTER = 2;
+    // some block is conditionally full opaque (ExtendedAbstractBlockState#isConditionallyFullOpaque)
+    protected static final int PALETTE_CONDITIONALLY_OPAQUE = 4;
+
+    // SuperChunk: the exact shortcuts this engine takes, as bits. FAST_DEFAULT unless LightVerify or the timing
+    // A/B (dev.superchunk.worldgen.LightTiming) turns some off for one update; each kill switch removes one.
+    public static final int FAST_PALETTE_SKIPS = 1; // the reads the palette flags make unnecessary
+    public static final int FAST_SKY_COLUMNS = 2; // SkyStarLightEngine#dropColumnNoOps
+    public static final int FAST_DEFAULT =
+            ("false".equals(System.getProperty("superchunk.lighting.paletteSkips")) ? 0 : FAST_PALETTE_SKIPS)
+            | ("false".equals(System.getProperty("superchunk.lighting.skyColumns")) ? 0 : FAST_SKY_COLUMNS);
+    public int fastPaths = FAST_DEFAULT;
+
+    protected static boolean mayEmitLight(final BlockState state) {
+        return ((ExtendedAbstractBlockState)state).scalablelux$actuallyDynamicLightEmission() || state.getLightEmission() != 0;
+    }
+
+    protected final int getPaletteFlags(final int sectionIndex) {
+        int flags = this.sectionPaletteFlags[sectionIndex];
+        if (flags == 0) {
+            flags = PALETTE_KNOWN;
+            final LevelChunkSection section = this.sectionCache[sectionIndex];
+            // null and air-only sections read as AIR_BLOCK_STATE, which neither emits nor occludes
+            if (section != null && !section.hasOnlyAir()) {
+                if (section.maybeHas(StarLightEngine::mayEmitLight)) {
+                    flags |= PALETTE_EMITTER;
+                }
+                if (section.maybeHas(state -> ((ExtendedAbstractBlockState)state).isConditionallyFullOpaque())) {
+                    flags |= PALETTE_CONDITIONALLY_OPAQUE;
+                }
+            }
+            this.sectionPaletteFlags[sectionIndex] = (byte)flags;
+        }
+        return flags;
     }
 
     protected final void setBlocksForChunkInCache(final int chunkX, final int chunkZ, final LevelChunkSection[] sections) {
@@ -297,6 +342,7 @@ public abstract class StarLightEngine {
 
     protected final void destroyCaches() {
         Arrays.fill(this.sectionCache, null);
+        Arrays.fill(this.sectionPaletteFlags, (byte)0);
         Arrays.fill(this.nibbleCache, null);
         Arrays.fill(this.chunkCache, null);
         Arrays.fill(this.emptinessMapCache, null);
