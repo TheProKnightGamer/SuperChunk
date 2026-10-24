@@ -18,7 +18,6 @@ import dev.superchunk.com.ishland.flowsched.util.Assertions;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import it.unimi.dsi.fastutil.shorts.ShortList;
-import it.unimi.dsi.fastutil.shorts.ShortListIterator;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FlowingFluid;
@@ -33,6 +32,7 @@ import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.apache.commons.lang3.mutable.MutableObject;
 
+import java.util.BitSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
@@ -74,18 +74,23 @@ public class ServerBlockTicking extends NewChunkStatus {
 
     @Override
     public Completable upgradeToThis(ChunkLoadingContext context, Cancellable cancellable) {
+        FluidMarkFilter fluidFilter = null;
         if (Config.filterFluidPostProcessing) {
             try {
-                filterFluidTicks(context);
+                fluidFilter = filterFluidTicks(context);
             } catch (Throwable t) {
                 t.printStackTrace();
             }
         }
+        final FluidMarkFilter fluidMarksToDrop = fluidFilter;
         return Completable
                 .fromRunnable(() -> {
                     Assertions.assertTrue(((IThreadedAnvilChunkStorage) context.tacs()).getMainThreadExecutor().isSameThread());
                     try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(context, this, true))) {
                         final LevelChunk chunk = (LevelChunk) context.holder().getItem().get().chunk();
+                        if (fluidMarksToDrop != null) {
+                            dropFluidMarks(chunk, fluidMarksToDrop);
+                        }
                         chunk.postProcessGeneration();
                         ServerLevel serverWorld = ((IThreadedAnvilChunkStorage) context.tacs()).getWorld();
                         serverWorld.startTickingChunk(chunk);
@@ -99,31 +104,73 @@ public class ServerBlockTicking extends NewChunkStatus {
                 .subscribeOn(Schedulers.from(((IThreadedAnvilChunkStorage) context.tacs()).getMainThreadExecutor()));
     }
 
-    private static void filterFluidTicks(ChunkLoadingContext context) {
+    /**
+     * Per section, which marks of the chunk's post-processing list {@link #filterFluidTicks} dropped, and
+     * the list's length when it looked.
+     */
+    private record FluidMarkFilter(BitSet[] drop, int[] sizes) {
+    }
+
+    /**
+     * Finds the fluid post-processing marks that cannot flow, on this worldgen thread, without changing
+     * the lists: the chunk is already full, so the server thread's autosave may be serializing them right
+     * now, and {@code ChunkSerializer.packOffsets} throws when a list it iterates shrinks. The server thread
+     * removes them in {@link #dropFluidMarks}, before {@code postProcessGeneration}.
+     */
+    private static FluidMarkFilter filterFluidTicks(ChunkLoadingContext context) {
         final LevelChunk chunk = (LevelChunk) context.holder().getItem().get().chunk();
 
         Supplier<WorldGenRegion> chunkRegionSupplier = Suppliers.memoize(() -> new WorldGenRegion(
                 ((IThreadedAnvilChunkStorage) context.tacs()).getWorld(), context.chunks(), ChunkStatus.LIGHT, -1));
 
-        int total = 0;
-        int eliminated = 0;
+        BitSet[] drop = null;
+        int[] sizes = null;
         ShortList[] postProcessingLists = chunk.getPostProcessing();
         for (int i = 0; i < postProcessingLists.length; i++) {
-            if (postProcessingLists[i] != null) {
-                for (ShortListIterator iterator = postProcessingLists[i].iterator(); iterator.hasNext(); ) {
-                    Short short_ = iterator.next();
+            final ShortList list = postProcessingLists[i];
+            if (list != null) {
+                final int size = list.size();
+                for (int j = 0; j < size; j++) {
+                    short short_ = list.getShort(j);
                     BlockPos blockPos = ProtoChunk.unpackOffsetCoordinates(short_, chunk.getSectionYFromSectionIndex(i), chunk.getPos());
                     BlockState blockState = chunk.getBlockState(blockPos);
                     FluidState fluidState = blockState.getFluidState();
                     if (!fluidState.isEmpty() && fluidState.getType() instanceof FlowingFluid) {
-                        total ++;
                         if (!FlowableFluidUtils.needsPostProcessing(chunkRegionSupplier.get(), blockPos, blockState, fluidState)) {
-                            iterator.remove();
-                            eliminated ++;
+                            if (drop == null) {
+                                drop = new BitSet[postProcessingLists.length];
+                                sizes = new int[postProcessingLists.length];
+                            }
+                            if (drop[i] == null) {
+                                drop[i] = new BitSet(size);
+                                sizes[i] = size;
+                            }
+                            drop[i].set(j);
                         }
                     }
                 }
             }
+        }
+        return drop == null ? null : new FluidMarkFilter(drop, sizes);
+    }
+
+    /**
+     * On the server thread: removes the marks {@link #filterFluidTicks} found, keeping the rest in order.
+     * A list whose length changed since is left whole, as vanilla leaves every list.
+     */
+    private static void dropFluidMarks(LevelChunk chunk, FluidMarkFilter filter) {
+        ShortList[] postProcessingLists = chunk.getPostProcessing();
+        for (int i = 0; i < filter.drop().length; i++) {
+            final BitSet drop = filter.drop()[i];
+            final ShortList list = postProcessingLists[i];
+            if (drop == null || list == null || list.size() != filter.sizes()[i]) continue;
+            int kept = 0;
+            for (int j = 0; j < list.size(); j++) {
+                if (!drop.get(j)) {
+                    list.set(kept++, list.getShort(j));
+                }
+            }
+            list.size(kept);
         }
     }
 

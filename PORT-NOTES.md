@@ -1,5 +1,20 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## FLUID FILTER SAVE RACE (2026-10-24) — same as neo
+
+C2ME's `ServerBlockTicking.upgradeToThis` ran `filterFluidTicks` on the worldgen thread, and it
+removed marks from the post-processing lists of a chunk that is already full. The server thread's
+autosave can serialize those lists at the same moment, and `ChunkSerializer.packOffsets` threw
+`NoSuchElementException` when a list shrank under it ("Failed to save chunk", with a chunk IO crash
+report). It was seen once in a neo GPU-off pregen; upstream C2ME has the same code.
+
+The scan now only reads, and records per section which marks to drop (`FluidMarkFilter`). The
+server thread removes them in `dropFluidMarks`, at the start of the main-thread runnable, before
+`postProcessGeneration`. The lists come out the same, in the same order: the compaction was
+checked against the old `iterator.remove()` on 200,000 random lists. A list whose length changed
+in between is left whole, which is vanilla's behavior. The file is the same in both ports apart
+from the region constructor, which was already different.
+
 ## SURFACE BUILDING (2026-10-24) — same as neo
 
 These are copied verbatim from neo:
