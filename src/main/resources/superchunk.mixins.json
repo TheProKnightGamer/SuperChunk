@@ -24,6 +24,7 @@
     "MixinCarverPlainRandom",
     "MixinChunkAccessBiome",
     "MixinHeightmapPrimeFast",
+    "MixinHeightmapTop",
     "MixinLevelChunkPostProcessSkip",
     "MixinSurfaceColumnMemo",
     "MixinSurfaceGradientRandom",

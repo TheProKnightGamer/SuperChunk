@@ -114,6 +114,8 @@ public final class SuperChunk {
                 dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.aquifer.ScAquiferCellCache.report();
                 dev.superchunk.worldgen.LightTiming.report();
                 dev.superchunk.ca.spottedleaf.starlight.common.light.LightVerify.report();
+                dev.superchunk.worldgen.OreTiming.report();
+                dev.superchunk.worldgen.OreRuns.report();
                 if (Boolean.getBoolean("superchunk.worldgen.biomeFiddleCache.verify")) {
                     dev.superchunk.worldgen.BiomeFiddleCache.reportVerify();
                 }

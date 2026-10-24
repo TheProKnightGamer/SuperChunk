@@ -25,6 +25,15 @@ import org.spongepowered.asm.mixin.Mixin;
         "net.minecraft.world.level.biome.Climate$Sampler",
         // whole-method replicas (ForeignHooks)
         "net.minecraft.world.level.levelgen.feature.OreFeature",
+        // the ore height-scan replica and target memo (OreRuns)
+        "net.minecraft.server.level.WorldGenRegion",
+        "net.minecraft.world.level.chunk.ChunkAccess",
+        "net.minecraft.world.level.chunk.ProtoChunk",
+        "net.minecraft.world.level.chunk.LevelChunkSection",
+        "net.minecraft.world.level.levelgen.structure.templatesystem.TagMatchTest",
+        "net.minecraft.world.level.levelgen.structure.templatesystem.BlockMatchTest",
+        "net.minecraft.world.level.levelgen.structure.templatesystem.BlockStateMatchTest",
+        "net.minecraft.world.level.levelgen.structure.templatesystem.AlwaysTrueTest",
         "net.minecraft.world.level.levelgen.placement.PlacedFeature",
         "net.minecraft.world.level.levelgen.placement.PlacementFilter",
         "net.minecraft.world.level.levelgen.placement.RepeatingPlacement",
