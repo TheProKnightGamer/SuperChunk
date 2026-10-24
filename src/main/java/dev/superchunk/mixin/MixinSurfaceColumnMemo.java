@@ -1,14 +1,16 @@
 package dev.superchunk.mixin;
 
-import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import dev.superchunk.worldgen.SurfaceTiming;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
  * SuperChunk surface-build optimisation: write-through per-column block memo on the
@@ -39,6 +41,15 @@ import org.spongepowered.asm.mixin.injection.At;
  * theoretical exposure is a modded {@code RuleSource} writing to the chunk directly
  * (bypassing the BlockColumn) mid-column — no known mod does this; kill-switch:
  * {@code -Dsuperchunk.worldgen.surfaceColumnMemo=false}.
+ *
+ * <p><b>A section at a time.</b> A miss reads the column's 16 blocks of that section at once, the way
+ * {@code ProtoChunk.getBlockState} reads each ({@code hasOnlyAir}, then the section's {@code getBlockState}), into
+ * the entries the memo does not hold yet. The invariant above makes the order of reads irrelevant: no block of the
+ * column changes except through {@code setBlock}, which updates the memo. It stands down when another mod hooks
+ * those reads; kill switch {@code -Dsuperchunk.worldgen.surfaceColumnMemo.sections=false}.
+ *
+ * <p>{@code @Redirect} rather than {@code @WrapOperation}: these run for every block of every column, and a wrapped
+ * call passes its arguments to the original as an array.
  */
 @Mixin(targets = "net/minecraft/world/level/levelgen/SurfaceSystem$1")
 public abstract class MixinSurfaceColumnMemo {
@@ -50,6 +61,11 @@ public abstract class MixinSurfaceColumnMemo {
     @Unique
     private static final boolean SUPERCHUNK$VERIFY =
             Boolean.getBoolean("superchunk.worldgen.surfaceColumnMemo.verify");
+    @Unique
+    private static final boolean SUPERCHUNK$SECTIONS = SUPERCHUNK$ENABLED
+            && Boolean.parseBoolean(System.getProperty("superchunk.worldgen.surfaceColumnMemo.sections", "true"));
+    @Unique
+    private static byte superchunk$sectionHooks;
     @Unique
     private static final java.util.concurrent.atomic.AtomicLong SUPERCHUNK$HITS =
             new java.util.concurrent.atomic.AtomicLong();
@@ -73,6 +89,9 @@ public abstract class MixinSurfaceColumnMemo {
     private int superchunk$z = Integer.MIN_VALUE;
     @Unique
     private boolean superchunk$usable;
+    /** Misses read the column's whole section ({@link #superchunk$readSection}). */
+    @Unique
+    private boolean superchunk$sections;
     /** {@link dev.superchunk.worldgen.ProtoChunkWrites}: the chunk's heightmaps, or null for the original write. */
     @Unique
     private net.minecraft.world.level.levelgen.Heightmap[] superchunk$heightmaps;
@@ -95,24 +114,70 @@ public abstract class MixinSurfaceColumnMemo {
             // chunk/column can never equal a future epoch (review hardening)
             this.superchunk$x = Integer.MIN_VALUE;
             this.superchunk$z = Integer.MIN_VALUE;
+            this.superchunk$sections = SUPERCHUNK$SECTIONS && superchunk$sectionsUnhooked();
         }
     }
 
-    @WrapOperation(
+    @Unique
+    private static boolean superchunk$sectionsUnhooked() {
+        byte state = superchunk$sectionHooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state("The surface column memo's section reads (ProtoChunk.getBlockState)",
+                    "net.minecraft.world.level.chunk.ProtoChunk#getBlockState",
+                    "net.minecraft.world.level.chunk.ChunkAccess#getSection",
+                    "net.minecraft.world.level.chunk.LevelChunkSection#hasOnlyAir");
+            superchunk$sectionHooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
+    }
+
+    /**
+     * {@code ProtoChunk.getBlockState} for the column's 16 blocks of the section holding memo entry {@code idx}, into
+     * the entries not held yet; returns entry {@code idx}. The memo spans whole sections: build limits are multiples of 16.
+     */
+    @Unique
+    private BlockState superchunk$readSection(ChunkAccess chunk, int x, int y, int z, int idx) {
+        LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(y));
+        BlockState[] memo = this.superchunk$memo;
+        int[] epochs = this.superchunk$epochs;
+        int epoch = this.superchunk$epoch;
+        int base = idx & ~15;
+        if (section.hasOnlyAir()) {
+            BlockState air = Blocks.AIR.defaultBlockState();
+            for (int i = base; i < base + 16; i++) {
+                if (epochs[i] != epoch) {
+                    memo[i] = air;
+                    epochs[i] = epoch;
+                }
+            }
+        } else {
+            int lx = x & 15;
+            int lz = z & 15;
+            for (int i = base; i < base + 16; i++) {
+                if (epochs[i] != epoch) {
+                    memo[i] = section.getBlockState(lx, i - base, lz);
+                    epochs[i] = epoch;
+                }
+            }
+        }
+        return memo[idx];
+    }
+
+    @Redirect(
             method = "getBlock",
             at = @At(
                     value = "INVOKE",
                     target = "Lnet/minecraft/world/level/chunk/ChunkAccess;getBlockState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;"),
             require = 0)
-    private BlockState superchunk$memoGet(ChunkAccess chunk, BlockPos pos, Operation<BlockState> original) {
+    private BlockState superchunk$memoGet(ChunkAccess chunk, BlockPos pos) {
         if (!SUPERCHUNK$ENABLED) {
-            return original.call(chunk, pos);
+            return chunk.getBlockState(pos);
         }
         if (chunk != this.superchunk$chunk) {
             this.superchunk$initFor(chunk);
         }
         if (!this.superchunk$usable) {
-            return original.call(chunk, pos);
+            return chunk.getBlockState(pos);
         }
         int x = pos.getX();
         int z = pos.getZ();
@@ -124,12 +189,12 @@ public abstract class MixinSurfaceColumnMemo {
         int idx = pos.getY() - this.superchunk$minBuild;
         BlockState[] memo = this.superchunk$memo;
         if (idx < 0 || idx >= memo.length) {
-            return original.call(chunk, pos); // out-of-range: vanilla VOID_AIR path
+            return chunk.getBlockState(pos); // out-of-range: vanilla VOID_AIR path
         }
         if (this.superchunk$epochs[idx] == this.superchunk$epoch) {
             BlockState cached = memo[idx];
             if (SUPERCHUNK$VERIFY) {
-                BlockState actual = original.call(chunk, pos);
+                BlockState actual = chunk.getBlockState(pos);
                 long h = SUPERCHUNK$HITS.incrementAndGet();
                 if (actual != cached) {
                     long m = SUPERCHUNK$MISMATCHES.incrementAndGet();
@@ -145,26 +210,28 @@ public abstract class MixinSurfaceColumnMemo {
             }
             return cached;
         }
-        BlockState s = original.call(chunk, pos);
+        if (this.superchunk$sections && (SurfaceTiming.off() & SurfaceTiming.COLUMN_SECTIONS) == 0) {
+            return this.superchunk$readSection(chunk, x, pos.getY(), z, idx);
+        }
+        BlockState s = chunk.getBlockState(pos);
         memo[idx] = s;
         this.superchunk$epochs[idx] = this.superchunk$epoch;
         return s;
     }
 
-    @WrapOperation(
+    @Redirect(
             method = "setBlock",
             at = @At(
                     value = "INVOKE",
                     target = "Lnet/minecraft/world/level/chunk/ChunkAccess;setBlockState(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)Lnet/minecraft/world/level/block/state/BlockState;"),
             require = 0)
-    private BlockState superchunk$memoSet(ChunkAccess chunk, BlockPos pos, BlockState state, boolean isMoving,
-                                          Operation<BlockState> original) {
+    private BlockState superchunk$memoSet(ChunkAccess chunk, BlockPos pos, BlockState state, boolean isMoving) {
         net.minecraft.world.level.levelgen.Heightmap[] maps = this.superchunk$heightmaps;
         int y = pos.getY();
         BlockState old = maps != null && chunk == this.superchunk$chunk
                 && y >= this.superchunk$minBuild && y - this.superchunk$minBuild < this.superchunk$memo.length
                 ? dev.superchunk.worldgen.ProtoChunkWrites.set((ProtoChunk) chunk, maps, pos, state)
-                : original.call(chunk, pos, state, isMoving);
+                : chunk.setBlockState(pos, state, isMoving);
         if (SUPERCHUNK$ENABLED && this.superchunk$usable && chunk == this.superchunk$chunk
                 && pos.getX() == this.superchunk$x && pos.getZ() == this.superchunk$z) {
             int idx = pos.getY() - this.superchunk$minBuild;

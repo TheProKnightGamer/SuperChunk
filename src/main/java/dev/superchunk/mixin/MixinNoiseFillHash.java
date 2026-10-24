@@ -85,7 +85,8 @@ public abstract class MixinNoiseFillHash {
 
     /**
      * Test hook: {@code -Dsuperchunk.debug.surfaceHash=<file>} appends {@code "cx cz hash"} after each
-     * chunk's surface pass: every block state and the two worldgen heightmaps. Like the fill, the
+     * chunk's surface pass: every block state, the fluid post-processing lists in order, and the two worldgen
+     * heightmaps. Like the fill, the
      * surface of a chunk depends only on its position, so two runs must agree chunk by chunk
      * ({@code tools/noisehashdiff.py} compares the files).
      */
@@ -104,6 +105,15 @@ public abstract class MixinNoiseFillHash {
                     for (int x = 0; x < 16; x++) {
                         h = superchunk$mix(h, Block.BLOCK_STATE_REGISTRY.getId(section.getBlockState(x, y, z)));
                     }
+                }
+            }
+        }
+        ShortList[] marks = chunk.getPostProcessing();
+        for (int i = 0; i < marks.length; i++) {
+            h = superchunk$mix(h, 1000 + i);
+            if (marks[i] != null) {
+                for (int k = 0; k < marks[i].size(); k++) {
+                    h = superchunk$mix(h, marks[i].getShort(k));
                 }
             }
         }

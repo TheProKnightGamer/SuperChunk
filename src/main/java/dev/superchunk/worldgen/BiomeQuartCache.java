@@ -54,6 +54,8 @@ public final class BiomeQuartCache {
     /** Power of two: the slot is a masked hash, so no modulo and no probing. */
     private static final int SLOTS = 4096;
     private static final int MASK = SLOTS - 1;
+    private static final int CELL_SLOTS = 2048;
+    private static final int CELL_MASK = CELL_SLOTS - 1;
 
     /**
      * Returned by {@link #encode} for coordinates that do not fit the packed key. Zero, like an empty
@@ -77,6 +79,22 @@ public final class BiomeQuartCache {
     /** Key 0 is unused: {@link #encode} always sets a generation of 1..15 in the high bits. */
     private final long[] key = new long[SLOTS];
     private final Object[] value = new Object[SLOTS];
+
+    /**
+     * A second table, same keys and generations, keyed by a biome-zoom cell's lowest corner: the one biome all 8 of
+     * the cell's corner quarts hold, or {@link #MIXED}. {@code getBiome} picks one of those 8 corners for every block of
+     * the cell, so where they agree it is that biome whichever corner wins.
+     */
+    private final long[] cellKey = new long[CELL_SLOTS];
+    private final Object[] cellValue = new Object[CELL_SLOTS];
+
+    /** {@link #getCell}'s answer for a cell whose corners hold more than one biome. */
+    public static final Object MIXED = new Object() {
+        @Override
+        public String toString() {
+            return "MIXED";
+        }
+    };
     private long nextGen;
 
     private BiomeQuartCache() {
@@ -96,6 +114,8 @@ public final class BiomeQuartCache {
         if ((nextGen & GEN_MASK) == 0) {
             Arrays.fill(key, 0L);
             Arrays.fill(value, null);
+            Arrays.fill(cellKey, 0L);
+            Arrays.fill(cellValue, null);
             nextGen++;
         }
         return nextGen;
@@ -141,6 +161,18 @@ public final class BiomeQuartCache {
         int slot = slot(encoded);
         key[slot] = encoded;
         value[slot] = v;
+    }
+
+    /** The cell entry for {@code encoded} (a biome holder or {@link #MIXED}), or {@code null} on a miss. */
+    public Object getCell(long encoded) {
+        int slot = (int) ((encoded * 0x9E3779B97F4A7C15L) >>> 52) & CELL_MASK;
+        return cellKey[slot] == encoded ? cellValue[slot] : null;
+    }
+
+    public void putCell(long encoded, Object v) {
+        int slot = (int) ((encoded * 0x9E3779B97F4A7C15L) >>> 52) & CELL_MASK;
+        cellKey[slot] = encoded;
+        cellValue[slot] = v;
     }
 
     /** Fibonacci-ish mix; the full key is compared on lookup, so this only has to spread. */
