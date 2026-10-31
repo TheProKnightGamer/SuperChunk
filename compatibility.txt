@@ -93,6 +93,78 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  (all worlds) .......... aquifer water at cave edges .......... one-block differences from vanilla
+
+    C2ME's aquifer rewrite (bundled here; upstream C2ME has the same code) looked at the 12 nearby
+    aquifer centres in a different order than vanilla: y, z, x instead of x, y, z. Vanilla keeps the
+    later of two centres at the same distance, so the order decides which aquifer a block belongs to
+    when two are equally near. That gave one-block shifts of water, air and stone at cave and aquifer
+    edges, in about 0.01% of columns. Found by comparing Distant Horizons' terrain-only LODs with and
+    without SuperChunk: 122 of 676 sections differed. Every copy now uses vanilla's order: the CPU
+    mixin and its candidate memo, both loops in the GPU's aquifer.cl, and their Java reference
+    (AquiferRef, AquiferKernelSelfTest). After: 0 of 676 differ, on the CPU and the GPU. Same fix on
+    Forge 1.20.1, whose vanilla code has the same order.
+
+  distanthorizons ....... DH region's biome memo ................ stale biomes
+
+    The biome quart memo assumed a region's biomes do not change while the region is used. DH's
+    region (a WorldGenRegion subclass) is kept for all of a group's steps while the group's biomes are
+    filled, so a memoized answer could go stale: 33 verify mismatches in a DH pregen, and a few
+    surface blocks (grass against snow) different from DH alone. The memo now applies to vanilla's
+    region class, and to DH's with only answers from chunks that already have their biomes kept. Its
+    uniform-cell shortcut reads a cell's 8 corners only when all of them are stored, since reading a
+    corner of a chunk without biomes runs a climate search whose warm start decides later ties.
+
+  modernfix ............. ModernFix ............................. chunk patches it keeps off for C2ME
+
+    ModernFix turns off mixin.bugfix.chunk_deadlock, mixin.perf.release_protochunks,
+    mixin.bugfix.paper_chunk_patches and mixin.perf.nbt_memory_usage when the c2me mod is installed:
+    they patch the vanilla chunk pipeline (the full-chunk executor, proto-chunk release) that C2ME's
+    chunk system replaces. It checks the mod id only, so with the bundled C2ME they stayed on (all
+    four are on by default). compat/ModernFixCompat now turns the same options off: through a mod
+    override on ModernFix's loaded config, or, when SuperChunk's mixin plugin loads before
+    ModernFix's, the modernfix.config.<option> property ModernFix reads. An option the user set with
+    that property is left alone. ModernFix's vmp check (an ingredients module) and lithium check are
+    for code SuperChunk does not bundle. Kill switch: -Dsuperchunk.compat.modernfix=false.
+
+  asyncparticles ........ AsyncParticles (client) .............. thread-safe entity map undone
+
+    With its safe ClassInstanceMultiMap option on, AsyncParticles cancels Lithium's
+    collections.entity_by_type mixins through a MixinSquared canceller, matching
+    "net.caffeinemc.mods.lithium.mixin.collections.entity_by_type"; the bundled copy lives under
+    dev.superchunk.* and applied anyway. compat/MixinSquaredBridge registers a canceller of its own
+    when MixinSquared is installed: for a bundled mixin it asks the other cancellers about the
+    original name (for Lithium also the me.jellysquid package) and cancels the copy if any would
+    cancel the original. Works with MixinSquared 0.1 to 0.3. AsyncParticles was the only canceller
+    naming a bundled mod in the 989 mods. Kill switch: -Dsuperchunk.compat.mixinSquared=false.
+
+  copycats, create_connected .. Create: Copycats+, Create: Connected .. wrong path type on copycats
+
+    Both make mobs path over a copycat block as over the block it copies, by wrapping getBlock() in
+    vanilla's WalkNodeEvaluator lookup and in Lithium's PathNodeDefaults.getNodeType, which the
+    mixin.ai.pathing cache answers from. The second mixin names the class by its old Lithium
+    package, so it never applied to the bundled copy. mixin.ai.pathing is now off when either is
+    installed, and vanilla's lookup runs with their wrap. Kill switch:
+    -Dsuperchunk.compat.copycatPathing=false.
+
+  (general) ............. ChunkTicketLevelUpdatedEvent ......... never posted
+
+    NeoForge's patch of ChunkMap.updateChunkScheduling posts it when a chunk's ticket level
+    changes; C2ME's overwrite of that method (from upstream C2ME, which is Fabric code) dropped it,
+    so its listeners (CC: Tweaked's computer chunk tracking is one) never heard of a change. The
+    overwrite now fires it as NeoForge's patch does, unless neither level is a loaded one. The Forge
+    port already did. Found by comparing every @Overwrite with NeoForge's patched original; the
+    chunk load/unload, watch and data events all still fire (VMP and C2ME call the patched methods).
+
+  (general) ............. processUnloads hooks, dotted lithium:options .. Forge crash, GitHub #27
+
+    Found through Valkyrien Skies on the Forge port; the same code is here. C2ME's processUnloads
+    overwrite (priority 1100) blocked other mods' hooks inside it: Mixin refuses any injector other
+    than HEAD/RETURN/TAIL into a method overwritten by a mixin of the same or higher priority, even one
+    marked require = 0, and fails the whole class. It is now a @WrapOperation on its removeIf call,
+    with the same unloading. And a mod's lithium:options written as a dotted TOML key
+    (mixin.ai.poi = false) is now read, where it was dropped as a nested table.
+
   skein ................. Skein ................................. parallel tick phases
 
     Updated Skein exposes version 1 of its optional SuperChunk cell bridge. With both updated

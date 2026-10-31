@@ -74,9 +74,9 @@ public final class AquiferRef {
         int gz = (k - 5) >> 4;
         int dist1 = Integer.MAX_VALUE, dist2 = Integer.MAX_VALUE, dist3 = Integer.MAX_VALUE;
         int fl1 = 0, ft1 = 0, fl2 = 0, ft2 = 0, fl3 = 0, ft3 = 0;
-        for (int offY = -1; offY <= 1; offY++) {
-            for (int offZ = 0; offZ <= 1; offZ++) {
-                for (int offX = 0; offX <= 1; offX++) {
+        for (int offX = 0; offX <= 1; offX++) {
+            for (int offY = -1; offY <= 1; offY++) {
+                for (int offZ = 0; offZ <= 1; offZ++) {
                     int idx = getIndex(gx + offX, gy + offY, gz + offZ, minGX, minGY, minGZ, gsx, gsz);
                     long position = locCache[idx];
                     int cfl = fl[idx], cft = ft[idx];
@@ -280,9 +280,9 @@ public final class AquiferRef {
         int gz = (k - 5) >> 4;
         int dist1 = Integer.MAX_VALUE, dist2 = Integer.MAX_VALUE, dist3 = Integer.MAX_VALUE;
         int fl1 = 0, ft1 = 0, fl2 = 0, ft2 = 0, fl3 = 0, ft3 = 0;
-        for (int offY = -1; offY <= 1; offY++) {
-            for (int offZ = 0; offZ <= 1; offZ++) {
-                for (int offX = 0; offX <= 1; offX++) {
+        for (int offX = 0; offX <= 1; offX++) {
+            for (int offY = -1; offY <= 1; offY++) {
+                for (int offZ = 0; offZ <= 1; offZ++) {
                     int idx = getIndex(gx + offX, gy + offY, gz + offZ, minGX, minGY, minGZ, gsx, gsz);
                     long position = locCache[idx];
                     int cfl = fl[idx], cft = ft[idx];
