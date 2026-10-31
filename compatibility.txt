@@ -23,10 +23,13 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 8  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 9  (ModernFix, singleplayer only — FIXED;
+                                          CBC Neo Warfare — NOT SUPPORTED, by choice;
                                           Twilight Forest — FIXED;
                                           Voxy via Roxy, client only — FIXED;
                                           Distant Horizons chunk-IO thread leak — FIXED;
+                                          Distant Horizons 3.3.3: DH's own code faster, two
+                                          parity fixes (one for all worlds) — see INTEGRATED, FIXED;
                                           Skein parallel tick phases — FIXED;
                                           YUNG's Better Caves — CLEARED;
                                           Better Chunk Loading — INCOMPATIBLE, by design;
@@ -34,6 +37,72 @@ SUMMARY
                                           by design: they are bundled)
   Worldgen datapacks ................. see DATAPACKS
   Client-only (N/A on a server) ....... 33
+  Static mixin audit, 989 mods ........ 2026-10-29; 4 conflicts FIXED (ModernFix, AsyncParticles,
+                                          Copycats+ / Create: Connected, ticket-level event) —
+                                          see STATIC AUDIT
+
+=============================================================
+STATIC AUDIT  (2026-10-29: SuperChunk's mixins against the top 989 NeoForge 1.21.1 mods)
+=============================================================
+  METHOD. The newest file of each of Modrinth's 1,000 most-downloaded NeoForge 1.21.1 mods (989
+  had one), nested jars included, was read with ASM: every mixin config, every @Overwrite and
+  injector, refmap-resolved. Each was matched against SuperChunk's own jar for the conflicts Mixin
+  turns into a crash or a lost change:
+    - a mod's injector other than HEAD/RETURN/TAIL in a method SuperChunk @Overwrites at the same
+      or higher priority (Mixin refuses it even with require = 0; GitHub #27, CBC), and the reverse;
+    - two @Redirects, or a @Redirect and another call-site injector, on one call;
+    - two @Overwrites of one method (the higher priority wins, the other change is lost);
+    - SuperChunk cancelling or wrapping a method before a mod's hook in it runs.
+  Separately, every class's constant pool was searched for the ids and package names of the mods
+  SuperChunk bundles (lithium, c2me, vmp, scalablelux, noisium and their forks): mods that adapt
+  to one of those by mod id or class name cannot see the relocated copies. And every @Overwrite
+  was compared with NeoForge's patched original for event hooks the overwrite drops. Standalone
+  copies of the bundled mods were left out (SuperChunk stands its copy down or declares them
+  incompatible).
+
+  FOUND AND FIXED (entries under FIXED):
+    ModernFix ................ keeps three chunk-pipeline patches on that it turns off for C2ME
+    AsyncParticles ........... cancels Lithium's entity_by_type mixins by name; missed ours
+    Create: Copycats+, Create: Connected .. patch Lithium's pathing cache by class name; missed ours
+    (all mods) ............... ChunkTicketLevelUpdatedEvent was never posted (CC: Tweaked uses it)
+
+  CHECKED, NOTHING TO DO:
+    Sable, Spelunkery, Supplementaries ... turn the clashing Lithium options off through
+        lithium:options, which the bundled copy reads.
+    Structure Layout Optimizer .. our jigsaw mixins stand down for it (see SLO compat).
+    Redirected ............... redirects the same Direction.values() calls as Lithium; its config
+        does not require them, so the duplicates are skipped.
+    Neruina, AsyncParticles (Level), Immersive Engineering, Lithostitched, Sable (client light
+        queue) .. a MixinExtras injector on a call we @Redirect: MixinExtras chains them.
+    Pehkui ................... its @ModifyArg(index = 1) in ItemEntity.mergeWithNeighbours meets a
+        @Redirect of Lithium's experimental item merging in the scan; that mixin does not apply in
+        the bundled copy, and a boot with Pehkui shows Pehkui's hook in place (both loaders).
+    Farmer's Delight, Smarter Farmers, Bountiful Fares, Modular Golems, BetterTrims, Bookshelf,
+        Dramatic Doors, TxniLib, Forgified Fabric API, Caelus, CreativeCore, Pehkui .. hooks behind
+        an early return of upstream Lithium's (secondary POI, equipment changes, pathing cache,
+        elytra check, shapes): the same with standalone Lithium.
+    FerriteCore, ModernFix, Saturn .. overwrite the same methods as Lithium with the same
+        optimization; either copy is correct.
+    Oh The Biomes We've Gone, Nature's Spirit, Promenade, Jaden's Nether Expansion, ModernFix ..
+        hook SurfaceSystem.buildSurface: the surface pass copy stands down for them (logged).
+    owo-lib .................. hooks OreFeature.doPlace (ore block entities): the ore replica stands
+        down for it.
+    ServerCore, JourneyMap, Distant Horizons, spark .. check vmp / c2me / moonrise for features the
+        bundled copies do not have, or SuperChunk already integrates (DH).
+
+  TESTED (harness, 2026-10-29): boots and r256 pregens with ModernFix + Spelunkery (+ Moonlight) +
+    Create: Copycats+ (+ Create 6.0.10) + Biome Replacer (MixinSquared 0.3.3), and with Sable
+    alone; the log shows ModernFix taking the four options, Lithium dropping mixin.ai.pathing for
+    copycats and mixin.block.fluid.flow for spelunkery, and Sable's options. Entities in a released
+    chunk unload and reload. A fixture mod whose MixinSquared canceller names Lithium's
+    entity_by_type mixin by its original name got the bundled copy cancelled, and the server still
+    generated. The exported ChunkMap posts ChunkTicketLevelUpdatedEvent from updateChunkScheduling.
+
+  KNOWN, NOT FIXED:
+    Iris & Oculus Flywheel Compat warns in chat that it "is not compatible with ScalableLux"; with
+    the bundled copy it cannot tell, so it does not warn. Its reason is not stated.
+    ModernFix's SurfaceSystem hooks (on by default) make the surface pass copy stand down in every
+    pack that has ModernFix: correct, but that pack loses the surface speed-up.
 
 =============================================================
 COMPATIBLE  (booted cleanly alongside SuperChunk)
@@ -43,7 +112,7 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
   distanthorizons ....... Distant Horizons (LOD) .................. PASS  [0.3.0: now INTEGRATED — see below]
   krypton-fnp ........... Krypton Reno (network opt) .............. PASS
   ksyxis ................ Ksyxis (skip spawn-chunk load) .......... PASS
-  modernfix ............. ModernFix (memory/startup) .............. PASS  [singleplayer: see FIXED]
+  modernfix ............. ModernFix (memory/startup) .............. PASS  [singleplayer, C2ME options: see FIXED]
   packet-fixer .......... Packet Fixer ............................ PASS
   saturn ................ Saturn (GC/alloc opt) ................... PASS
   servercore ............ ServerCore (server perf) ................ PASS
@@ -93,6 +162,78 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  (all worlds) .......... aquifer water at cave edges .......... one-block differences from vanilla
+
+    C2ME's aquifer rewrite (bundled here; upstream C2ME has the same code) looked at the 12 nearby
+    aquifer centres in a different order than vanilla: y, z, x instead of x, y, z. Vanilla keeps the
+    later of two centres at the same distance, so the order decides which aquifer a block belongs to
+    when two are equally near. That gave one-block shifts of water, air and stone at cave and aquifer
+    edges, in about 0.01% of columns. Found by comparing Distant Horizons' terrain-only LODs with and
+    without SuperChunk: 122 of 676 sections differed. Every copy now uses vanilla's order: the CPU
+    mixin and its candidate memo, both loops in the GPU's aquifer.cl, and their Java reference
+    (AquiferRef, AquiferKernelSelfTest). After: 0 of 676 differ, on the CPU and the GPU. Same fix on
+    Forge 1.20.1, whose vanilla code has the same order.
+
+  distanthorizons ....... DH region's biome memo ................ stale biomes
+
+    The biome quart memo assumed a region's biomes do not change while the region is used. DH's
+    region (a WorldGenRegion subclass) is kept for all of a group's steps while the group's biomes are
+    filled, so a memoized answer could go stale: 33 verify mismatches in a DH pregen, and a few
+    surface blocks (grass against snow) different from DH alone. The memo now applies to vanilla's
+    region class, and to DH's with only answers from chunks that already have their biomes kept. Its
+    uniform-cell shortcut reads a cell's 8 corners only when all of them are stored, since reading a
+    corner of a chunk without biomes runs a climate search whose warm start decides later ties.
+
+  modernfix ............. ModernFix ............................. chunk patches it keeps off for C2ME
+
+    ModernFix turns off mixin.bugfix.chunk_deadlock, mixin.perf.release_protochunks,
+    mixin.bugfix.paper_chunk_patches and mixin.perf.nbt_memory_usage when the c2me mod is installed:
+    they patch the vanilla chunk pipeline (the full-chunk executor, proto-chunk release) that C2ME's
+    chunk system replaces. It checks the mod id only, so with the bundled C2ME they stayed on (all
+    four are on by default). compat/ModernFixCompat now turns the same options off: through a mod
+    override on ModernFix's loaded config, or, when SuperChunk's mixin plugin loads before
+    ModernFix's, the modernfix.config.<option> property ModernFix reads. An option the user set with
+    that property is left alone. ModernFix's vmp check (an ingredients module) and lithium check are
+    for code SuperChunk does not bundle. Kill switch: -Dsuperchunk.compat.modernfix=false.
+
+  asyncparticles ........ AsyncParticles (client) .............. thread-safe entity map undone
+
+    With its safe ClassInstanceMultiMap option on, AsyncParticles cancels Lithium's
+    collections.entity_by_type mixins through a MixinSquared canceller, matching
+    "net.caffeinemc.mods.lithium.mixin.collections.entity_by_type"; the bundled copy lives under
+    dev.superchunk.* and applied anyway. compat/MixinSquaredBridge registers a canceller of its own
+    when MixinSquared is installed: for a bundled mixin it asks the other cancellers about the
+    original name (for Lithium also the me.jellysquid package) and cancels the copy if any would
+    cancel the original. Works with MixinSquared 0.1 to 0.3. AsyncParticles was the only canceller
+    naming a bundled mod in the 989 mods. Kill switch: -Dsuperchunk.compat.mixinSquared=false.
+
+  copycats, create_connected .. Create: Copycats+, Create: Connected .. wrong path type on copycats
+
+    Both make mobs path over a copycat block as over the block it copies, by wrapping getBlock() in
+    vanilla's WalkNodeEvaluator lookup and in Lithium's PathNodeDefaults.getNodeType, which the
+    mixin.ai.pathing cache answers from. The second mixin names the class by its old Lithium
+    package, so it never applied to the bundled copy. mixin.ai.pathing is now off when either is
+    installed, and vanilla's lookup runs with their wrap. Kill switch:
+    -Dsuperchunk.compat.copycatPathing=false.
+
+  (general) ............. ChunkTicketLevelUpdatedEvent ......... never posted
+
+    NeoForge's patch of ChunkMap.updateChunkScheduling posts it when a chunk's ticket level
+    changes; C2ME's overwrite of that method (from upstream C2ME, which is Fabric code) dropped it,
+    so its listeners (CC: Tweaked's computer chunk tracking is one) never heard of a change. The
+    overwrite now fires it as NeoForge's patch does, unless neither level is a loaded one. The Forge
+    port already did. Found by comparing every @Overwrite with NeoForge's patched original; the
+    chunk load/unload, watch and data events all still fire (VMP and C2ME call the patched methods).
+
+  (general) ............. processUnloads hooks, dotted lithium:options .. Forge crash, GitHub #27
+
+    Found through Valkyrien Skies on the Forge port; the same code is here. C2ME's processUnloads
+    overwrite (priority 1100) blocked other mods' hooks inside it: Mixin refuses any injector other
+    than HEAD/RETURN/TAIL into a method overwritten by a mixin of the same or higher priority, even one
+    marked require = 0, and fails the whole class. It is now a @WrapOperation on its removeIf call,
+    with the same unloading. And a mod's lithium:options written as a dotted TOML key
+    (mixin.ai.poi = false) is now read, where it was dropped as a nested table.
+
   skein ................. Skein ................................. parallel tick phases
 
     Updated Skein exposes version 1 of its optional SuperChunk cell bridge. With both updated
@@ -543,6 +684,110 @@ INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
     mixin lists both DH layouts (2.x package-prefixed, 3.x class-suffixed) and only the installed
     one resolves. Harmless; the other target applies.
 
+    2026-10-30, DH 3.3.3: DH'S OWN CODE MADE FASTER.
+    A JFR profile of DH's batch generator ("/dh pregen", r96 = 36,864 chunks, DH's default 14
+    threads, SuperChunk on the CPU) put about 45% of DH's world-gen CPU in DH's own pipeline rather
+    than in world generation. Four patches of DH's code (superchunk-dh.mixins.json):
+      MixinDhRegionFastChunk ...... DhLitWorldGenRegion.getChunk(x, z) took its ReentrantLock twice for
+                                    every block read of feature placement (8% of DH's CPU). A chunk of
+                                    the group comes from a list built before the region and never
+                                    changed, and each region is used by the one DH thread that made it,
+                                    so it is answered as DH would without the lock. Other chunks take
+                                    DH's locked path.
+      MixinDhFullDataSourceRemap .. merging a chunk into its section (16 times per section) rebuilt the
+                                    section's id map with two concurrent-map lookups per data point
+                                    (5%). It now looks each distinct id up once, in DH's order, so the
+                                    map and every data point come out the same.
+      MixinDhLodBuilderBiome ...... building a chunk's LOD looked the biome up for every block (4.5%);
+                                    the answer is reused while the block's 4x4x4 biome cell is the same.
+      MixinDhDataInputStream ...... stored sections are read back one varint byte at a time through a
+                                    ByteArrayInputStream, whose read() is synchronized; the stream never
+                                    leaves its thread, so an unsynchronized copy reads them. (It did not
+                                    apply until the second pass below.)
+    Each patch applies only when every DH method it relies on hashes to the code it was checked
+    against (compat/ForeignBytecode: opcodes and operands, read from the mod file; the table is in
+    compat/DhFastPaths, recorded for DH 3.3.3). A DH update that changes any of them leaves that
+    patch out, with one INFO line naming it, and DH runs its own code there.
+    Kill switch: -Dsuperchunk.dh.fastPaths=false.
+
+    Two SuperChunk paths also changed for DH's region. The biome memo keeps only answers from chunks
+    that already have their biomes (DH keeps one region for all of a group's steps while the group's
+    biomes are filled; see FIXED). And the level's own climate sampler reuses its five y-independent
+    climate values per column: DH's surface step asks it for every block next to a chunk that has no
+    biomes yet, and that was 5.5% of DH's CPU. The climate searches still run one per lookup, so
+    every biome is vanilla's.
+
+    MEASURED (2026-10-30, r96 FEATURES, 14 DH threads, box load 20-45, original = this tree before):
+      DH alone ...................................  292 cps   46.4 ms/chunk
+      + SuperChunk, CPU, original ................  597 / 598 / 602 cps   25.4 ms/chunk (mean)
+      + SuperChunk, CPU, now .....................  644 / 626 / 678 cps   23.5 ms/chunk (-7.5%)
+      + SuperChunk, GPU, original ................  603 / 790 cps         20.9 ms/chunk
+      + SuperChunk, GPU, now .....................  716 / 840 cps         19.0 ms/chunk (-9%)
+    Unlike August (DH 3.2.0-b, 0.3.0), the GPU now speeds DH up: about +16% over the CPU in the
+    same run. DH's group seam (above) still applies.
+
+    EXACTNESS. DH's SURFACE generator mode (no features) is exactly repeatable: two runs of the same
+    setup give identical LOD databases. With every change above, SuperChunk's LODs are identical to DH
+    alone's at every detail level (676 of 676 interior sections, r64), on the CPU and on the GPU with
+    gpu.decideFp32=false. The fp32 decide default keeps its known rare flips (12 columns at r64). With
+    features on, DH's output is not repeatable even alone (about 14 of 1,764 sections differ between
+    two DH-alone runs); SuperChunk now differs from DH alone by the same amount (11-12).
+
+    NOT DONE: DH's rough-surface generator (generatorPlan SURFACE_THEN_CHUNKS, detail levels above
+    0, needs a playing client); it is cheap per world. DH creates 400 empty placeholder chunks per
+    16-chunk group (0.5% of CPU, about a tenth of the allocation); its structure-reference step
+    reads every one of them, so they stay. The occlusion culler's algorithm and DH's sky-light bake
+    are order-dependent and left alone.
+
+    2026-10-30, later: SECOND PASS. A profile of the jar above put DH's LOD builder at 10.5% of the
+    Java samples and the level climate sampler's depth at 4.2%, and showed that
+    MixinDhDataInputStream had never applied:
+      MixinDhLodBuilderRuns ....... LodDataBuilder.createFromChunk builds the same data points from DH's
+                                    own calls, but reads a block through DH once per section and palette
+                                    id (DH's wrapper depends on the block state alone), the biome once
+                                    per 4x4x4 cell (16 columns share one), a data point's id once per
+                                    wrapper pair, and the two light values only where a data point
+                                    starts (DH reads them for every block, each under a lock). Vanilla
+                                    ProtoChunks only (what DH generates); stands down when another mod
+                                    hooks the vanilla block reads it leaves out.
+      MixinDhChunkHeightMaps ...... ChunkWrapper.createDhHeightMaps (built 3 to 4 times per generated
+                                    chunk): the same per-section block reads.
+      MixinDhCullScope,
+      MixinDhOcclusionCuller ...... after each merge the occlusion culler asks of every data point
+                                    whether its block is translucent; once culling starts the id map no
+                                    longer changes, so the answers come from a table of its ids.
+      MixinDhDataInputStream ...... fixed: method = "create" selected the first of create's two
+                                    overloads, the one that makes no stream, and with require 0 the
+                                    redirect matched nothing without a word. It names the byte[]
+                                    overload now (checked in the exported class and in a profile).
+      ClimateColumns.DepthSplit ... vanilla's depth is y_clamped_gradient + offset, and the offset reads
+                                    only x and z. The level sampler computes the offset once per column
+                                    and adds the gradient (Ap2's ADD is one double sum, so the bits are
+                                    vanilla's), and its column memo keeps the 16 columns around a lookup
+                                    (a biome cell's corner reads alternate between neighbouring columns,
+                                    so one remembered column mostly missed). The level sampler also
+                                    answers every world's uncached biome lookups (structure checks,
+                                    reads past a region's edge). Switch:
+                                    -Dsuperchunk.worldgen.climateColumns.depthSplit=false.
+    Every patch is gated by DhFastPaths like the first four. Verify modes: -Dsuperchunk.dh.lodVerify=true
+    also runs DH's own builder and heightmaps on every chunk and compares (0 differences in 12,288
+    chunks and 32,768 heightmaps, on NeoForge and Forge); -Dsuperchunk.worldgen.climateColumns.verify=true
+    (28.6M targets, 0 differences). SURFACE mode, r64: identical to DH alone at every detail level
+    (702 of 702 interior sections, NeoForge and Forge).
+
+    MEASURED (2026-10-30, r96 FEATURES, 14 DH threads, alternating legs, box load 16-40; "first pass"
+    is the jar measured above, "now" is without the culler table, which a profile puts at another
+    ~0.5%):
+      NeoForge, CPU, first pass ..................  616 / 691 / 674 cps   23.3 ms/chunk (mean)
+      NeoForge, CPU, now .........................  720 / 731 / 700 cps   21.5 ms/chunk (-7.5%)
+      NeoForge, GPU, first pass ..................  830 / 817 cps         18.4 ms/chunk
+      NeoForge, GPU, now .........................  922 / 929 cps         16.6 ms/chunk (-9.8%)
+      Forge 1.20.1, CPU, first pass ..............  654 / 665 cps         23.5 ms/chunk
+      Forge 1.20.1, CPU, now .....................  726 / 720 cps         21.7 ms/chunk (-7.7%)
+    DH alone: 292 cps (NeoForge), 298 (Forge). DH's own pipeline (LOD builder, heightmaps, merges,
+    propagation, lighting, database encoding) went from 29.6% to 24.9% of the Java samples, and the
+    level sampler's biome lookups from 5.4% to 1.1%.
+
 =============================================================
 DATAPACKS  (worldgen datapacks)
 =============================================================
@@ -649,6 +894,17 @@ INCOMPATIBLE  (unfixable)
     naming the mod to remove. Renaming our configs would NOT be a fix: the crash would become the
     same mixins applying twice. (VMP is also bundled; not declared, as no 1.21.1 jar was at hand to
     reproduce with.)
+
+  cbcmodernwarfare ...... CBC Neo Warfare 0.0.6v ................ NOT SUPPORTED, by choice
+
+    A NeoForge port of CBC: Modern Warfare made against the original authors' wishes, so SuperChunk
+    does not carry compatibility for it. The server crashes when ChunkMap first loads: its camera
+    mixin's @ModifyExpressionValue on getLastSectionPos() in ChunkMap.getPlayers cannot apply over
+    bundled VMP's getPlayers overwrite at priority 1050 ("cannot inject into ... getPlayers ...
+    merged by ... MixinThreadedAnvilChunkStorage with priority 1050"). A fix (that overwrite in its
+    own mixin at priority 900) was written and tested on 2026-10-26, then removed from this tree on
+    2026-10-27; do not re-add it. The Forge port keeps it for the original CBC: Modern Warfare and
+    SecurityCraft 1.20.1.
 
 =============================================================
 ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per request)

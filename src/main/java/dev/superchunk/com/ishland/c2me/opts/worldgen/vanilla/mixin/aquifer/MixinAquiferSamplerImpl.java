@@ -976,7 +976,7 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.worldgen
             // them per cell (single-entry last-cell memo). Consecutive same-cell blocks then skip the
             // 12 getIndex + 12 aquiferLocationCache loads and only redo the per-block distance math +
             // top-3 selection. The candidate array is filled and iterated in the EXACT loop order
-            // (offY:-1..1, offZ:0..1, offX:0..1) so the tie-sensitive top-3 selection is byte-identical.
+            // (offX:0..1, offY:-1..1, offZ:0..1), vanilla's, so the tie-sensitive top-3 selection matches vanilla.
             long[] cand = this.scRefreshCand;
             if (cand == null) {
                 cand = new long[12];
@@ -992,9 +992,9 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.worldgen
             int[] candZ = this.scRefreshCandZ;
             if (!(this.scRefreshValid && gx == this.scRefreshGx && gy == this.scRefreshGy && gz == this.scRefreshGz)) {
                 int ci = 0;
-                for (int offY = -1; offY <= 1; ++offY) {
-                    for (int offZ = 0; offZ <= 1; ++offZ) {
-                        for (int offX = 0; offX <= 1; ++offX) {
+                for (int offX = 0; offX <= 1; ++offX) {
+                    for (int offY = -1; offY <= 1; ++offY) {
+                        for (int offZ = 0; offZ <= 1; ++offZ) {
                             long position = this.aquiferLocationCache[this.getIndex(gx + offX, gy + offY, gz + offZ)];
                             cand[ci] = position;
                             candX[ci] = BlockPos.getX(position);
@@ -1054,9 +1054,9 @@ public abstract class MixinAquiferSamplerImpl implements dev.superchunk.worldgen
         long pos2 = 0;
         long pos3 = 0;
 
-        for (int offY = -1; offY <= 1; ++offY) {
-            for (int offZ = 0; offZ <= 1; ++offZ) {
-                for (int offX = 0; offX <= 1; ++offX) {
+        for (int offX = 0; offX <= 1; ++offX) {
+            for (int offY = -1; offY <= 1; ++offY) {
+                for (int offZ = 0; offZ <= 1; ++offZ) {
                     int posIdx = this.getIndex(gx + offX, gy + offY, gz + offZ);
 
                     long position = this.aquiferLocationCache[posIdx];

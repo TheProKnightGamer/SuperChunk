@@ -3,6 +3,8 @@ package dev.superchunk.mixin;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import dev.superchunk.worldgen.BiomeCellLookup;
+import dev.superchunk.worldgen.CeilingDepth;
+import dev.superchunk.worldgen.DeepSurfacePass;
 import dev.superchunk.worldgen.DeepSurfaceRules;
 import dev.superchunk.worldgen.ProtoChunkWrites;
 import dev.superchunk.worldgen.SurfaceColumn;
@@ -37,10 +39,13 @@ import org.spongepowered.asm.mixin.Unique;
  * for most (the stone-depth scan reads ahead, then the main loop reads again), and runs the rules for every stone block
  * down to the bottom of the world. Here the reads are array loads, filled a section at a time; below the preliminary
  * surface, a height whose rule answer {@link DeepSurfaceRules} knows takes that answer without {@code updateY} or
- * {@code tryApply}; writes, the badlands and frozen-ocean extensions, the rule context and the biome lookups are
- * vanilla's own (with the surface rules' biome getter of {@code MixinSurfaceSystemCellBiome}).
+ * {@code tryApply}, and a column is walked only as deep as {@link DeepSurfacePass} needs, which does the rest a section at
+ * a time. The stone depth below a block is read only as far as {@link CeilingDepth} says the rules can tell apart.
+ * Writes, the badlands and frozen-ocean extensions, the rule context and the biome lookups are vanilla's own (with the
+ * surface rules' biome getter of {@code MixinSurfaceSystemCellBiome}).
  *
- * <p>The same blocks, writes, heightmap updates, post-processing marks and random draws, in the same order:
+ * <p>The same blocks, writes, heightmap updates, post-processing marks and random draws, in the same order apart from
+ * the deep pass's writes, which come after the last column ({@link DeepSurfacePass} says why that changes nothing):
  * {@code -Dsuperchunk.debug.surfaceHash} hashes every chunk's surface for a comparison with the original. Runs for an
  * exact {@code ProtoChunk} without below-zero retrogen whose heightmaps {@link ProtoChunkWrites} can bind, while no
  * other mod's mixin is on {@code SurfaceSystem} or its column, or on the chunk reads it replaces. Kill switch
@@ -74,6 +79,21 @@ public abstract class MixinSurfaceSystemFast {
     private void frozenOceanExtension(int minSurfaceLevel, Biome biome, BlockColumn blockColumn,
                                       BlockPos.MutableBlockPos topWaterPos, int x, int z, int height) {
         throw new AssertionError();
+    }
+
+    // past this many blocks, scan to the run's bottom as vanilla does
+    @Unique
+    private static final int MAX_LIMIT = 32;
+
+    /** The stone depth below y if the solid run under it ends within {@code limit} blocks, else {@code limit + 1}. */
+    @Unique
+    private int superchunk$depthBelow(SurfaceColumn column, int y, int limit) {
+        for (int d = 1; d <= limit; d++) {
+            if (!this.isStone(column.getBlock(y - d))) {
+                return d;
+            }
+        }
+        return limit + 1;
     }
 
     @Unique
@@ -129,6 +149,9 @@ public abstract class MixinSurfaceSystemFast {
         BlockPos.MutableBlockPos blockpos$mutableblockpos1 = new BlockPos.MutableBlockPos();
         DeepSurfaceRules.Table deep = DeepSurfaceRules.ENABLED && (SurfaceTiming.off() & SurfaceTiming.DEEP_RULES) == 0
                 ? DeepSurfaceRules.table(ruleSource, context, surfacerules$context) : null;
+        DeepSurfaceRules.Randoms randoms = deep != null ? new DeepSurfaceRules.Randoms(randomState) : null;
+        DeepSurfacePass pass = deep != null ? DeepSurfacePass.begin(chunk, heightmaps, deep, this.defaultBlock, randoms) : null;
+        CeilingDepth.Limits ceiling = (SurfaceTiming.off() & SurfaceTiming.CEILING_DEPTH) == 0 ? CeilingDepth.of(ruleSource) : null;
 
         for (int k = 0; k < 16; k++) {
             for (int l = 0; l < 16; l++) {
@@ -143,14 +166,19 @@ public abstract class MixinSurfaceSystemFast {
 
                 int l1 = chunk.getHeight(Heightmap.Types.WORLD_SURFACE_WG, k, l) + 1;
                 access.superchunk$updateXZ(i1, j1);
+                // how many blocks under a block the rules can tell apart; past it, the scan to the run's bottom is skipped
+                int limit = ceiling != null ? ceiling.limit(access.superchunk$surfaceDepth()) : Integer.MAX_VALUE;
+                boolean capped = limit <= MAX_LIMIT;
                 int i2 = 0;
                 int j2 = Integer.MIN_VALUE;
                 int k2 = Integer.MAX_VALUE;
                 int l2 = chunk.getMinBuildHeight();
                 // the rules' answer is the table's below this (abovePreliminarySurface() is false there)
                 int deepBelow = deep != null ? access.superchunk$getMinSurfaceLevel() : Integer.MIN_VALUE;
+                // the pass does the heights below this after the last column
+                int walkLow = pass != null ? pass.walkLow(k, l, deepBelow, l2) : l2;
 
-                for (int i3 = l1; i3 >= l2; i3--) {
+                for (int i3 = l1; i3 >= walkLow; i3--) {
                     BlockState blockstate = blockcolumn.getBlock(i3);
                     if (blockstate.isAir()) {
                         i2 = 0;
@@ -160,7 +188,7 @@ public abstract class MixinSurfaceSystemFast {
                             j2 = i3 + 1;
                         }
                     } else {
-                        if (k2 >= i3) {
+                        if (!capped && k2 >= i3) {
                             k2 = DimensionType.WAY_BELOW_MIN_Y;
 
                             for (int j3 = i3 - 1; j3 >= l2 - 1; j3--) {
@@ -173,13 +201,19 @@ public abstract class MixinSurfaceSystemFast {
                         }
 
                         i2++;
-                        int k3 = i3 - k2 + 1;
+                        int k3 = capped ? 0 : i3 - k2 + 1;
                         Object answer = i3 < deepBelow ? deep.at(i3) : DeepSurfaceRules.UNKNOWN;
                         if (answer != DeepSurfaceRules.UNKNOWN) {
                             if (blockstate == this.defaultBlock && answer != DeepSurfaceRules.NONE) {
-                                blockcolumn.setBlock(i3, (BlockState) answer);
+                                answer = DeepSurfaceRules.resolve(answer, i1, i3, j1, randoms);
+                                if (answer != DeepSurfaceRules.NONE) {
+                                    blockcolumn.setBlock(i3, (BlockState) answer);
+                                }
                             }
                         } else {
+                            if (capped) {
+                                k3 = this.superchunk$depthBelow(blockcolumn, i3, limit);
+                            }
                             access.superchunk$updateY(i2, k3, j2, i1, i3, j1);
                             if (blockstate == this.defaultBlock) {
                                 BlockState blockstate2 = surfacerules$surfacerule.tryApply(i1, i3, j1);
@@ -196,6 +230,10 @@ public abstract class MixinSurfaceSystemFast {
                             blockpos$mutableblockpos1, i1, j1, k1);
                 }
             }
+        }
+
+        if (pass != null) {
+            pass.run();
         }
     }
 }

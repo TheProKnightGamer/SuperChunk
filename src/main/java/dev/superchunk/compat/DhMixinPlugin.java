@@ -11,6 +11,9 @@ import java.util.Set;
  * Mixin config plugin for {@code superchunk-dh.mixins.json} (the Distant Horizons batch-generator
  * hooks).
  *
+ * <p>The patches of DH's own code ({@link DhFastPaths}) additionally apply only when the DH methods
+ * they rely on are byte-for-byte the code they were checked against.
+ *
  * <p>Its only job is the LOAD-TIME gate: {@link #shouldApplyMixin} refuses every mixin in that
  * config unless Distant Horizons is actually on the mod list and the DH compat is enabled, so on
  * a DH-less install (and under {@code -Dsuperchunk.compat.distantHorizons=false} /
@@ -36,6 +39,10 @@ public final class DhMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
+        // Patches of DH's own code apply only to the DH code they were checked against.
+        if (DhFastPaths.governs(mixinClassName)) {
+            return OptionalTargets.present(targetClassName) && DhFastPaths.allows(mixinClassName);
+        }
         // The step class has a different name in different DH builds; skip the absent one before
         // Mixin looks it up (and logs a WARN for it on every boot).
         return DistantHorizonsCompat.applyBatchGeneratorHooks() && OptionalTargets.present(targetClassName);

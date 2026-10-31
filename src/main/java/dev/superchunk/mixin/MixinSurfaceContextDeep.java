@@ -12,6 +12,8 @@ public abstract class MixinSurfaceContextDeep implements DeepSurfaceRules.Contex
     @Unique
     private DeepSurfaceRules.Table superchunk$deepTable;
     @Unique
+    private DeepSurfaceRules.Randoms superchunk$deepRandoms;
+    @Unique
     private int superchunk$skippedY = Integer.MIN_VALUE;
 
     @Override
@@ -22,6 +24,16 @@ public abstract class MixinSurfaceContextDeep implements DeepSurfaceRules.Contex
     @Override
     public void superchunk$setDeepTable(DeepSurfaceRules.Table table) {
         this.superchunk$deepTable = table;
+    }
+
+    @Override
+    public DeepSurfaceRules.Randoms superchunk$deepRandoms() {
+        return this.superchunk$deepRandoms;
+    }
+
+    @Override
+    public void superchunk$setDeepRandoms(DeepSurfaceRules.Randoms randoms) {
+        this.superchunk$deepRandoms = randoms;
     }
 
     @Override
