@@ -23,10 +23,13 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 8  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 9  (ModernFix, singleplayer only — FIXED;
+                                          CBC Neo Warfare — NOT SUPPORTED, by choice;
                                           Twilight Forest — FIXED;
                                           Voxy via Roxy, client only — FIXED;
                                           Distant Horizons chunk-IO thread leak — FIXED;
+                                          Distant Horizons 3.3.3: DH's own code faster, two
+                                          parity fixes (one for all worlds) — see INTEGRATED, FIXED;
                                           Skein parallel tick phases — FIXED;
                                           YUNG's Better Caves — CLEARED;
                                           Better Chunk Loading — INCOMPATIBLE, by design;
@@ -34,6 +37,72 @@ SUMMARY
                                           by design: they are bundled)
   Worldgen datapacks ................. see DATAPACKS
   Client-only (N/A on a server) ....... 33
+  Static mixin audit, 989 mods ........ 2026-10-29; 4 conflicts FIXED (ModernFix, AsyncParticles,
+                                          Copycats+ / Create: Connected, ticket-level event) —
+                                          see STATIC AUDIT
+
+=============================================================
+STATIC AUDIT  (2026-10-29: SuperChunk's mixins against the top 989 NeoForge 1.21.1 mods)
+=============================================================
+  METHOD. The newest file of each of Modrinth's 1,000 most-downloaded NeoForge 1.21.1 mods (989
+  had one), nested jars included, was read with ASM: every mixin config, every @Overwrite and
+  injector, refmap-resolved. Each was matched against SuperChunk's own jar for the conflicts Mixin
+  turns into a crash or a lost change:
+    - a mod's injector other than HEAD/RETURN/TAIL in a method SuperChunk @Overwrites at the same
+      or higher priority (Mixin refuses it even with require = 0; GitHub #27, CBC), and the reverse;
+    - two @Redirects, or a @Redirect and another call-site injector, on one call;
+    - two @Overwrites of one method (the higher priority wins, the other change is lost);
+    - SuperChunk cancelling or wrapping a method before a mod's hook in it runs.
+  Separately, every class's constant pool was searched for the ids and package names of the mods
+  SuperChunk bundles (lithium, c2me, vmp, scalablelux, noisium and their forks): mods that adapt
+  to one of those by mod id or class name cannot see the relocated copies. And every @Overwrite
+  was compared with NeoForge's patched original for event hooks the overwrite drops. Standalone
+  copies of the bundled mods were left out (SuperChunk stands its copy down or declares them
+  incompatible).
+
+  FOUND AND FIXED (entries under FIXED):
+    ModernFix ................ keeps three chunk-pipeline patches on that it turns off for C2ME
+    AsyncParticles ........... cancels Lithium's entity_by_type mixins by name; missed ours
+    Create: Copycats+, Create: Connected .. patch Lithium's pathing cache by class name; missed ours
+    (all mods) ............... ChunkTicketLevelUpdatedEvent was never posted (CC: Tweaked uses it)
+
+  CHECKED, NOTHING TO DO:
+    Sable, Spelunkery, Supplementaries ... turn the clashing Lithium options off through
+        lithium:options, which the bundled copy reads.
+    Structure Layout Optimizer .. our jigsaw mixins stand down for it (see SLO compat).
+    Redirected ............... redirects the same Direction.values() calls as Lithium; its config
+        does not require them, so the duplicates are skipped.
+    Neruina, AsyncParticles (Level), Immersive Engineering, Lithostitched, Sable (client light
+        queue) .. a MixinExtras injector on a call we @Redirect: MixinExtras chains them.
+    Pehkui ................... its @ModifyArg(index = 1) in ItemEntity.mergeWithNeighbours meets a
+        @Redirect of Lithium's experimental item merging in the scan; that mixin does not apply in
+        the bundled copy, and a boot with Pehkui shows Pehkui's hook in place (both loaders).
+    Farmer's Delight, Smarter Farmers, Bountiful Fares, Modular Golems, BetterTrims, Bookshelf,
+        Dramatic Doors, TxniLib, Forgified Fabric API, Caelus, CreativeCore, Pehkui .. hooks behind
+        an early return of upstream Lithium's (secondary POI, equipment changes, pathing cache,
+        elytra check, shapes): the same with standalone Lithium.
+    FerriteCore, ModernFix, Saturn .. overwrite the same methods as Lithium with the same
+        optimization; either copy is correct.
+    Oh The Biomes We've Gone, Nature's Spirit, Promenade, Jaden's Nether Expansion, ModernFix ..
+        hook SurfaceSystem.buildSurface: the surface pass copy stands down for them (logged).
+    owo-lib .................. hooks OreFeature.doPlace (ore block entities): the ore replica stands
+        down for it.
+    ServerCore, JourneyMap, Distant Horizons, spark .. check vmp / c2me / moonrise for features the
+        bundled copies do not have, or SuperChunk already integrates (DH).
+
+  TESTED (harness, 2026-10-29): boots and r256 pregens with ModernFix + Spelunkery (+ Moonlight) +
+    Create: Copycats+ (+ Create 6.0.10) + Biome Replacer (MixinSquared 0.3.3), and with Sable
+    alone; the log shows ModernFix taking the four options, Lithium dropping mixin.ai.pathing for
+    copycats and mixin.block.fluid.flow for spelunkery, and Sable's options. Entities in a released
+    chunk unload and reload. A fixture mod whose MixinSquared canceller names Lithium's
+    entity_by_type mixin by its original name got the bundled copy cancelled, and the server still
+    generated. The exported ChunkMap posts ChunkTicketLevelUpdatedEvent from updateChunkScheduling.
+
+  KNOWN, NOT FIXED:
+    Iris & Oculus Flywheel Compat warns in chat that it "is not compatible with ScalableLux"; with
+    the bundled copy it cannot tell, so it does not warn. Its reason is not stated.
+    ModernFix's SurfaceSystem hooks (on by default) make the surface pass copy stand down in every
+    pack that has ModernFix: correct, but that pack loses the surface speed-up.
 
 =============================================================
 COMPATIBLE  (booted cleanly alongside SuperChunk)
@@ -43,7 +112,7 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
   distanthorizons ....... Distant Horizons (LOD) .................. PASS  [0.3.0: now INTEGRATED — see below]
   krypton-fnp ........... Krypton Reno (network opt) .............. PASS
   ksyxis ................ Ksyxis (skip spawn-chunk load) .......... PASS
-  modernfix ............. ModernFix (memory/startup) .............. PASS  [singleplayer: see FIXED]
+  modernfix ............. ModernFix (memory/startup) .............. PASS  [singleplayer, C2ME options: see FIXED]
   packet-fixer .......... Packet Fixer ............................ PASS
   saturn ................ Saturn (GC/alloc opt) ................... PASS
   servercore ............ ServerCore (server perf) ................ PASS
@@ -721,6 +790,17 @@ INCOMPATIBLE  (unfixable)
     naming the mod to remove. Renaming our configs would NOT be a fix: the crash would become the
     same mixins applying twice. (VMP is also bundled; not declared, as no 1.21.1 jar was at hand to
     reproduce with.)
+
+  cbcmodernwarfare ...... CBC Neo Warfare 0.0.6v ................ NOT SUPPORTED, by choice
+
+    A NeoForge port of CBC: Modern Warfare made against the original authors' wishes, so SuperChunk
+    does not carry compatibility for it. The server crashes when ChunkMap first loads: its camera
+    mixin's @ModifyExpressionValue on getLastSectionPos() in ChunkMap.getPlayers cannot apply over
+    bundled VMP's getPlayers overwrite at priority 1050 ("cannot inject into ... getPlayers ...
+    merged by ... MixinThreadedAnvilChunkStorage with priority 1050"). A fix (that overwrite in its
+    own mixin at priority 900) was written and tested on 2026-10-26, then removed from this tree on
+    2026-10-27; do not re-add it. The Forge port keeps it for the original CBC: Modern Warfare and
+    SecurityCraft 1.20.1.
 
 =============================================================
 ALREADY KNOWN — bundled into SuperChunk or handled elsewhere (skipped per request)
