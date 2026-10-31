@@ -48,6 +48,8 @@
     "MixinChunkAccessInlineHeights",
     "MixinChunkGeneratorDecorationStepCache",
     "MixinChunkSerializerFastPalette",
+    "MixinChunkSerializerDirectEncode",
+    "MixinBlockStateEncodedEntry",
     "MixinChunkMapClimateDimLabel",
     "MixinChunkMapPredictiveGen",
     "MixinClimateSampler",

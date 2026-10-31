@@ -105,6 +105,8 @@ for the tested versions and limitations.
 - **`dev.superchunk.worldgen`** — CPU worldgen shortcuts that keep vanilla's output; ore placement
   is about a third cheaper and surface building takes less than half its old time, with the same
   blocks (`analysis/ores-2026-10-24.md`, `analysis/surface-2026-10-24.md`)
+- **`dev.superchunk.chunkio`** — chunk saves and loads read and write section palettes directly
+  instead of through DataFixerUpper, with the same bytes (`analysis/chunk-save-encode-2026-10-30.md`)
 
 ## How the GPU path works
 
@@ -231,6 +233,7 @@ Install the plain jar, not the `-core` one — that rides inside it.
 - `analysis/jjthunder-freeze-2026-09-25.md` — diagnosis of a world freeze with the JJThunder To The Max datapack, and the 2026-09-26 follow-up (features reading too far are skipped instead of failing the chunk)
 - `analysis/worldgen-big-2026-09-25.md` — noise-fill CPU pass (lerp tables, bulk multiply, air-cell skip), the pregen hash check, and the aquifer cell cache exactness fix
 - `analysis/cpu-per-chunk-2026-10-11.md` — CPU cost per chunk: cell sign skip, shared corner columns and surface levels, region center chunk, lean surface writes, allocation; the surface hash check
+- `analysis/chunk-save-encode-2026-10-30.md` — chunk saves encode each section's block and biome palettes without DataFixerUpper's codecs: the same bytes, about 40% less time per container
 - `dist/README.md` — end-user install notes
 
 ## License

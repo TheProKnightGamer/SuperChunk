@@ -119,6 +119,7 @@ public final class SuperChunk {
                 dev.superchunk.worldgen.SurfaceTiming.report();
                 dev.superchunk.worldgen.DeepSurfaceRules.report();
                 dev.superchunk.worldgen.DeepSurfacePass.report();
+                dev.superchunk.chunkio.DirectPaletteEncoder.report();
                 if (Boolean.getBoolean("superchunk.worldgen.biomeFiddleCache.verify")) {
                     dev.superchunk.worldgen.BiomeFiddleCache.reportVerify();
                 }
