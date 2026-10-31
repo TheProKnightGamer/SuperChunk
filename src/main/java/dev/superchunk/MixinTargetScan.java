@@ -127,6 +127,20 @@ public final class MixinTargetScan {
     }
 
     /**
+     * The first foreign mixin among those of {@code classNames} that were loaded. For a class the probe applies to,
+     * "not scanned" means it was never loaded; the plain {@link #foreignMixin(String...)} stops there instead.
+     */
+    public static String foreignMixinIfLoaded(String... classNames) {
+        for (String name : classNames) {
+            String foreign = foreignMixin(name);
+            if (foreign != null && !foreign.endsWith(" was not scanned>")) {
+                return foreign;
+            }
+        }
+        return null;
+    }
+
+    /**
      * For {@code "pkg.Class#method"} names (every overload of the method): {@code null} when each
      * class was scanned and none of the methods is hooked by another mod; otherwise the first
      * foreign mixin found, or a reason the class was not scanned.
@@ -139,7 +153,14 @@ public final class MixinTargetScan {
             }
             String hook = System.getProperty(PROPERTY + name);
             if (hook == null && SRG_NAMES.containsKey(name)) {
-                hook = System.getProperty(PROPERTY + className + "#" + SRG_NAMES.get(name));
+                // one SRG name per overload
+                for (String srg : SRG_NAMES.get(name).split(",")) {
+                    String srgHook = System.getProperty(PROPERTY + className + "#" + srg);
+                    if (srgHook != null && !srgHook.isEmpty()) {
+                        hook = srgHook;
+                        break;
+                    }
+                }
             }
             if (hook != null && !hook.isEmpty()) {
                 return hook;
@@ -151,8 +172,8 @@ public final class MixinTargetScan {
     /**
      * Forge 1.20.1 runs production with SRG method names ({@code m_196879_}), so the scanned class
      * records methods under those names while callers ask by Mojang name. Every method a caller
-     * asks about, mapped from {@code srg_to_official_1.20.1.tsrg}; a dev run records Mojang names
-     * and never needs the fallback. A name missing here would read as unhooked in production.
+     * asks about, mapped from {@code srg_to_official_1.20.1.tsrg} (overloads: comma-separated); a dev run records
+     * Mojang names and never needs the fallback. A name missing here would read as unhooked in production.
      */
     private static final Map<String, String> SRG_NAMES = Map.ofEntries(
             Map.entry("net.minecraft.world.level.chunk.PalettedContainer#getAll", "m_196879_"),
@@ -197,7 +218,11 @@ public final class MixinTargetScan {
             Map.entry("net.minecraft.util.ClassInstanceMultiMap#find", "m_13533_"),
             Map.entry("net.minecraft.world.level.biome.Climate$Sampler#sample", "m_183445_"),
             Map.entry("net.minecraft.world.level.levelgen.NoiseChunk#cachedClimateSampler", "m_224359_"),
-            Map.entry("net.minecraft.world.level.chunk.ProtoChunk#setBlockState", "m_6978_"));
+            Map.entry("net.minecraft.world.level.chunk.ProtoChunk#setBlockState", "m_6978_"),
+            Map.entry("net.minecraft.world.level.chunk.LevelChunkSection#setBlockState", "m_62986_,m_62991_"),
+            Map.entry("net.minecraft.world.level.chunk.PalettedContainer#getAndSet", "m_63091_,m_63096_"),
+            Map.entry("net.minecraft.world.level.chunk.PalettedContainer#getAndSetUnchecked", "m_63127_"),
+            Map.entry("net.minecraft.world.level.chunk.PalettedContainer#set", "m_156470_,m_63132_"));
 
     /** A getter ({@code [aload] getfield|getstatic; return}) or invoker ({@code loads; invoke; return}). */
     static boolean exposesOnly(MethodNode method) {

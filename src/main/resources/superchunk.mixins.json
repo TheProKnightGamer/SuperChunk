@@ -43,6 +43,7 @@
     "ISurfaceSequenceSourceAccess",
     "ISurfaceNotSourceAccess",
     "ISurfaceGradientSourceAccess",
+    "ISurfaceStoneDepthAccess",
     "MixinLevelChunkPostProcessSkip",
     "MixinNoiseBasedChunkGeneratorGpuSeam",
     "MixinNoiseChunkClimateColumns",
