@@ -1,7 +1,7 @@
 # SuperChunk for Forge 1.20.1
 
 This branch holds the Forge 1.20.1 port of SuperChunk. The NeoForge 1.21.1 build on `main` is
-the original and the source of truth; this tree follows it and is at parity with 0.5.0.
+the original and the source of truth; this tree follows it and is at parity with 0.6.0.
 `PORT-NOTES.md` records each catch-up and every place where 1.20.1 deliberately differs.
 
 ## Install
