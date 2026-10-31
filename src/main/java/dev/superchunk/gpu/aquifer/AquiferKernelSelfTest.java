@@ -245,9 +245,9 @@ public final class AquiferKernelSelfTest {
         int dist1 = Integer.MAX_VALUE, dist2 = Integer.MAX_VALUE, dist3 = Integer.MAX_VALUE;
         long pos1 = 0, pos2 = 0, pos3 = 0;
         int fl1 = 0, ft1 = 0, fl2 = 0, ft2 = 0, fl3 = 0, ft3 = 0;
-        for (int offY = -1; offY <= 1; offY++) {
-            for (int offZ = 0; offZ <= 1; offZ++) {
-                for (int offX = 0; offX <= 1; offX++) {
+        for (int offX = 0; offX <= 1; offX++) {
+            for (int offY = -1; offY <= 1; offY++) {
+                for (int offZ = 0; offZ <= 1; offZ++) {
                     int idx = getIndex(gx + offX, gy + offY, gz + offZ);
                     long position = locCache[idx];
                     int cfl = fluidLevel[idx], cft = fluidTypeId[idx];
