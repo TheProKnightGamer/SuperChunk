@@ -28,8 +28,8 @@ import org.spongepowered.asm.mixin.injection.At;
  *
  * <p>The table itself, its generation scheme and the correctness argument live in
  * {@link BiomeQuartCache}. The gate here is the safety-critical half: only a
- * {@link WorldGenRegion}'s manager qualifies, because only there is {@code getNoiseBiome} pure for
- * the manager's lifetime. {@code ServerLevel}'s manager is long-lived and {@code /fillbiome} can
+ * {@link WorldGenRegion}'s manager qualifies (that exact class; Distant Horizons' subclass keeps only answers from chunks
+ * that have their biomes), because only there is {@code getNoiseBiome} pure for the manager's lifetime. {@code ServerLevel}'s manager is long-lived and {@code /fillbiome} can
  * rewrite biomes under it, so it always takes the original call.
  *
  * <p>Kill switch: {@code -Dsuperchunk.worldgen.biomeQuartCache=false}.
@@ -130,6 +130,14 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
     private int superchunk$centerZ;
     @Unique
     private int superchunk$biomeRadius = -1;
+    /**
+     * Distant Horizons' region: it keeps one region for every step of a group while the group's
+     * chunks get their biomes, so only answers from chunks already at BIOMES (whose biomes no longer
+     * change) are kept. Before that a chunk's biome comes from the biome source, and the stored one
+     * can differ from it on exact climate ties.
+     */
+    @Unique
+    private boolean superchunk$settling;
 
     /** Publish the owner, table and ticket together before enabling the fast path. */
     @Unique
@@ -137,7 +145,13 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         if (superchunk$mode != 0) {
             return;
         }
-        if ((SUPERCHUNK$ENABLED || SUPERCHUNK$FIDDLE_CACHE) && this.noiseBiomeSource instanceof WorldGenRegion) {
+        // Vanilla's region class, and Distant Horizons' with only settled answers kept (see
+        // superchunk$settling). Any other subclass passes through: DH's showed that a subclass can
+        // change biomes under one manager (33 verify mismatches before this gate).
+        Class<?> sourceClass = this.noiseBiomeSource == null ? null : this.noiseBiomeSource.getClass();
+        boolean dhRegion = this.noiseBiomeSource instanceof WorldGenRegion && superchunk$isDhRegion(sourceClass);
+        if ((SUPERCHUNK$ENABLED || SUPERCHUNK$FIDDLE_CACHE) && (sourceClass == WorldGenRegion.class || dhRegion)) {
+            superchunk$settling = dhRegion;
             if (SUPERCHUNK$ENABLED) {
                 superchunk$cache = BiomeQuartCache.local();
                 superchunk$generation = superchunk$cache.claimGeneration();
@@ -162,6 +176,19 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         } else {
             superchunk$mode = -1;
         }
+    }
+
+    @Unique
+    private static boolean superchunk$isDhRegion(Class<?> sourceClass) {
+        return sourceClass.getName().startsWith("com.seibel.distanthorizons.")
+                && sourceClass.getSimpleName().startsWith("DhLitWorldGenRegion");
+    }
+
+    /** Whether the biome at quart {@code (x, z)} can no longer change for this manager (see {@link #superchunk$settling}). */
+    @Unique
+    private boolean superchunk$settled(int x, int z) {
+        return !superchunk$settling || ((WorldGenRegion) this.noiseBiomeSource).getChunk(
+                x >> 2, z >> 2, net.minecraft.world.level.chunk.status.ChunkStatus.BIOMES, false) != null;
     }
 
     @WrapMethod(method = "getBiome", require = 0)
@@ -275,6 +302,13 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         if (Math.max(Math.max(Math.abs(cx0), Math.abs(cx1)), Math.max(Math.abs(cz0), Math.abs(cz1))) > radius) {
             return null;
         }
+        // Vanilla reads one corner. Reading the other 7 is free only where all are stored: a corner in a chunk
+        // without biomes yet runs a climate search, whose warm start then settles later exact ties differently.
+        // Such a cell is kept as MIXED: it always takes the per-corner path, which reads what vanilla reads.
+        if (superchunk$settling && !(superchunk$settled(x, z) && superchunk$settled(x + 1, z)
+                && superchunk$settled(x, z + 1) && superchunk$settled(x + 1, z + 1))) {
+            return BiomeQuartCache.MIXED;
+        }
         Holder<Biome> first = superchunk$quartDirect(x, y, z);
         if (first == null) {
             return null;
@@ -315,7 +349,7 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
             return (Holder<Biome>) cached;
         }
         Holder<Biome> value = this.noiseBiomeSource.getNoiseBiome(x, y, z);
-        if (value != null && cache.isCurrentGeneration(generation)) {
+        if (value != null && cache.isCurrentGeneration(generation) && superchunk$settled(x, z)) {
             cache.put(encoded, value);
         }
         return value;
@@ -389,7 +423,7 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         // A null answer is not cached: it would be indistinguishable from a miss.
         // A modded source can nest other managers' lookups and wrap this table while
         // resolving a miss. Do not insert the outer result under a now-reused key.
-        if (value != null && superchunk$cache.isCurrentGeneration(generation)) {
+        if (value != null && superchunk$cache.isCurrentGeneration(generation) && superchunk$settled(x, z)) {
             superchunk$cache.put(encoded, value);
         }
         return value;

@@ -8,7 +8,15 @@
   "plugin": "dev.superchunk.compat.DhMixinPlugin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "MixinDhWorldGenStep"
+    "MixinDhWorldGenStep",
+    "MixinDhRegionFastChunk",
+    "MixinDhFullDataSourceRemap",
+    "MixinDhLodBuilderBiome",
+    "MixinDhLodBuilderRuns",
+    "MixinDhChunkHeightMaps",
+    "MixinDhCullScope",
+    "MixinDhOcclusionCuller",
+    "MixinDhDataInputStream"
   ],
   "client": [],
   "server": [],

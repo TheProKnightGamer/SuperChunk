@@ -684,6 +684,110 @@ INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
     mixin lists both DH layouts (2.x package-prefixed, 3.x class-suffixed) and only the installed
     one resolves. Harmless; the other target applies.
 
+    2026-10-30, DH 3.3.3: DH'S OWN CODE MADE FASTER.
+    A JFR profile of DH's batch generator ("/dh pregen", r96 = 36,864 chunks, DH's default 14
+    threads, SuperChunk on the CPU) put about 45% of DH's world-gen CPU in DH's own pipeline rather
+    than in world generation. Four patches of DH's code (superchunk-dh.mixins.json):
+      MixinDhRegionFastChunk ...... DhLitWorldGenRegion.getChunk(x, z) took its ReentrantLock twice for
+                                    every block read of feature placement (8% of DH's CPU). A chunk of
+                                    the group comes from a list built before the region and never
+                                    changed, and each region is used by the one DH thread that made it,
+                                    so it is answered as DH would without the lock. Other chunks take
+                                    DH's locked path.
+      MixinDhFullDataSourceRemap .. merging a chunk into its section (16 times per section) rebuilt the
+                                    section's id map with two concurrent-map lookups per data point
+                                    (5%). It now looks each distinct id up once, in DH's order, so the
+                                    map and every data point come out the same.
+      MixinDhLodBuilderBiome ...... building a chunk's LOD looked the biome up for every block (4.5%);
+                                    the answer is reused while the block's 4x4x4 biome cell is the same.
+      MixinDhDataInputStream ...... stored sections are read back one varint byte at a time through a
+                                    ByteArrayInputStream, whose read() is synchronized; the stream never
+                                    leaves its thread, so an unsynchronized copy reads them. (It did not
+                                    apply until the second pass below.)
+    Each patch applies only when every DH method it relies on hashes to the code it was checked
+    against (compat/ForeignBytecode: opcodes and operands, read from the mod file; the table is in
+    compat/DhFastPaths, recorded for DH 3.3.3). A DH update that changes any of them leaves that
+    patch out, with one INFO line naming it, and DH runs its own code there.
+    Kill switch: -Dsuperchunk.dh.fastPaths=false.
+
+    Two SuperChunk paths also changed for DH's region. The biome memo keeps only answers from chunks
+    that already have their biomes (DH keeps one region for all of a group's steps while the group's
+    biomes are filled; see FIXED). And the level's own climate sampler reuses its five y-independent
+    climate values per column: DH's surface step asks it for every block next to a chunk that has no
+    biomes yet, and that was 5.5% of DH's CPU. The climate searches still run one per lookup, so
+    every biome is vanilla's.
+
+    MEASURED (2026-10-30, r96 FEATURES, 14 DH threads, box load 20-45, original = this tree before):
+      DH alone ...................................  292 cps   46.4 ms/chunk
+      + SuperChunk, CPU, original ................  597 / 598 / 602 cps   25.4 ms/chunk (mean)
+      + SuperChunk, CPU, now .....................  644 / 626 / 678 cps   23.5 ms/chunk (-7.5%)
+      + SuperChunk, GPU, original ................  603 / 790 cps         20.9 ms/chunk
+      + SuperChunk, GPU, now .....................  716 / 840 cps         19.0 ms/chunk (-9%)
+    Unlike August (DH 3.2.0-b, 0.3.0), the GPU now speeds DH up: about +16% over the CPU in the
+    same run. DH's group seam (above) still applies.
+
+    EXACTNESS. DH's SURFACE generator mode (no features) is exactly repeatable: two runs of the same
+    setup give identical LOD databases. With every change above, SuperChunk's LODs are identical to DH
+    alone's at every detail level (676 of 676 interior sections, r64), on the CPU and on the GPU with
+    gpu.decideFp32=false. The fp32 decide default keeps its known rare flips (12 columns at r64). With
+    features on, DH's output is not repeatable even alone (about 14 of 1,764 sections differ between
+    two DH-alone runs); SuperChunk now differs from DH alone by the same amount (11-12).
+
+    NOT DONE: DH's rough-surface generator (generatorPlan SURFACE_THEN_CHUNKS, detail levels above
+    0, needs a playing client); it is cheap per world. DH creates 400 empty placeholder chunks per
+    16-chunk group (0.5% of CPU, about a tenth of the allocation); its structure-reference step
+    reads every one of them, so they stay. The occlusion culler's algorithm and DH's sky-light bake
+    are order-dependent and left alone.
+
+    2026-10-30, later: SECOND PASS. A profile of the jar above put DH's LOD builder at 10.5% of the
+    Java samples and the level climate sampler's depth at 4.2%, and showed that
+    MixinDhDataInputStream had never applied:
+      MixinDhLodBuilderRuns ....... LodDataBuilder.createFromChunk builds the same data points from DH's
+                                    own calls, but reads a block through DH once per section and palette
+                                    id (DH's wrapper depends on the block state alone), the biome once
+                                    per 4x4x4 cell (16 columns share one), a data point's id once per
+                                    wrapper pair, and the two light values only where a data point
+                                    starts (DH reads them for every block, each under a lock). Vanilla
+                                    ProtoChunks only (what DH generates); stands down when another mod
+                                    hooks the vanilla block reads it leaves out.
+      MixinDhChunkHeightMaps ...... ChunkWrapper.createDhHeightMaps (built 3 to 4 times per generated
+                                    chunk): the same per-section block reads.
+      MixinDhCullScope,
+      MixinDhOcclusionCuller ...... after each merge the occlusion culler asks of every data point
+                                    whether its block is translucent; once culling starts the id map no
+                                    longer changes, so the answers come from a table of its ids.
+      MixinDhDataInputStream ...... fixed: method = "create" selected the first of create's two
+                                    overloads, the one that makes no stream, and with require 0 the
+                                    redirect matched nothing without a word. It names the byte[]
+                                    overload now (checked in the exported class and in a profile).
+      ClimateColumns.DepthSplit ... vanilla's depth is y_clamped_gradient + offset, and the offset reads
+                                    only x and z. The level sampler computes the offset once per column
+                                    and adds the gradient (Ap2's ADD is one double sum, so the bits are
+                                    vanilla's), and its column memo keeps the 16 columns around a lookup
+                                    (a biome cell's corner reads alternate between neighbouring columns,
+                                    so one remembered column mostly missed). The level sampler also
+                                    answers every world's uncached biome lookups (structure checks,
+                                    reads past a region's edge). Switch:
+                                    -Dsuperchunk.worldgen.climateColumns.depthSplit=false.
+    Every patch is gated by DhFastPaths like the first four. Verify modes: -Dsuperchunk.dh.lodVerify=true
+    also runs DH's own builder and heightmaps on every chunk and compares (0 differences in 12,288
+    chunks and 32,768 heightmaps, on NeoForge and Forge); -Dsuperchunk.worldgen.climateColumns.verify=true
+    (28.6M targets, 0 differences). SURFACE mode, r64: identical to DH alone at every detail level
+    (702 of 702 interior sections, NeoForge and Forge).
+
+    MEASURED (2026-10-30, r96 FEATURES, 14 DH threads, alternating legs, box load 16-40; "first pass"
+    is the jar measured above, "now" is without the culler table, which a profile puts at another
+    ~0.5%):
+      NeoForge, CPU, first pass ..................  616 / 691 / 674 cps   23.3 ms/chunk (mean)
+      NeoForge, CPU, now .........................  720 / 731 / 700 cps   21.5 ms/chunk (-7.5%)
+      NeoForge, GPU, first pass ..................  830 / 817 cps         18.4 ms/chunk
+      NeoForge, GPU, now .........................  922 / 929 cps         16.6 ms/chunk (-9.8%)
+      Forge 1.20.1, CPU, first pass ..............  654 / 665 cps         23.5 ms/chunk
+      Forge 1.20.1, CPU, now .....................  726 / 720 cps         21.7 ms/chunk (-7.7%)
+    DH alone: 292 cps (NeoForge), 298 (Forge). DH's own pipeline (LOD builder, heightmaps, merges,
+    propagation, lighting, database encoding) went from 29.6% to 24.9% of the Java samples, and the
+    level sampler's biome lookups from 5.4% to 1.1%.
+
 =============================================================
 DATAPACKS  (worldgen datapacks)
 =============================================================

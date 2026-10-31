@@ -49,6 +49,8 @@ public final class ClimateColumns {
     public static final boolean ENABLED =
             !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.climateColumns", "true"));
     public static final boolean VERIFY = Boolean.getBoolean("superchunk.worldgen.climateColumns.verify");
+    public static final boolean DEPTH_SPLIT =
+            !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.climateColumns.depthSplit", "true"));
 
     /** Mask bits, in {@code Climate.Sampler} order. */
     public static final int TEMPERATURE = 1, HUMIDITY = 2, CONTINENTALNESS = 4, EROSION = 8, DEPTH = 16, WEIRDNESS = 32;
@@ -58,13 +60,39 @@ public final class ClimateColumns {
         byte superchunk$columnMask();
 
         void superchunk$setColumnMask(byte mask);
+
+        /** Marks a level's own sampler, built from {@code router}: values reused anywhere ({@link #sampleAnywhere}). */
+        void superchunk$setLevelRouter(NoiseRouter router);
+
+        /** A level sampler's depth as gradient + column offset ({@link #splitDepth}), or null. */
+        DepthSplit superchunk$depthSplit();
+
+        void superchunk$setDepthSplit(DepthSplit split);
+    }
+
+    /**
+     * A depth function of the form {@code y_clamped_gradient + offset} with a y-independent
+     * offset: vanilla's overworld depth. {@code Ap2}'s ADD is {@code argument1 + argument2}, and a
+     * double sum does not depend on operand order, so {@code gradient(y) + offset(x, z)} is the
+     * function's value bit for bit, with the offset computed once per column.
+     */
+    public static final class DepthSplit {
+        final DensityFunctions.YClampedGradient gradient;
+        final DensityFunction offset;
+
+        DepthSplit(DensityFunctions.YClampedGradient gradient, DensityFunction offset) {
+            this.gradient = gradient;
+            this.offset = offset;
+        }
     }
 
     private static final Logger LOGGER = LoggerFactory.getLogger("SuperChunk-ClimateColumns");
     // Weak keys compare by identity: one entry per live router, compiled or vanilla.
     private static final Map<NoiseRouter, Byte> MASKS = new MapMaker().weakKeys().makeMap();
     private static final ThreadLocal<Columns> ARMED = ThreadLocal.withInitial(Columns::new);
+    private static final ThreadLocal<Last> LAST = ThreadLocal.withInitial(Last::new);
     private static final AtomicBoolean LOGGED = new AtomicBoolean();
+    private static final AtomicBoolean SPLIT_LOGGED = new AtomicBoolean();
     private static final LongAdder VERIFIED = new LongAdder();
     private static final LongAdder MISMATCHES = new LongAdder();
     private static volatile byte hooks; // ForeignHooks state
@@ -91,6 +119,40 @@ public final class ClimateColumns {
         return (byte) mask;
     }
 
+    /**
+     * Splits a level sampler's vanilla (uncompiled) depth function into its y gradient and a
+     * y-independent offset ({@link DepthSplit}), or null when it has another shape.
+     */
+    public static DepthSplit splitDepth(DensityFunction depth) {
+        if (!ENABLED || !DEPTH_SPLIT) {
+            return null;
+        }
+        while (true) {
+            if (depth instanceof DensityFunctions.HolderHolder h) {
+                depth = h.function().value();
+            } else if (depth instanceof DensityFunctions.Marker m) {
+                depth = m.wrapped();
+            } else {
+                break;
+            }
+        }
+        if (!(depth instanceof DensityFunctions.TwoArgumentSimpleFunction f)
+                || f.type() != DensityFunctions.TwoArgumentSimpleFunction.Type.ADD) {
+            return null;
+        }
+        Walk walk = new Walk();
+        DepthSplit split = null;
+        if (f.argument1() instanceof DensityFunctions.YClampedGradient g && walk.yIndependent(f.argument2())) {
+            split = new DepthSplit(g, f.argument2());
+        } else if (f.argument2() instanceof DensityFunctions.YClampedGradient g && walk.yIndependent(f.argument1())) {
+            split = new DepthSplit(g, f.argument1());
+        }
+        if (split != null && SPLIT_LOGGED.compareAndSet(false, true)) {
+            LOGGER.info("[climate-columns] level sampler: depth = y gradient + offset, the offset once per column");
+        }
+        return split;
+    }
+
     /** Records the mask decided for {@code router} (DFC: the compiled router, decided from its vanilla form). */
     public static void register(NoiseRouter router, byte mask) {
         MASKS.put(router, mask);
@@ -107,6 +169,22 @@ public final class ClimateColumns {
             MASKS.put(router, mask);
         }
         return mask;
+    }
+
+    /**
+     * The mask for a level's own sampler, or -1 while it cannot be decided yet: whether another mod
+     * hooks the sampler is known only once its classes have loaded, after the level's RandomState is built.
+     */
+    public static int levelMask(NoiseRouter router) {
+        if (!ENABLED) {
+            return 0;
+        }
+        unhooked();
+        byte state = hooks;
+        if (state == ForeignHooks.UNKNOWN) {
+            return -1;
+        }
+        return state == ForeignHooks.CLEAR ? maskFor(router) : 0;
     }
 
     private static boolean unhooked() {
@@ -187,6 +265,69 @@ public final class ClimateColumns {
         return target;
     }
 
+    /**
+     * The target for quart (x, y, z) from a level's own sampler, reusing the y-independent values of
+     * the last columns this thread asked it about. That sampler answers the biome lookups for chunks
+     * that have no biomes yet ({@code getUncachedNoiseBiome}): one per block in Distant Horizons'
+     * surface step, down the same column. The masked functions are pure functions of x and z, depth
+     * reuses its offset the same way ({@link DepthSplit}), and the climate search still runs once per
+     * lookup, so every target and biome is vanilla's.
+     */
+    public static Climate.TargetPoint sampleAnywhere(Climate.Sampler sampler, int mask, int x, int y, int z) {
+        Last c = LAST.get();
+        DensityFunction.SinglePointContext ctx =
+                new DensityFunction.SinglePointContext(QuartPos.toBlock(x), QuartPos.toBlock(y), QuartPos.toBlock(z));
+        if (c.sampler != sampler) {
+            c.sampler = sampler;
+            java.util.Arrays.fill(c.valid, false);
+        }
+        // A cell's corners alternate between neighbouring columns, so each of the 4x4 columns around has its own slot.
+        int slot = ((x & 3) << 2) | (z & 3);
+        long key = ((long) x << 32) | (z & 0xFFFFFFFFL);
+        boolean hit = c.valid[slot] && c.keys[slot] == key;
+        float[] v = c.values;
+        int base = slot * 6;
+        float temperature = hit && (mask & TEMPERATURE) != 0 ? v[base] : (float) sampler.temperature().compute(ctx);
+        float humidity = hit && (mask & HUMIDITY) != 0 ? v[base + 1] : (float) sampler.humidity().compute(ctx);
+        float continentalness = hit && (mask & CONTINENTALNESS) != 0 ? v[base + 2] : (float) sampler.continentalness().compute(ctx);
+        float erosion = hit && (mask & EROSION) != 0 ? v[base + 3] : (float) sampler.erosion().compute(ctx);
+        float depth;
+        DepthSplit split;
+        if (hit && (mask & DEPTH) != 0) {
+            depth = v[base + 4];
+        } else if ((mask & DEPTH) == 0 && (split = ((Tagged) (Object) sampler).superchunk$depthSplit()) != null) {
+            if (!hit) {
+                c.offsets[slot] = split.offset.compute(ctx);
+            }
+            depth = (float) (split.gradient.compute(ctx) + c.offsets[slot]);
+        } else {
+            depth = (float) sampler.depth().compute(ctx);
+        }
+        float weirdness = hit && (mask & WEIRDNESS) != 0 ? v[base + 5] : (float) sampler.weirdness().compute(ctx);
+        if (!hit) {
+            v[base] = temperature;
+            v[base + 1] = humidity;
+            v[base + 2] = continentalness;
+            v[base + 3] = erosion;
+            v[base + 4] = depth;
+            v[base + 5] = weirdness;
+            c.keys[slot] = key;
+            c.valid[slot] = true;
+        }
+        Climate.TargetPoint target = Climate.target(temperature, humidity, continentalness, erosion, depth, weirdness);
+        if (VERIFY) {
+            Climate.TargetPoint vanilla = Climate.target((float) sampler.temperature().compute(ctx),
+                    (float) sampler.humidity().compute(ctx), (float) sampler.continentalness().compute(ctx),
+                    (float) sampler.erosion().compute(ctx), (float) sampler.depth().compute(ctx),
+                    (float) sampler.weirdness().compute(ctx));
+            VERIFIED.increment();
+            if (!vanilla.equals(target)) {
+                MISMATCHES.increment();
+            }
+        }
+        return target;
+    }
+
     public static void reportVerify() {
         long m = MISMATCHES.sum();
         LOGGER.info("[climate-columns] VERIFY: checked={} MISMATCHES={} -> {}", VERIFIED.sum(), m, m == 0 ? "PASS" : "FAIL");
@@ -209,6 +350,15 @@ public final class ClimateColumns {
         final long[] keys = new long[16];
         final boolean[] valid = new boolean[16];
         final float[] values = new float[16 * 6];
+    }
+
+    /** One thread's last columns asked of a level's sampler ({@link #sampleAnywhere}), one per (x & 3, z & 3). */
+    private static final class Last {
+        Climate.Sampler sampler;
+        final long[] keys = new long[16];
+        final boolean[] valid = new boolean[16];
+        final float[] values = new float[16 * 6];
+        final double[] offsets = new double[16]; // the depth split's offset ({@link DepthSplit}) per column
     }
 
     /** Whether a vanilla density function's value can depend on y (see the class comment). */
