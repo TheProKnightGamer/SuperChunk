@@ -38,6 +38,7 @@ public final class DhFastPaths {
     private static final String DATA_INPUT = "com.seibel.distanthorizons.core.util.objects.dataStreams.DhDataInputStream";
     private static final String BLOCK_WRAPPER = "com.seibel.distanthorizons.common.wrappers.block.BlockStateWrapper_forge";
     private static final String LIGHT_STORAGE = "com.seibel.distanthorizons.core.wrapperInterfaces.chunk.ChunkLightStorage";
+    private static final String ROUGH_SURFACE = "com.seibel.distanthorizons.common.wrappers.worldGeneration.DhRoughSurfaceGenerator_forge";
     private static final String CULLER = "com.seibel.distanthorizons.core.dataObjects.transformers.FullDataOcclusionCuller";
 
     private static final String CHUNK_ACCESS = "Lnet/minecraft/world/level/chunk/ChunkAccess;";
@@ -132,7 +133,10 @@ public final class DhFastPaths {
                     req(DATA_INPUT, "create", "([BLcom/seibel/distanthorizons/api/enums/config/EDhApiDataCompressionMode;"
                                     + "Lcom/seibel/distanthorizons/core/util/objects/pooling/PhantomArrayList/PhantomArrayListCheckout;)"
                                     + "Lcom/seibel/distanthorizons/core/util/objects/dataStreams/DhDataInputStream;",
-                            "c087b67801ee3773")));
+                            "c087b67801ee3773")),
+            // Only the one call it redirects: the density stays DH's, evaluated through a per-thread copy.
+            "MixinDhRoughSurfaceDensity", List.of(
+                    req(ROUGH_SURFACE, "isNoiseSolidAtBlockPos", null, "e6df7990f00fdf5b")));
 
     private static final Map<String, byte[]> CLASS_BYTES = new ConcurrentHashMap<>();
 

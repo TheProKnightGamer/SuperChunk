@@ -15,6 +15,7 @@ import dev.superchunk.gpu.dfc.GpuVanillaParityTest;
 import dev.superchunk.gpu.noise.GpuNoiseParityTest;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.server.ServerAboutToStartEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
@@ -113,6 +114,9 @@ public final class SuperChunk {
         // C2ME chunk system is serving. Registered per world start (DH tears its levels down on
         // exit-to-title just like the GPU backend) and one-shot internally. No-op without DH.
         dev.superchunk.compat.DistantHorizonsCompat.logBootLine();
+        if (Integer.getInteger("superchunk.dh.roughBench", 0) > 0) {
+            MinecraftForge.EVENT_BUS.addListener((ServerStartedEvent e) -> dev.superchunk.compat.DhRoughSurface.runBench(e.getServer()));
+        }
         try {
             MinecraftForge.EVENT_BUS.addListener((ServerAboutToStartEvent e) ->
                     dev.superchunk.compat.DhC2meAccessor.bindIfPresent());
@@ -143,6 +147,7 @@ public final class SuperChunk {
                 dev.superchunk.worldgen.DeepSurfaceRules.report();
                 dev.superchunk.worldgen.DeepSurfacePass.report();
                 dev.superchunk.chunkio.DirectPaletteEncoder.report();
+                dev.superchunk.compat.DhRoughSurface.reportVerify();
                 if (Boolean.getBoolean("superchunk.worldgen.biomeFiddleCache.verify")) {
                     dev.superchunk.worldgen.BiomeFiddleCache.reportVerify();
                 }

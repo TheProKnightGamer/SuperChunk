@@ -19,7 +19,8 @@
     "MixinDhChunkHeightMaps",
     "MixinDhCullScope",
     "MixinDhOcclusionCuller",
-    "MixinDhDataInputStream"
+    "MixinDhDataInputStream",
+    "MixinDhRoughSurfaceDensity"
   ],
   "client": [],
   "server": [],

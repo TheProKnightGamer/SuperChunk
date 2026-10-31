@@ -1,5 +1,27 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## DISTANT HORIZONS 3.3.3, ROUGH SURFACE GENERATOR (2026-10-31) — neo has the write-up
+
+Neo `compatibility.txt` (INTEGRATED, Distant Horizons, THIRD PASS) describes it. This tree has the
+same `worldgen/ColumnMemoDensity`, `compat/DhRoughSurface` and `MixinDhRoughSurfaceDensity`.
+Differences:
+
+- **Mixin target:** `@Pseudo` on `DhRoughSurfaceGenerator_forge`, hash `e6df7990f00fdf5b` in
+  `DhFastPaths`.
+- **Remapped call target:** the redirect's `@At` has `remap = true`. DH's Forge jar calls
+  `DensityFunction.compute` by its SRG name, `m_207386_`; the refmap carries it.
+- **Benchmark:** it reflects on the `_forge` wrapper classes, and builds the dimension key with
+  `new ResourceLocation`.
+
+Tested 2026-10-31 on DH 3.3.3-1.20.1:
+- **Verify:** `-Dsuperchunk.dh.roughVerify=true` found 0 differences in 1,436,398 overworld
+  evaluations.
+- **Speed:** with `-Dsuperchunk.dh.roughBench` on 32,768 columns and 8 threads, DH's evaluation took
+  394-468 µs per column and the column memo 58-64 µs (85% less). Surface heights were identical in
+  every round.
+- **Log errors:** the 2 errors in those runs are Chunky's ("Chunky is not loaded"), because the
+  benchmark holds the server thread at startup.
+
 ## CHUNK SAVES: PALETTES ENCODED DIRECTLY (2026-10-30, latest) — neo has the write-up
 
 Neo `analysis/chunk-save-encode-2026-10-30.md` describes it. This tree has the same
