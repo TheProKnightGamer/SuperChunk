@@ -733,8 +733,8 @@ INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
     features on, DH's output is not repeatable even alone (about 14 of 1,764 sections differ between
     two DH-alone runs); SuperChunk now differs from DH alone by the same amount (11-12).
 
-    NOT DONE: DH's rough-surface generator (generatorPlan SURFACE_THEN_CHUNKS, detail levels above
-    0, needs a playing client); it is cheap per world. DH creates 400 empty placeholder chunks per
+    NOT DONE: DH's rough-surface generator (detail levels above 0); done in the THIRD PASS below,
+    which also shows it is not cheap in play. DH creates 400 empty placeholder chunks per
     16-chunk group (0.5% of CPU, about a tenth of the allocation); its structure-reference step
     reads every one of them, so they stay. The occlusion culler's algorithm and DH's sky-light bake
     are order-dependent and left alone.
@@ -787,6 +787,38 @@ INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
     DH alone: 292 cps (NeoForge), 298 (Forge). DH's own pipeline (LOD builder, heightmaps, merges,
     propagation, lighting, database encoding) went from 29.6% to 24.9% of the Java samples, and the
     level sampler's biome lookups from 5.4% to 1.1%.
+
+    2026-10-31: THIRD PASS, the rough surface generator. In play (singleplayer, DH's default plan
+    SURFACE_THEN_CHUNKS) only the full-detail LODs near the player come from real chunks; every LOD
+    below full detail, nearly all of a large render distance, comes from DhRoughSurfaceGenerator.
+    A thread dump of a playing client had 19 of 20 busy DH world-gen threads in it. For every
+    other column it walks down from the top of the world in steps of 8 until the level's final
+    density is solid, then binary-searches the surface: about 30 single-point evaluations per
+    column, each recomputing continentalness, erosion, ridges and the offset/factor/jaggedness
+    splines. (/dh pregen asks for full detail only, so the earlier measurements never ran it, and
+    DH's "chunks/sec" display is threads x 1000 / mean ms per task, not a rate.)
+      MixinDhRoughSurfaceDensity .. isNoiseSolidAtBlockPos evaluates the same compiled final density
+                                    through ColumnMemoDensity: a per-thread mapAll copy whose
+                                    flat_cache/cache_2d markers keep the last column's value, only
+                                    where ClimateColumns' analysis proves the marker's input
+                                    independent of y (14 of the overworld's 24 markers; none in the
+                                    End, which then evaluates as before). The compiled code already
+                                    asks every marker for a cached value; a vanilla marker always
+                                    misses. Everything height-dependent (3D noises, caves) runs as
+                                    compiled code. Gated by DhFastPaths on isNoiseSolidAtBlockPos.
+    Verify: -Dsuperchunk.dh.roughVerify=true also evaluates DH's own function at every point and
+    compares the bits: 0 differences in 1,436,398 + 1,407,466 overworld evaluations (two seeds) and
+    991,874 in the End.
+    MEASURED (2026-10-31, -Dsuperchunk.dh.roughBench: DH's own findSurfaceHeight through
+    reflection on 32,768 overworld columns 32 blocks apart, 8 threads, alternating, 3 rounds,
+    every surface height compared):
+      NeoForge, DH's evaluation ..................  383 / 455 / 392 us per column
+      NeoForge, column memo ......................   62 /  59 /  64 us per column (-85%)
+      Forge 1.20.1, DH's evaluation ..............  410 / 394 / 468 us per column
+      Forge 1.20.1, column memo ..................   64 /  64 /  59 us per column (-85%)
+    Forge's verify: 0 differences in 1,436,398 overworld evaluations. Surface heights identical in
+    every round, on both loaders. What remains per searched column: about 60 us of
+    surface search and 32 us of biome lookups (DH reads the biome at all four data columns).
 
 =============================================================
 DATAPACKS  (worldgen datapacks)

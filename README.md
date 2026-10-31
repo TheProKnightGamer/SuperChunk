@@ -154,7 +154,11 @@ SuperChunk also speeds up DH's own code:
 - building a chunk's LOD and heightmaps, which read every block, biome and light value one by one
   (now once per palette id, biome cell and data point);
 - the occlusion culler's opacity lookups;
-- its byte-at-a-time reads of stored sections.
+- its byte-at-a-time reads of stored sections;
+- its rough surface generator, which makes every LOD below full detail in play: it found each
+  column's surface with about 30 evaluations of the terrain's density, and now computes the
+  height-independent part of the terrain (continentalness, erosion, ridges, the terrain splines)
+  once per column, about 85% less time per column with the same surface.
 
 The climate lookups DH makes for chunks that have no biomes yet reuse their per-column values,
 depth included. Each patch of DH's code applies only to the DH code it was checked against (DH
@@ -170,7 +174,10 @@ Measured on DH 3.3.3 (`/dh pregen`, 36,864 chunks, DH's default 14 threads, RTX 
 | + SuperChunk, CPU only | 717 | 21.5 ms |
 | + SuperChunk, GPU | 925 | 16.6 ms |
 
-Before the DH patches the same runs were 599 (CPU) and 697 (GPU) chunks/sec. The LODs are
+`/dh pregen` makes full-detail LODs only. In play, DH makes most of the view from its rough surface
+generator: per column searched, 383-455 µs of DH's density evaluations became 59-64 µs (DH's own
+search on 32,768 overworld columns, the same surface height in every one). Before the DH patches
+the pregen runs above were 599 (CPU) and 697 (GPU) chunks/sec. The LODs are
 identical to what DH builds alone (compared section by section in DH's repeatable terrain-only
 mode, and chunk by chunk against DH's own LOD builder in a verify mode). That comparison also found two places where SuperChunk's terrain differed from vanilla,
 both fixed: aquifer water at cave edges (all worlds) and a stale biome memo in DH's region.
