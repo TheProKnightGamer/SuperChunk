@@ -18,6 +18,7 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
+import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import org.slf4j.Logger;
 
@@ -88,6 +89,9 @@ public final class SuperChunk {
         // C2ME chunk system is serving. Registered per world start (DH tears its levels down on
         // exit-to-title just like the GPU backend) and one-shot internally. No-op without DH.
         dev.superchunk.compat.DistantHorizonsCompat.logBootLine();
+        if (Integer.getInteger("superchunk.dh.roughBench", 0) > 0) {
+            NeoForge.EVENT_BUS.addListener((ServerStartedEvent e) -> dev.superchunk.compat.DhRoughSurface.runBench(e.getServer()));
+        }
         try {
             NeoForge.EVENT_BUS.addListener((ServerAboutToStartEvent e) ->
                     dev.superchunk.compat.DhC2meAccessor.bindIfPresent());
@@ -120,6 +124,7 @@ public final class SuperChunk {
                 dev.superchunk.worldgen.DeepSurfaceRules.report();
                 dev.superchunk.worldgen.DeepSurfacePass.report();
                 dev.superchunk.chunkio.DirectPaletteEncoder.report();
+                dev.superchunk.compat.DhRoughSurface.reportVerify();
                 if (Boolean.getBoolean("superchunk.worldgen.biomeFiddleCache.verify")) {
                     dev.superchunk.worldgen.BiomeFiddleCache.reportVerify();
                 }

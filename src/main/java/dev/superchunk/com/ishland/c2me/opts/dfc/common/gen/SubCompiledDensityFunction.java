@@ -299,4 +299,9 @@ public class SubCompiledDensityFunction implements DensityFunction {
     protected DensityFunction getFallback() {
         return this.blendingFallback != null ? this.blendingFallback.get() : null;
     }
+
+    /** SuperChunk: the vanilla function this compiles (what blending falls back to), or null. */
+    public DensityFunction superchunk$fallback() {
+        return this.getFallback();
+    }
 }

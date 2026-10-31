@@ -362,7 +362,7 @@ public final class ClimateColumns {
     }
 
     /** Whether a vanilla density function's value can depend on y (see the class comment). */
-    private static final class Walk {
+    static final class Walk {
         private final Map<DensityFunction, Boolean> known = new IdentityHashMap<>();
 
         boolean yIndependent(DensityFunction df) {
@@ -415,6 +415,11 @@ public final class ClimateColumns {
             }
             if (df instanceof DensityFunctions.Marker f) {
                 return List.of(f.wrapped());
+            }
+            // A compiled function computes what its vanilla source does (DFC); read that source.
+            if (df instanceof dev.superchunk.com.ishland.c2me.opts.dfc.common.gen.SubCompiledDensityFunction f) {
+                DensityFunction source = f.superchunk$fallback();
+                return source == null ? null : List.of(source);
             }
             if (df instanceof DensityFunctions.HolderHolder f) {
                 return List.of(f.function().value());
