@@ -49,6 +49,18 @@ minecraft {
 
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
+// Compile-only stand-ins for the Distant Horizons types that the DH patches name
+// (mixin/compat/MixinDh*). They declare only the members those patches use. Never packaged: the
+// jars take sourceSets.main.output alone, and in the game DH's own classes are the ones loaded.
+sourceSets {
+    dhStubs {
+        java { srcDir 'src/dhStubs/java' }
+    }
+}
+sourceSets.main.compileClasspath += sourceSets.dhStubs.output
+// The stubs name Minecraft and fastutil types (ChunkAccess, LongArrayList).
+sourceSets.dhStubs.compileClasspath += configurations.compileClasspath
+
 // Nested-jar bundling (MixinExtras now; lwjgl-opencl in the runtime milestone).
 jarJar.enable()
 

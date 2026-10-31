@@ -49,6 +49,33 @@ public abstract class MixinClimateSampler implements dev.superchunk.worldgen.Cli
         this.superchunk$columnMask = mask;
     }
 
+    /** A level's own sampler (set by DFC's RandomState): column reuse also outside biome fill. */
+    @org.spongepowered.asm.mixin.Unique
+    private net.minecraft.world.level.levelgen.NoiseRouter superchunk$levelRouter;
+
+    /** Its mask once decided, with bit 6 set (0 = not decided yet). */
+    @org.spongepowered.asm.mixin.Unique
+    private byte superchunk$levelMask;
+
+    @Override
+    public void superchunk$setLevelRouter(net.minecraft.world.level.levelgen.NoiseRouter router) {
+        this.superchunk$levelRouter = router;
+    }
+
+    /** A level sampler's depth split (set by DFC's RandomState from the vanilla depth), or null. */
+    @org.spongepowered.asm.mixin.Unique
+    private dev.superchunk.worldgen.ClimateColumns.DepthSplit superchunk$depthSplit;
+
+    @Override
+    public dev.superchunk.worldgen.ClimateColumns.DepthSplit superchunk$depthSplit() {
+        return this.superchunk$depthSplit;
+    }
+
+    @Override
+    public void superchunk$setDepthSplit(dev.superchunk.worldgen.ClimateColumns.DepthSplit split) {
+        this.superchunk$depthSplit = split;
+    }
+
     /** Real-DF correctness check: compare each GPU-served sample to vanilla compute(). Off by default. */
     private static final boolean superchunk$verify = Boolean.getBoolean("superchunk.biome.verify");
 
@@ -119,6 +146,22 @@ public abstract class MixinClimateSampler implements dev.superchunk.worldgen.Cli
             Climate.TargetPoint target = dev.superchunk.worldgen.ClimateColumns.sample((Climate.Sampler) (Object) this, mask, x, y, z);
             if (target != null) {
                 cir.setReturnValue(target);
+            }
+            return;
+        }
+        if (this.superchunk$levelRouter != null) {
+            byte level = this.superchunk$levelMask;
+            if (level == 0) {
+                int decided = dev.superchunk.worldgen.ClimateColumns.levelMask(this.superchunk$levelRouter);
+                if (decided < 0) {
+                    return;
+                }
+                level = (byte) (decided | 0x40);
+                this.superchunk$levelMask = level;
+            }
+            if ((level & 0x3F) != 0) {
+                cir.setReturnValue(dev.superchunk.worldgen.ClimateColumns.sampleAnywhere(
+                        (Climate.Sampler) (Object) this, level & 0x3F, x, y, z));
             }
         }
     }

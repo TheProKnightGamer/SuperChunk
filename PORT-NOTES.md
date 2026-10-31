@@ -1,5 +1,156 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## DISTANT HORIZONS 3.3.3, SECOND PASS (2026-10-30, later) — neo has the write-up
+
+Neo `compatibility.txt` (INTEGRATED, Distant Horizons, SECOND PASS) describes it. This tree has the same:
+
+- **New DH patches:** `MixinDhLodBuilderRuns`, `MixinDhChunkHeightMaps`, `MixinDhCullScope` and
+  `MixinDhOcclusionCuller`, each `@Pseudo`, on the `_forge` classes (`ChunkWrapper_forge`,
+  `BlockStateWrapper_forge`, `BiomeWrapper_forge`).
+  - The Minecraft calls in their bodies are reobfuscated as usual.
+  - Their own `_forge` hashes are in `DhFastPaths`; the culler and merge methods hash the same as neo.
+- **Stream patch fix:** `MixinDhDataInputStream` names the `byte[]` overload of `create`. Before, it
+  matched nothing.
+- **Climate:** `ClimateColumns.DepthSplit` and the 16-column level-sampler memo.
+- **Stubs:** they now name Minecraft and fastutil types. `build.gradle` gives the `dhStubs` source set
+  the main compile classpath.
+
+Tested 2026-10-30 on DH 3.3.3:
+- **Verify modes:** `lodVerify` found 0 differences in 12,288 chunks and 32,768 heightmaps. Climate
+  verify found 0 in 29.6M targets.
+- **Parity:** SURFACE mode at r64 matched DH alone in every interior section: 676 of 676 before the
+  culler patch, and 702 of 702 with it.
+- **Patches applied:** the mixin export shows every patch in place, the stream redirects included.
+- **Speed** (r96, FEATURES, first pass vs now, before the culler patch): 654 / 665 cps (23.5 ms per
+  chunk) became 726 / 720 cps (21.7 ms).
+
+## DISTANT HORIZONS 3.3.3 (2026-10-30) — neo has the method and the full write-up
+
+Neo `compatibility.txt` (INTEGRATED, Distant Horizons; FIXED, the first two entries) describes the
+work. This tree has the same changes:
+
+- **DH patches:** the four patches of DH's own code (`mixin/compat/MixinDh{RegionFastChunk,
+  FullDataSourceRemap,LodBuilderBiome,DataInputStream}`), gated by `compat/DhFastPaths`.
+  - DH's Forge classes are the `_forge` copies, and they keep Minecraft's SRG names for the methods
+    they override. So the region patch overwrites `m_6325_` (`getChunk(int, int)`) and shadows
+    `m_46819_` with `remap = false`. Reobf maps the Minecraft calls in its body as usual.
+  - The core classes hash the same as on neo; the `_forge` ones have their own hashes.
+  - All four are `@Pseudo`: the 0.8.7 annotation processor otherwise fails the build on a target
+    that is not on the compile classpath.
+- **Stubs:** compile-only stand-ins for the DH types sit in `src/dhStubs` (a source set that is
+  never packaged).
+- **Aquifer order:** the aquifer neighbour loops (CPU mixin, candidate memo, `aquifer.cl`,
+  `AquiferRef`, `AquiferKernelSelfTest`) use vanilla's order, x, y, z. 1.20.1 vanilla has that order too.
+- **Biome memo, different from neo:** it keeps only answers from chunks already at BIOMES in every
+  region, vanilla's included. On 1.20.1 a region's chunk below BIOMES, or outside the region, gets the
+  biome source's answer, and other workers can fill its biomes while the region is in use.
+  Unsettled uniform cells are cached as MIXED.
+- **Climate reuse:** `ClimateColumns.sampleAnywhere`, the level sampler's per-column reuse.
+
+Tested 2026-10-30, all on DH 3.3.3:
+- **Parity:** DH SURFACE mode at r64 gave 676 of 676 interior sections identical to DH alone.
+- **DH speed** (r96, FEATURES): before 24.17 / 24.49 ms per chunk (650 / 635 cps); after 22.39 /
+  23.06 ms (702 / 680 cps). DH alone: 298 cps.
+- **Server-path cost:** a Chunky r1024 pregen showed none (22.55 vs 22.06, 22.91 vs 22.99 ms per
+  chunk; 0 errors).
+
+## STATIC MIXIN AUDIT (2026-10-29) — neo has the shared part
+
+Both jars were matched against Modrinth's top 1,000 mods for their loader (989 with a file): every
+mixin config, @Overwrite and injector read with ASM, plus a constant-pool search for mods that look
+for a bundled mod by id or class name, plus each @Overwrite compared with the loader-patched
+original for dropped event hooks. Method and the full list: neo `compatibility.txt`, STATIC AUDIT.
+
+- **Shared with neo:** `compat/ModernFixCompat` turns off the four ModernFix options ModernFix turns
+  off for C2ME (`paper_chunk_patches` exists only in the 1.20.1 build: it patches
+  `ChunkMap.prepareAccessibleChunk`/`schedule`). `compat/MixinSquaredBridge` lets MixinSquared
+  cancellers that name a bundled mixin cancel our copy; AsyncParticles' 1.20.1 build names the
+  `me.jellysquid` package, which the bridge also asks about. Moonlight Lib bundles MixinSquared
+  0.1.1, whose registrar has the two-argument `shouldCancel`; the bridge uses whichever exists.
+  `mixin.ai.pathing` is off with Create: Copycats+ or Create: Connected installed (their
+  `PathNodeDefaults` mixin names Radium's class).
+- **Ticket-level event:** the re-fire in `updateChunkScheduling` now skips the case Forge's patch
+  returns early on (neither level loaded); it fired for every call before.
+- **Forge only, Spelunkery:** its channel flow hooks `FlowingFluid.getSpread`, which
+  `mixin.block.fluid.flow` returns early from. Radium has no fluid-flow mixin, so Spelunkery's
+  1.20.1 build declares no override (its 1.21.1 build turns the option off for Lithium).
+  `ForgeMixinOverrides.NEWER_LITHIUM_OPT_OUTS` turns it off for it. Spelunkery was the only mod with
+  an override on 1.21.1 missing on 1.20.1 for an option this port has.
+- **Forge only, FramedBlocks:** a framed block camouflaged as a light source reads its emission
+  from its block entity. Starlight (and the bundled ScalableLux) ask from light threads with the
+  level as getter, where 1.20.1's `Level.getBlockEntity` returns null, so FramedBlocks reads the
+  chunk directly when `StarlightCompat` finds the `starlight` mod. `mixin/compat/
+  MixinFramedBlocksStarlightCompat` sets the same flag (`@Pseudo`, `require = 0`, the field set
+  through a lookup inside the merged handler, so a changed FramedBlocks leaves it inert).
+- **Checked, left:** Physics Mod's `StarLightEngine` hooks target Starlight's own package and miss
+  the relocated engine (client-side light updates for its physics objects).
+- **Tested** (harness, r256 pregen): ModernFix + Moonlight (MixinSquared 0.1.1) + Spelunkery +
+  FramedBlocks + Create: Copycats+ (+ Create 6.0.8) boots and generates; the log shows ModernFix's four
+  options set, `mixin.ai.pathing` off for copycats and `mixin.block.fluid.flow` for spelunkery; the
+  exported `StarlightCompat.init` calls the shim and `updateChunkScheduling` has the guard. Entity
+  unload/reload passes. The MixinSquared fixture canceller (Biome Replacer's 0.3.3) cancels the bundled
+  `entity_by_type` mixin and the server still generates. Pehkui boots with its `ItemEntity` hook applied.
+  The only errors were Spelunkery's own Farmer's Delight recipes (Farmer's Delight not installed).
+
+## VALKYRIEN SKIES (#27) AND CBC: MODERN WARFARE (2026-10-26) — neo has the first two
+
+All three are one Mixin rule: an injector other than HEAD/RETURN/TAIL may not target a method that a
+mixin of the same or higher priority overwrote, and the whole class then fails to load.
+
+- **`processUnloads` (VS 2.4.11, GitHub #27).** VS `@ModifyArg`s the `removeIf` call in
+  `PersistentEntitySectionManager.processUnloads`; C2ME's `@Overwrite` (priority 1100) crashed the
+  server at world load. `fixes.MixinServerEntityManager` now `@WrapOperation`s that call with the same
+  unloading (the linked set, in order, each chunk removed whatever the unload returns), through the
+  predicate it is given. The call takes fastutil's `LongPredicate` in the loader's patched class, which
+  is the one that runs; the vanilla jar's takes `java.util.function`'s.
+- **`lithium:options` dotted keys (VS).** VS declares `["lithium:options"] mixin.ai.poi = false`. TOML
+  reads the dotted key as nested tables, so `ForgeMixinOverrides` rejected it as a non-boolean `mixin`,
+  the bundled Lithium kept `ai.poi`, and VS's POI mixin failed against its `getInRange` overwrite.
+  Nested tables are now joined back into the option name. (In the reporter's pack Radium made the
+  bundled Lithium stand down, so only the first fix applied there.)
+- **`getPlayers` (CBC: Modern Warfare 0.0.6c, and SecurityCraft 1.20.1 by its code).** Both hook the
+  `getLastSectionPos()` call in `ChunkMap.getPlayers`; VMP's overwrite at 1050 crashed the server when
+  `ChunkMap` loaded. The overwrite moved to its own mixin, `MixinChunkMapGetPlayers`, at priority 900,
+  so the hooks apply to VMP's body, which makes the same call. SecurityCraft needs Forge 47.3.30+ and
+  the harness has 47.3.0, so it was not booted. **Forge only:** neo keeps VMP's overwrite at 1050 on
+  purpose. Its only known beneficiary there is CBC Neo Warfare, a port made against the original
+  authors' wishes, so neo does not support it (see neo `compatibility.txt`, INCOMPATIBLE).
+- **Tested** (harness, r256 pregen): the pushed jar crashes with VS 2.4.11 + Kotlin for Forge 4.12.0 and
+  with CBC: Modern Warfare 0.0.6c + Create 0.5.1.j + CBC 5.8.2; this one boots and generates with each.
+  Exported classes show VS's HEAD inject, VS's `@ModifyArg` and our wrap together in `processUnloads`,
+  and CBC's hook after `getLastSectionPos()` in VMP's `getPlayers`. Entity unload: three armor stands in
+  a force-loaded chunk leave the world when it is released and come back from disk when it is loaded
+  again, on the pushed jar, this one, and this one with VS.
+
+## SURFACE BUILDING, SECOND PASS (2026-10-24) — same as neo
+
+The deep part of each column is done a section at a time after the last column (`DeepSurfacePass`,
+which swaps stone's palette entry for deepslate where a whole section answers deepslate), the deep
+rule table answers inside vertical gradients' random bands, and a block reads only as much stone
+below it as the ceiling checks can tell apart (`CeilingDepth`). Write-up in neo's
+`analysis/surface-2026-10-24.md`, "Second pass".
+
+- Copied verbatim from neo: `DeepSurfacePass` (apart from `getStatus()` for 1.21.1's
+  `getPersistedStatus()`), `CeilingDepth`, `DeepSurfaceRules`, `SurfaceTiming`,
+  `MixinSurfaceSystemFast`, `MixinSurfaceDeepRules`, `MixinSurfaceContextDeep`,
+  `MixinProbeBiomeLookup`, `ISurfaceGradientSourceAccess` (now with `randomName`),
+  `ISurfaceRulesContextAccess` (now with `surfaceDepth`) and the new `ISurfaceStoneDepthAccess`.
+- AT: `PalettedContainer$Data`'s constructor. The recompiled game jar makes it public with the
+  class, but the runtime transform does not, so without the line the swap throws
+  `IllegalAccessError` (seen on neo).
+- **SRG names** for the writes a swap bypasses. `SRG_NAMES` values may now list one name per
+  overload, comma-separated, and `foreignHook` checks each:
+  - `LevelChunkSection#setBlockState` `m_62986_,m_62991_`;
+  - `PalettedContainer#getAndSet` `m_63091_,m_63096_`;
+  - `PalettedContainer#getAndSetUnchecked` `m_63127_`;
+  - `PalettedContainer#set` `m_156470_,m_63132_`.
+- `MixinTargetScan.foreignMixinIfLoaded`, as neo: the old check stopped at the first class never
+  loaded, so a foreign mixin on a class listed after it went unseen.
+- **Gate:** `surfaceHash`, GPU off, r512 overworld plus r192 nether and end, the pushed forge jar with
+  everything off vs this one with everything on: 6,551 chunks, 0 mismatches.
+  `surfaceGradientRandom.verify`: 16.1M draws, 0. Surface 2,762 -> 1,597 us per chunk against the
+  pushed jar (two concurrent pairs).
+
 ## FLUID FILTER SAVE RACE (2026-10-24) — same as neo
 
 C2ME's `ServerBlockTicking.upgradeToThis` ran `filterFluidTicks` on the worldgen thread, and it
