@@ -222,7 +222,10 @@ public final class MixinTargetScan {
             Map.entry("net.minecraft.world.level.chunk.LevelChunkSection#setBlockState", "m_62986_,m_62991_"),
             Map.entry("net.minecraft.world.level.chunk.PalettedContainer#getAndSet", "m_63091_,m_63096_"),
             Map.entry("net.minecraft.world.level.chunk.PalettedContainer#getAndSetUnchecked", "m_63127_"),
-            Map.entry("net.minecraft.world.level.chunk.PalettedContainer#set", "m_156470_,m_63132_"));
+            Map.entry("net.minecraft.world.level.chunk.PalettedContainer#set", "m_156470_,m_63132_"),
+            Map.entry("net.minecraft.world.level.chunk.PalettedContainer#pack", "m_188064_"),
+            Map.entry("net.minecraft.world.level.chunk.HashMapPalette#idFor", "m_6796_"),
+            Map.entry("net.minecraft.world.level.chunk.HashMapPalette#getEntries", "m_187917_"));
 
     /** A getter ({@code [aload] getfield|getstatic; return}) or invoker ({@code loads; invoke; return}). */
     static boolean exposesOnly(MethodNode method) {

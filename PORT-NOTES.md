@@ -1,5 +1,27 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## CHUNK SAVES: PALETTES ENCODED DIRECTLY (2026-10-30, latest) — neo has the write-up
+
+Neo `analysis/chunk-save-encode-2026-10-30.md` describes it. This tree has the same
+`chunkio/DirectPaletteEncoder`, `MixinChunkSerializerDirectEncode` and `MixinBlockStateEncodedEntry`.
+Differences:
+
+- **Biome names:** 1.20.1's `holderByNameCodec` writes `unwrapKey()` and looks the holder's lifecycle
+  up through `value()`. So only a bound `Holder.Reference` of the same registry takes the direct way;
+  anything else goes to the codec.
+- **Same key order on DFU 6.0.8:** the dispatch codec adds `Properties` before `Name`, and a pair codec
+  encodes its second half first.
+- **Hook gate:** `MixinTargetScan.SRG_NAMES` gains `PalettedContainer#pack` (`m_188064_`),
+  `HashMapPalette#idFor` (`m_6796_`) and `#getEntries` (`m_187917_`). The probe mixin covers
+  `HashMapPalette`.
+
+Tested 2026-10-30 with `-Dsuperchunk.io.directPaletteEncode.verify=true`, which compares the written
+bytes with the codec's. The runs covered the r1024 overworld plus an r384 nether and end:
+- **GPU off:** 801,200 containers, 0 mismatches.
+- **GPU on:** 1,161,872 containers, 0 mismatches.
+
+Both runs had 0 errors, and no container fell back to the codec.
+
 ## DISTANT HORIZONS 3.3.3, SECOND PASS (2026-10-30, later) — neo has the write-up
 
 Neo `compatibility.txt` (INTEGRATED, Distant Horizons, SECOND PASS) describes it. This tree has the same:

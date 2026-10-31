@@ -81,6 +81,8 @@ import org.spongepowered.asm.mixin.Mixin;
         "net.minecraft.world.level.levelgen.placement.RandomOffsetPlacement",
         "net.minecraft.world.level.levelgen.Heightmap",
         "net.minecraft.world.level.chunk.PalettedContainer",
+        // what the direct palette encoder skips: PalettedContainer.pack's compaction palette
+        "net.minecraft.world.level.chunk.HashMapPalette",
         // the block-fill path the GPU compact-ids consume replaces, and the ore-vein RNG consumer
         "net.minecraft.world.level.levelgen.NoiseChunk",
         "net.minecraft.world.level.levelgen.Beardifier",

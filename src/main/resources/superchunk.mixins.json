@@ -28,6 +28,8 @@
     "MixinChunkMapClimateDimLabel",
     "MixinChunkMapPredictiveGen",
     "MixinChunkSerializerFastPalette",
+    "MixinChunkSerializerDirectEncode",
+    "MixinBlockStateEncodedEntry",
     "MixinClimateParameterListFlat",
     "MixinClimateRTreeLeaf",
     "MixinClimateSampler",
