@@ -74,6 +74,7 @@
     "MixinXoroshiroReseedInPlace",
     "compat.MixinSkeinCommands",
     "compat.MixinByePregenRawSave",
+    "compat.MixinFramedBlocksStarlightCompat",
     "compat.MixinSkeinConfig"
   ],
   "client": [

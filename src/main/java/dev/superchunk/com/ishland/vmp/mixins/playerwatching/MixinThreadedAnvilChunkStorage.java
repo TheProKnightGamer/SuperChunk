@@ -1,6 +1,5 @@
 package dev.superchunk.com.ishland.vmp.mixins.playerwatching;
 
-import com.google.common.collect.ImmutableList;
 import dev.superchunk.com.ishland.vmp.common.chunkwatching.AreaPlayerChunkWatchingManager;
 import dev.superchunk.com.ishland.vmp.common.playerwatching.TACSExtension;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
@@ -117,25 +116,7 @@ public abstract class MixinThreadedAnvilChunkStorage implements TACSExtension {
         return Collections.emptyList();
     }
 
-    /**
-     * @author ishland
-     * @reason use array for iteration &amp; use squares as cylinders are expensive
-     */
-    @Overwrite
-    public List<ServerPlayer> getPlayers(ChunkPos chunkPos, boolean onlyOnWatchDistanceEdge) {
-        // NOTE: no chunkSender.isPending clause — the API is 1.20.2+; 1.20.1 has no pending set.
-        final Object[] set = this.areaPlayerChunkWatchingManager.getPlayersWatchingChunkArray(chunkPos.toLong());
-        final ImmutableList.Builder<ServerPlayer> builder = ImmutableList.builder();
-        for (Object __player : set) {
-            if (__player instanceof ServerPlayer serverPlayer) {
-                final SectionPos watched = serverPlayer.getLastSectionPos();
-                final int cheb = Math.max(Math.abs(watched.x() - chunkPos.x), Math.abs(watched.z() - chunkPos.z));
-                if (cheb > this.viewDistance) continue;
-                if (!onlyOnWatchDistanceEdge || cheb == this.viewDistance) builder.add(serverPlayer);
-            }
-        }
-        return builder.build();
-    }
+    // getPlayers (VMP's overwrite) is in MixinChunkMapGetPlayers, below the default priority so other mods can hook it.
 
     /**
      * @author ishland

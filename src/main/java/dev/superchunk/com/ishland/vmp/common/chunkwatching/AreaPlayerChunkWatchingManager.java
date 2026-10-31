@@ -128,7 +128,7 @@ public class AreaPlayerChunkWatchingManager {
      * {@code ChunkTrackingView}/{@code ChunkFilter}, so a watched radius of
      * {@code watchDistance + 1} is harmless there. This port has no tracking view — the area map
      * is the sole send driver, and the two send paths both stop at {@code watchDistance}:
-     * {@code ChunkMap.getPlayers()} (the MixinThreadedAnvilChunkStorage overwrite) drops watchers
+     * {@code ChunkMap.getPlayers()} (the MixinChunkMapGetPlayers overwrite) drops watchers
      * whose chebyshev distance exceeds {@code ChunkMap.viewDistance}, and it is what the
      * CHUNK_SENDING seat asks for its watcher list. A ring watched beyond that filter is therefore
      * unreachable: the area-map add fires {@code updateChunkTracking} while the chunk is still

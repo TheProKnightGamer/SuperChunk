@@ -55,7 +55,10 @@ public class MixinThreadedAnvilChunkStorage implements IChunkSystemAccess {
         // FORGE PATCH re-fire (src1201 ChunkMap:401): the patched vanilla body posts
         // ChunkTicketLevelUpdatedEvent via this exact factory call; fire with the holder the
         // chunk system returned (post vanillaIf$setLevel), matching the patch's post-update fire.
-        net.minecraftforge.event.ForgeEventFactory.fireChunkTicketLevelUpdated(this.level, pos, oldLevel, newLevel, result);
+        // Vanilla returns before the fire when neither level is a loaded one; so does this.
+        if (net.minecraft.server.level.ChunkLevel.isLoaded(oldLevel) || net.minecraft.server.level.ChunkLevel.isLoaded(newLevel)) {
+            net.minecraftforge.event.ForgeEventFactory.fireChunkTicketLevelUpdated(this.level, pos, oldLevel, newLevel, result);
+        }
         return result;
     }
 

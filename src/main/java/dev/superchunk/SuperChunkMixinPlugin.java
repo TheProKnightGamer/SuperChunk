@@ -63,6 +63,9 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         PlayerLatency.logBootLine();
         // And for predictive chunk generation (player.predictiveGen): one boot line when ON.
         PredictiveGen.logBootLine();
+        // Other mods' compat rules that look for a bundled mod by id or by class name.
+        dev.superchunk.compat.ModernFixCompat.apply();
+        dev.superchunk.compat.MixinSquaredBridge.register();
     }
 
     @Override
@@ -105,6 +108,10 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         if (mixinClassName.startsWith("dev.superchunk.mixin.compat.MixinSkein")) {
             // Each Skein hook names every one of Skein's package roots; only one exists in any build.
             return dev.superchunk.compat.OptionalTargets.present(targetClassName);
+        }
+        if (mixinClassName.endsWith(".MixinFramedBlocksStarlightCompat")) {
+            return Boolean.parseBoolean(System.getProperty("superchunk.compat.framedBlocksLight", "true"))
+                    && dev.superchunk.compat.OptionalTargets.present(targetClassName);
         }
         return true;
     }
