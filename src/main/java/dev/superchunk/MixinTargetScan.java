@@ -127,6 +127,20 @@ public final class MixinTargetScan {
     }
 
     /**
+     * The first foreign mixin among those of {@code classNames} that were loaded. For a class the probe applies to,
+     * "not scanned" means it was never loaded; the plain {@link #foreignMixin(String...)} stops there instead.
+     */
+    public static String foreignMixinIfLoaded(String... classNames) {
+        for (String name : classNames) {
+            String foreign = foreignMixin(name);
+            if (foreign != null && !foreign.endsWith(" was not scanned>")) {
+                return foreign;
+            }
+        }
+        return null;
+    }
+
+    /**
      * For {@code "pkg.Class#method"} names (every overload of the method): {@code null} when each
      * class was scanned and none of the methods is hooked by another mod; otherwise the first
      * foreign mixin found, or a reason the class was not scanned.

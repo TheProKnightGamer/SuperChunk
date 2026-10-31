@@ -44,6 +44,9 @@ public class MixinNoiseConfig {
         }
         // SuperChunk: biome fill's per-column climate reuse, decided from the vanilla router too.
         final byte superchunk$climateColumns = dev.superchunk.worldgen.ClimateColumns.decide(this.router);
+        // SuperChunk: the level sampler's depth as gradient + per-column offset, from its vanilla form.
+        final dev.superchunk.worldgen.ClimateColumns.DepthSplit superchunk$depthSplit =
+                dev.superchunk.worldgen.ClimateColumns.splitDepth(this.sampler.depth());
         Reference2ReferenceMap<DensityFunction, DensityFunction> tempCache = new Reference2ReferenceOpenHashMap<>();
         // SuperChunk GPU (kernel merge): batch THIS router's DF kernels so they emit into ONE
         // OpenCL program (shared headers compiled once) built at endBatch, instead of one program
@@ -81,6 +84,9 @@ public class MixinNoiseConfig {
             dev.superchunk.gpu.dfc.GpuDfcHook.endBatch();
         }
         dev.superchunk.worldgen.ClimateColumns.register(this.router, superchunk$climateColumns);
+        // The level's own sampler: the same functions, compiled; reused per column wherever it is asked.
+        ((dev.superchunk.worldgen.ClimateColumns.Tagged) (Object) this.sampler).superchunk$setLevelRouter(this.router);
+        ((dev.superchunk.worldgen.ClimateColumns.Tagged) (Object) this.sampler).superchunk$setDepthSplit(superchunk$depthSplit);
         stopwatch.stop();
         org.slf4j.LoggerFactory.getLogger("SuperChunk-DFC").info("Density function compilation finished in {}", stopwatch);
 

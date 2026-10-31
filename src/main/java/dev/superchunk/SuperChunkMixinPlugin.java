@@ -57,6 +57,9 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         PlayerLatency.logBootLine();
         // And for predictive chunk generation (player.predictiveGen): one boot line when ON.
         PredictiveGen.logBootLine();
+        // Other mods' compat rules that look for a bundled mod by id or by class name.
+        dev.superchunk.compat.ModernFixCompat.apply();
+        dev.superchunk.compat.MixinSquaredBridge.register();
     }
 
     @Override

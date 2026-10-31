@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.neoforge;
 
+import com.electronwill.nightconfig.core.UnmodifiableConfig;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.config.Option;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.services.PlatformMixinOverrides;
 import net.neoforged.fml.loading.FMLLoader;
@@ -25,6 +26,19 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
     private static final boolean VOXY_COMPAT =
             Boolean.parseBoolean(System.getProperty("superchunk.compat.voxy", "true"));
 
+    /**
+     * Create: Copycats+ and Create: Connected make mobs path over their copycat blocks as over the block they copy:
+     * each wraps the {@code getBlock()} call in vanilla's {@code WalkNodeEvaluator} path-type lookup, and in Lithium's
+     * {@code PathNodeDefaults.getNodeType}, which {@code mixin.ai.pathing} answers from instead. That second mixin
+     * names the class by its old Lithium package ({@code me.jellysquid.mods.lithium.common.ai.pathing.PathNodeDefaults});
+     * this copy lives under {@code dev.superchunk.*}, so it never applied, and the cache gave copycat blocks the wrong
+     * path type.
+     * Without the cache, vanilla's lookup runs with their wrap in it. Kill switch:
+     * {@code -Dsuperchunk.compat.copycatPathing=false}.
+     */
+    private static final boolean COPYCAT_PATHING_COMPAT =
+            Boolean.parseBoolean(System.getProperty("superchunk.compat.copycatPathing", "true"));
+
     @Override
     public void applyLithiumCompat(Map<String, Option> options) {
 
@@ -36,6 +50,9 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
         for (ModInfo meta : FMLLoader.getLoadingModList().getMods()) {
             if (VOXY_COMPAT && "voxy".equals(meta.getModId())) {
                 list.add(new MixinOverride(meta.getModId(), "mixin.chunk.palette", false));
+            }
+            if (COPYCAT_PATHING_COMPAT && ("copycats".equals(meta.getModId()) || "create_connected".equals(meta.getModId()))) {
+                list.add(new MixinOverride(meta.getModId(), "mixin.ai.pathing", false));
             }
             meta.getOwningFile().getConfigElement(JSON_KEY_LITHIUM_OPTIONS).ifPresent(override -> addOverrides(list, meta, override));
             // Also read the key from the mod's own [[mods]] entry. GUHAO's VIX declares it there to
@@ -50,16 +67,31 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
 
     private static void addOverrides(List<MixinOverride> list, ModInfo meta, Object override) {
         if (override instanceof Map<?, ?> overrides && overrides.keySet().stream().allMatch(key -> key instanceof String)) {
-            overrides.forEach((key, value) -> {
-                if (!(value instanceof Boolean) || !(key instanceof String)) {
-                    System.out.printf("[Lithium] Mod '%s' attempted to override option '%s' with an invalid value, ignoring", meta.getModId(), key);
-                    return;
-                }
-
-                list.add(new MixinOverride(meta.getModId(), (String) key, (Boolean) value));
-            });
+            addOverrides(list, meta, "", overrides);
         } else {
             System.out.printf("[Lithium] '%s' contains invalid Lithium option overrides, ignoring", meta.getModId());
         }
+    }
+
+    /**
+     * TOML reads a dotted key as nested tables, so Valkyrien Skies' {@code ["lithium:options"] mixin.ai.poi = false}
+     * arrives as {@code mixin -> ai -> poi}. Rejected as a non-boolean {@code mixin}, its override was lost, and VS's
+     * POI mixin then failed against {@code mixin.ai.poi}'s overwrite of {@code PoiManager.getInRange} (#27). The path
+     * is joined back into the option name, which a flat quoted key ({@code "mixin.ai.poi" = false}) already is.
+     */
+    private static void addOverrides(List<MixinOverride> list, ModInfo meta, String prefix, Map<?, ?> overrides) {
+        overrides.forEach((key, value) -> {
+            Object entry = value instanceof UnmodifiableConfig table ? table.valueMap() : value;
+            if (entry instanceof Map<?, ?> nested && key instanceof String) {
+                addOverrides(list, meta, prefix + key + ".", nested);
+                return;
+            }
+            if (!(entry instanceof Boolean) || !(key instanceof String)) {
+                System.out.printf("[Lithium] Mod '%s' attempted to override option '%s' with an invalid value, ignoring", meta.getModId(), prefix + key);
+                return;
+            }
+
+            list.add(new MixinOverride(meta.getModId(), prefix + key, (Boolean) entry));
+        });
     }
 }

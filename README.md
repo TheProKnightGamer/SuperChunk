@@ -103,8 +103,8 @@ for the tested versions and limitations.
 - **FlowSched** — the async scheduler C2ME and ScalableLux build on
 - **`dev.superchunk.gpu`** — original OpenCL worldgen offload
 - **`dev.superchunk.worldgen`** — CPU worldgen shortcuts that keep vanilla's output; ore placement
-  is about a third cheaper and surface building about a quarter, with the same blocks
-  (`analysis/ores-2026-10-24.md`, `analysis/surface-2026-10-24.md`)
+  is about a third cheaper and surface building takes less than half its old time, with the same
+  blocks (`analysis/ores-2026-10-24.md`, `analysis/surface-2026-10-24.md`)
 
 ## How the GPU path works
 
@@ -146,27 +146,36 @@ generator (`SURFACE`/`FEATURES`, the dedicated-server default) each generation
 group is prefetched through the cross-chunk batcher, which also gets those
 chunks the GPU-computed block ids they previously could not reach.
 
-What that is worth, measured over the same 16,641-chunk area (`/dh pregen`,
-24 DH threads, RTX 3070, 2026-08-14):
+SuperChunk also speeds up DH's own code:
+- its world-gen region's lock on every block read;
+- its id-map rebuild for each merged chunk;
+- building a chunk's LOD and heightmaps, which read every block, biome and light value one by one
+  (now once per palette id, biome cell and data point);
+- the occlusion culler's opacity lookups;
+- its byte-at-a-time reads of stored sections.
 
-| DH configuration | chunks/sec |
-|---|---|
-| DH alone, no SuperChunk | 373 |
-| + SuperChunk, GPU on, seam off | 390 |
-| + SuperChunk, CPU only | 490 |
-| + SuperChunk, GPU on, seam on | 495 |
+The climate lookups DH makes for chunks that have no biomes yet reuse their per-column values,
+depth included. Each patch of DH's code applies only to the DH code it was checked against (DH
+3.3.3, matched by a hash of the methods it relies on), so a DH update turns a patch off instead of
+breaking DH.
 
-Read that carefully: the GPU offload does **not** speed DH's own generator up —
-DH is not bottlenecked on density noise. What it did was *cost* DH ~20% (490 →
-390), because DH's chunks paid per-chunk GPU dispatches and never received the
-batched block ids. The seam removes that tax. DH's overall +33% over vanilla is
-the CPU-side merge (C2ME/Lithium/Noisium), not the GPU.
+Measured on DH 3.3.3 (`/dh pregen`, 36,864 chunks, DH's default 14 threads, RTX 3070,
+2026-10-30, busy box):
 
-DH's own thread count is the largest remaining lever: 14 → 24 threads took the
-same run from 402 to 490 cps.
+| DH configuration | chunks/sec | CPU per chunk |
+|---|---|---|
+| DH alone, no SuperChunk | 292 | 46.4 ms |
+| + SuperChunk, CPU only | 717 | 21.5 ms |
+| + SuperChunk, GPU | 925 | 16.6 ms |
 
-Kill switch: `-Dsuperchunk.compat.distantHorizons=false`. Details and counters
-in `compatibility.txt`.
+Before the DH patches the same runs were 599 (CPU) and 697 (GPU) chunks/sec. The LODs are
+identical to what DH builds alone (compared section by section in DH's repeatable terrain-only
+mode, and chunk by chunk against DH's own LOD builder in a verify mode). That comparison also found two places where SuperChunk's terrain differed from vanilla,
+both fixed: aquifer water at cave edges (all worlds) and a stale biome memo in DH's region.
+
+Kill switches: `-Dsuperchunk.compat.distantHorizons=false` (all of it),
+`-Dsuperchunk.dh.fastPaths=false` (only the patches of DH's code). Details and counters in
+`compatibility.txt`.
 
 ## Parity
 

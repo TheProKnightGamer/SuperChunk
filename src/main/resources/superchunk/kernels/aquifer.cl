@@ -162,9 +162,9 @@ inline double aq_airpath_similarity(int i, int j, int k,
     int gy = aq_floorDiv(j + 1, 12);
     int gz = (k - 5) >> 4;
     int dist1 = 0x7FFFFFFF, dist2 = 0x7FFFFFFF;
-    for (int offY = -1; offY <= 1; ++offY) {
-        for (int offZ = 0; offZ <= 1; ++offZ) {
-            for (int offX = 0; offX <= 1; ++offX) {
+    for (int offX = 0; offX <= 1; ++offX) {
+        for (int offY = -1; offY <= 1; ++offY) {
+            for (int offZ = 0; offZ <= 1; ++offZ) {
                 int idx = aq_getIndex(gx + offX, gy + offY, gz + offZ,
                                       minGridX, minGridY, minGridZ, gridSizeX, gridSizeZ);
                 long position = locCache[idx];
@@ -344,7 +344,7 @@ inline int aq_decide(
     int globalAtJ = aq_globalAt(j, seaLevel, lavaLevel, defaultFluidId);
     if (globalAtJ == AQ_LAVA) { *outMargin = margin; return AQ_LAVA; }
 
-    // ----- refreshDistPosIdx (C2ME order: offY -1..1, offZ 0..1, offX 0..1) -----
+    // ----- refreshDistPosIdx (vanilla's order: offX 0..1, offY -1..1, offZ 0..1) -----
     int gx = (i - 5) >> 4;
     int gy = aq_floorDiv(j + 1, 12);
     int gz = (k - 5) >> 4;
@@ -352,9 +352,9 @@ inline int aq_decide(
     long pos1 = 0, pos2 = 0, pos3 = 0;
     int fl1 = 0, ft1 = 0, fl2 = 0, ft2 = 0, fl3 = 0, ft3 = 0;
 
-    for (int offY = -1; offY <= 1; ++offY) {
-        for (int offZ = 0; offZ <= 1; ++offZ) {
-            for (int offX = 0; offX <= 1; ++offX) {
+    for (int offX = 0; offX <= 1; ++offX) {
+        for (int offY = -1; offY <= 1; ++offY) {
+            for (int offZ = 0; offZ <= 1; ++offZ) {
                 int idx = aq_getIndex(gx + offX, gy + offY, gz + offZ,
                                       minGridX, minGridY, minGridZ, gridSizeX, gridSizeZ);
                 long position = locCache[idx];

@@ -10,11 +10,13 @@ import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.TheChunkSyste
 import dev.superchunk.com.ishland.flowsched.scheduler.ItemHolder;
 import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 import net.minecraft.server.level.ChunkHolder;
+import net.minecraft.server.level.ChunkLevel;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.status.ChunkType;
+import net.neoforged.neoforge.event.EventHooks;
 import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -39,13 +41,23 @@ public class MixinThreadedAnvilChunkStorage implements IChunkSystemAccess {
     }
 
     /**
+     * NeoForge patches the vanilla body to post {@code ChunkTicketLevelUpdatedEvent} through
+     * {@code EventHooks.fireChunkTicketLevelUpdated} once the holder is updated, except on vanilla's early return
+     * when neither level is a loaded one. This overwrite (from upstream C2ME) dropped it, so listeners such as
+     * CC: Tweaked's computer chunk tracking never heard of ticket-level changes. It is fired here the same way;
+     * the Forge port already did.
+     *
      * @author ishland
      * @reason replace chunk system
      */
     @Overwrite
     @Nullable
-    public ChunkHolder updateChunkScheduling(long pos, int level, @Nullable ChunkHolder holder, int i) {
-        return this.newSystem.vanillaIf$setLevel(pos, level);
+    public ChunkHolder updateChunkScheduling(long pos, int newLevel, @Nullable ChunkHolder holder, int oldLevel) {
+        final ChunkHolder result = this.newSystem.vanillaIf$setLevel(pos, newLevel);
+        if (ChunkLevel.isLoaded(oldLevel) || ChunkLevel.isLoaded(newLevel)) {
+            EventHooks.fireChunkTicketLevelUpdated(this.level, pos, oldLevel, newLevel, result);
+        }
+        return result;
     }
 
     /**

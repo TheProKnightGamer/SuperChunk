@@ -16,6 +16,9 @@ public interface ISurfaceRulesContextAccess {
     @Accessor("blockZ")
     int superchunk$blockZ();
 
+    @Accessor("surfaceDepth")
+    int superchunk$surfaceDepth();
+
     @Invoker("getMinSurfaceLevel")
     int superchunk$getMinSurfaceLevel();
 
