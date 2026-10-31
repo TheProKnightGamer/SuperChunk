@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.sugar.Local;
 import dev.superchunk.worldgen.DeepSurfaceRules;
 import dev.superchunk.worldgen.SurfaceTiming;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.SurfaceRules;
 import net.minecraft.world.level.levelgen.SurfaceSystem;
 import net.minecraft.world.level.levelgen.WorldGenerationContext;
@@ -25,6 +26,7 @@ public abstract class MixinSurfaceDeepRules {
             target = "Lnet/minecraft/world/level/levelgen/SurfaceRules$Context;updateY(IIIIII)V"))
     private void superchunk$deepUpdateY(SurfaceRules.Context context, int stoneDepthAbove, int stoneDepthBelow, int waterHeight,
                                         int blockX, int blockY, int blockZ,
+                                        @Local(argsOnly = true) RandomState randomState,
                                         @Local(argsOnly = true) WorldGenerationContext generation,
                                         @Local(argsOnly = true) SurfaceRules.RuleSource rules) {
         DeepSurfaceRules.ContextState state = (DeepSurfaceRules.ContextState) (Object) context;
@@ -34,6 +36,7 @@ public abstract class MixinSurfaceDeepRules {
             if (table == null) {
                 table = DeepSurfaceRules.table(rules, generation, context);
                 state.superchunk$setDeepTable(table);
+                state.superchunk$setDeepRandoms(new DeepSurfaceRules.Randoms(randomState));
             }
             if (table.at(blockY) != DeepSurfaceRules.UNKNOWN && blockY < access.superchunk$getMinSurfaceLevel()) {
                 state.superchunk$setSkippedY(blockY);
@@ -55,7 +58,8 @@ public abstract class MixinSurfaceDeepRules {
         if (state.superchunk$skippedY() != blockY) {
             return rule.tryApply(blockX, blockY, blockZ);
         }
-        Object answer = state.superchunk$deepTable().at(blockY);
+        Object answer = DeepSurfaceRules.resolve(state.superchunk$deepTable().at(blockY), blockX, blockY, blockZ,
+                state.superchunk$deepRandoms());
         if (DeepSurfaceRules.VERIFY) {
             BlockState vanilla = rule.tryApply(blockX, blockY, blockZ);
             DeepSurfaceRules.verify(blockX, blockY, blockZ, answer, vanilla);

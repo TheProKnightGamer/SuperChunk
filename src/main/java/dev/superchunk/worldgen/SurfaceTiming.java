@@ -20,6 +20,10 @@ public final class SurfaceTiming {
     public static final int COLUMN_SECTIONS = 4;
     /** {@code MixinSurfaceSystemFast}'s copy of the surface pass. */
     public static final int FAST_SURFACE = 8;
+    /** {@link DeepSurfacePass}. */
+    public static final int DEEP_PASS = 16;
+    /** {@link CeilingDepth}. */
+    public static final int CEILING_DEPTH = 32;
 
     public static final boolean ENABLED = Boolean.getBoolean("superchunk.debug.surfaceTiming");
     public static final int AB_MASK = ENABLED ? Integer.getInteger("superchunk.debug.surfaceTimingAB", 0) : 0;
