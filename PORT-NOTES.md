@@ -1,5 +1,20 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## BROKEN CHUNKS NO LONGER STOP CHUNKY (2026-11-02, latest) — neo has the write-up
+
+Neo `compatibility.txt` (FIXED, "broken chunk = Chunky stops for good") describes it. A chunk whose
+generation throws left its neighbours' futures pending forever; Chunky holds a permit for each until
+it completes, so enough broken chunks stopped a pregen at a fixed percentage. The flowsched files
+(`StatusAdvancingScheduler`, `ItemHolder`) and `SchedulerRegressionTest` are identical to neo's;
+`TheChunkSystem.superchunk$failStuckWaiters` and its call in `MixinServerChunkManager`'s tick hook
+are the same edits. This matters more here: the MC-271899 palette race and other Forge-only
+feature errors break chunks the same way.
+
+Tested 2026-11-02 with a fixture mod (SRG names, `remap = false`) whose features step throws on a
+23 x 19 chunk lattice, Chunky 1.3.146 r512, `-Dchunky.maxWorkingCount=64`: 0.6.0 as released stopped
+at 3,688 of 4,225 chunks (87.29%) after 11 broke; the fix finished 4,225 of 4,225 in 27 s with all
+12 broken, no scheduler assertion, clean stop.
+
 ## DISTANT HORIZONS 3.3.3, ROUGH SURFACE GENERATOR (2026-10-31) — neo has the write-up
 
 Neo `compatibility.txt` (INTEGRATED, Distant Horizons, THIRD PASS) describes it. This tree has the
@@ -22,7 +37,7 @@ Tested 2026-10-31 on DH 3.3.3-1.20.1:
 - **Log errors:** the 2 errors in those runs are Chunky's ("Chunky is not loaded"), because the
   benchmark holds the server thread at startup.
 
-## CHUNK SAVES: PALETTES ENCODED DIRECTLY (2026-10-30, latest) — neo has the write-up
+## CHUNK SAVES: PALETTES ENCODED DIRECTLY (2026-10-30) — neo has the write-up
 
 Neo `analysis/chunk-save-encode-2026-10-30.md` describes it. This tree has the same
 `chunkio/DirectPaletteEncoder`, `MixinChunkSerializerDirectEncode` and `MixinBlockStateEncodedEntry`.

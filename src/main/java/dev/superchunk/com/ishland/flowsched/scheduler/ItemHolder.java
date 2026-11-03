@@ -16,6 +16,7 @@ import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -140,6 +141,11 @@ public class ItemHolder<K, V, Ctx, UserData> {
 
     synchronized KeyStatusPair<K, V, Ctx>[] peekDependencies(ItemStatus<K, V, Ctx> status) {
         return this.requestedDependencies[status.ordinal()];
+    }
+
+    /** SuperChunk: the tickets asking for {@code status} (a concurrent set), for {@link StatusAdvancingScheduler#failWaitersBehind}. */
+    Set<ItemTicket<K, V, Ctx>> peekTicketsForStatus(ItemStatus<K, V, Ctx> status) {
+        return this.tickets.getTicketsForStatus(status);
     }
 
     public void addTicket(ItemTicket<K, V, Ctx> ticket) {
@@ -303,7 +309,14 @@ public class ItemHolder<K, V, Ctx, UserData> {
                 this.status = status;
 
                 // already protected by statusMutex
-                final CompletableFuture<Void> future = this.futures[status.ordinal()];
+                CompletableFuture<Void> future = this.futures[status.ordinal()];
+                if (future != UNLOADED_FUTURE && future.isCompletedExceptionally()) {
+                    // SuperChunk: failed while this item was stuck behind a broken one
+                    // (StatusAdvancingScheduler#failWaitersBehind). Its upgrade cannot finish while
+                    // that holds, so reaching the status means the wait was cancelled and redone in
+                    // between: give later waiters a future that succeeds.
+                    future = this.futures[status.ordinal()] = new CompletableFuture<>();
+                }
 
                 if (!isCancellation) {
                     Assertions.assertTrue(future != UNLOADED_FUTURE);
@@ -430,10 +443,9 @@ public class ItemHolder<K, V, Ctx, UserData> {
      * {@code getChunk} gets null, a creating one throws "Chunk not there when requested" — so the
      * failure is immediate and the earlier "Error upgrading chunk" line in the log is the diagnosis.
      *
-     * <p>Only this holder's own futures are failed. Items waiting on it through a dependency ticket
-     * (for a chunk, the neighbours that need it at a status it will never reach) are not broken and
-     * keep their futures pending; the server thread's wait on one of those is ended by
-     * {@link StatusAdvancingScheduler#findBrokenBlocker} instead.
+     * <p>Items waiting on it through a dependency ticket (for a chunk, the neighbours that need it at
+     * a status it will never reach) are not broken; {@link StatusAdvancingScheduler#failWaitersBehind}
+     * fails their futures through this same method.
      *
      * <p>Futures are collected under the monitor but completed outside it: completion runs dependent
      * stages inline, and those reach back into this holder.
@@ -442,7 +454,7 @@ public class ItemHolder<K, V, Ctx, UserData> {
      * ({@code ReadFromDisk(Async).downgradeFromThis}), and the downgrade path in {@code setStatus}
      * above replaces every {@code isDone()} future with a fresh one, so a later reload starts clean.
      */
-    void failPendingFuturesAbove(ItemStatus<K, V, Ctx> current) {
+    int failPendingFuturesAbove(ItemStatus<K, V, Ctx> current) {
         ArrayList<CompletableFuture<Void>> toFail = null;
         synchronized (this) {
             for (int i = current.ordinal() + 1; i < this.futures.length; i++) {
@@ -453,11 +465,13 @@ public class ItemHolder<K, V, Ctx, UserData> {
                 }
             }
         }
-        if (toFail != null) {
-            for (int i = 0, size = toFail.size(); i < size; i++) {
-                toFail.get(i).completeExceptionally(UNLOADED_EXCEPTION);
-            }
+        if (toFail == null) {
+            return 0;
         }
+        for (int i = 0, size = toFail.size(); i < size; i++) {
+            toFail.get(i).completeExceptionally(UNLOADED_EXCEPTION);
+        }
+        return toFail.size();
     }
 
     public CompletableFuture<Void> getFutureForStatus(ItemStatus<K, V, Ctx> status) {
