@@ -105,6 +105,40 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
         return ExceptionHandlingAction.MARK_BROKEN;
     }
 
+    /** SuperChunk: when {@link #superchunk$failStuckWaiters} may walk next, and when it may log next. */
+    private long superchunk$nextStuckSweep;
+    private final java.util.concurrent.atomic.AtomicLong superchunk$nextStuckLog = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+    private final java.util.concurrent.atomic.AtomicInteger superchunk$stuckUnlogged = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * SuperChunk: called every server tick. While some chunk is broken, at most once a second, fail
+     * the loads stuck behind one ({@link StatusAdvancingScheduler#failWaitersBehindBroken}); the
+     * walk from a broken chunk's own tick change catches most of them sooner.
+     */
+    public void superchunk$failStuckWaiters() {
+        if (ItemHolder.brokenItemCount() == 0) {
+            return;
+        }
+        final long now = System.nanoTime();
+        if (now - this.superchunk$nextStuckSweep < 0L) {
+            return;
+        }
+        this.superchunk$nextStuckSweep = now + 1_000_000_000L;
+        this.failWaitersBehindBroken();
+    }
+
+    @Override
+    protected void onStuckWaitersFailed(int count) {
+        final int total = this.superchunk$stuckUnlogged.addAndGet(count);
+        final long now = System.nanoTime();
+        final long next = this.superchunk$nextStuckLog.get();
+        if (now - next >= 0L && this.superchunk$nextStuckLog.compareAndSet(next, now + 10_000_000_000L)) {
+            this.superchunk$stuckUnlogged.addAndGet(-total);
+            LOGGER.warn("{} chunk loads can never finish because they wait on a chunk that failed to generate (see the "
+                    + "\"Error upgrading chunk\" errors); ended them as unloaded so Chunky and other waiters move on", total);
+        }
+    }
+
     @Override
     protected void onItemCreation(ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, NewChunkHolderVanillaInterface> holder) {
         super.onItemCreation(holder);

@@ -415,6 +415,47 @@ FIXED  (was incompatible; SuperChunk changed to support it)
         error occurred trying to execute that command Chunk not there when requested: Unloaded
         chunk", `time query gametime` answered normally, and `stop` shut down cleanly.
 
+  (any mod) ............. broken chunk = Chunky stops for good ...... FIXED (2026-11-02)
+
+    Reported on CurseForge: Chunky "almost always freezes completely" at the same percentage
+    (62%), with chunk errors popping up, and removing mods did not help.
+
+    The fix above fails a broken chunk's own futures, and the 2026-09-25 one ends the server
+    thread's waits on its neighbours (UnreachableChunkWait). The neighbours' futures stayed
+    pending: their next upgrade needs the broken chunk at a status it will never reach. Chunky
+    holds one of its in-flight permits, and a ticket, for every chunk it asked for until that
+    chunk's future completes, so each broken chunk cost it the ring of neighbours for good. Once
+    the leaked permits reach chunky.maxWorkingCount, Chunky stops where it stands, at the same
+    percentage every run on the same world. Vanilla crashes on a chunk that throws during
+    generation, so this was SuperChunk's.
+
+    FIX: StatusAdvancingScheduler.failWaitersBehind walks dependency tickets backwards from
+    broken chunks. A chunk is stuck when its upgrade in flight needs a broken or stuck chunk at a
+    status that chunk has not reached (the test findBrokenBlocker makes forwards, so a merely slow
+    chunk is never touched). Its futures above its status then fail with UNLOADED_EXCEPTION,
+    which waiters see as an unloaded chunk; Chunky counts it and moves on. The walk runs when a
+    broken chunk's tickets change, and once a second from the server tick while any chunk is
+    broken (TheChunkSystem.superchunk$failStuckWaiters), for chunks that start waiting on a stuck
+    one later. ItemHolder.setStatus gives a later waiter a fresh future if a failed status is
+    ever reached anyway. One WARN at most every 10 s counts the ended loads. Kill switch:
+    -Dsuperchunk.chunkSystem.failStuckWaiters=false.
+
+    VERIFIED 2026-11-02 with a fixture mod whose features step throws on a 23 x 19 chunk lattice
+    (never near spawn), Chunky r512 at center 2048,2048, -Dchunky.maxWorkingCount=64:
+      - 0.6.0 as released: 11 chunks broke, then Chunky sat at 3,674 of 4,225 chunks (86.96%)
+        until the 240 s timeout.
+      - fixed: all 12 lattice chunks broke; Chunky finished 4,225 of 4,225 in 19 s. The two WARN
+        lines counted 37 ended loads; no scheduler assertion fired; clean stop.
+      - Forge 1.20.1, same test: 0.6.0 stopped at 3,688 (87.29%); fixed finished in 27 s.
+    SchedulerRegressionTest.checkBrokenDependencyBlocker now also checks that the dependent's
+    futures fail, that a waiter added later gets the failed future, that a second-level item which
+    starts waiting after the break is failed by the periodic walk, and that a healthy item is not.
+
+    NOT FIXED: a broken chunk inside the spawn area. MinecraftServer.prepareLevels waits until
+    every spawn chunk is ticking, and the broken one never will, so the server stays at
+    "Preparing spawn area" (the fixture's first lattice hit chunk [3, 5]; it sat at 80%). Vanilla
+    crashes there instead.
+
   distanthorizons ....... Distant Horizons (chunk-IO thread leak) .. PASS (after fix)
 
     Reported 2026-09-13 as GitHub issue #7 ("Watchdog Crash") and, in the same shape, on CurseForge

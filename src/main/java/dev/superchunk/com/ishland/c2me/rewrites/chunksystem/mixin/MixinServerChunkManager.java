@@ -197,6 +197,7 @@ public abstract class MixinServerChunkManager {
     @Inject(method = "tick(Ljava/util/function/BooleanSupplier;Z)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerChunkCache;runDistanceManagerUpdates()Z", shift = At.Shift.AFTER))
     private void updateHolderMapAfterTick(CallbackInfo ci) {
         ((IThreadedAnvilChunkStorage) this.chunkMap).invokeUpdateHolderMap();
+        ((IChunkSystemAccess) this.chunkMap).c2me$getTheChunkSystem().superchunk$failStuckWaiters();
     }
 
     @WrapOperation(method = "runDistanceManagerUpdates", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkMap;promoteChunkMap()Z"))
