@@ -1,6 +1,34 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
-## BROKEN CHUNKS NO LONGER STOP CHUNKY (2026-11-02, latest) — neo has the write-up
+## SERVER LAG WHILE DISTANT HORIZONS GENERATES (2026-11-03, latest) — neo has the write-up
+
+Neo `compatibility.txt` (FIXED, "DH generating = low TPS, mobs lag") describes it. Two fixes:
+
+- **Light-engine leak:** `StarLightInterface` no longer keeps the chunk getter of an engine with
+  neither light type. DH's `DummyLightEngine` is one, and its getter held DH's generation region
+  while DH's 5 s chunk-save timer held the chunk.
+- **Off-thread chunk loads:** a creating `getChunk` from another thread now has the server thread
+  only add a ticket, and the caller waits (`OffThreadChunkLoad`).
+
+Differences from neo:
+- **Futures:** `Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>` instead of `ChunkResult`.
+- **Holder lookup:** through the existing `IThreadedAnvilChunkStorage.invokeGetChunkHolder`, since
+  `getVisibleChunkIfPresent` is private in 1.20.1.
+- **Scheduling:** `getOrScheduleFuture(status, chunkMap)`.
+- **Reobf:** the new shadows reobf to `f_8327_` (distanceManager), `f_8329_` (level) and
+  `m_8489_` (runDistanceManagerUpdates); checked in the built core jar.
+
+Tested 2026-11-03 against DH 3.3.3-1.20.1 on a superflat world, with `dh pregen` at 256 chunks and
+a 6 GB ZGC heap, comparing 0.6.0 as released with the fix:
+
+| | 0.6.0 as released | Fixed |
+|---|---|---|
+| ProtoChunks live mid-run | 301,327 | 49,150 |
+| Allocation stalls (server thread) | 13,651 (464) | 45 (1) |
+| TPS, 5 s windows | down to 18.9 | 20.0 throughout |
+| Pregen done within 70 s | no | yes |
+
+## BROKEN CHUNKS NO LONGER STOP CHUNKY (2026-11-02) — neo has the write-up
 
 Neo `compatibility.txt` (FIXED, "broken chunk = Chunky stops for good") describes it. A chunk whose
 generation throws left its neighbours' futures pending forever; Chunky holds a permit for each until
