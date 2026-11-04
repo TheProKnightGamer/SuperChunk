@@ -67,7 +67,13 @@ public final class StarLightInterface {
     private final boolean hasSkyLight;
 
     public StarLightInterface(final LightChunkGetter lightAccess, final boolean hasSkyLight, final boolean hasBlockLight, final LevelLightEngine lightEngine) {
-        this.lightAccess = lightAccess;
+        // SuperChunk: an engine with neither light type never reads chunks, so it does not keep the
+        // getter. Vanilla's does not either. Distant Horizons' DummyLightEngine is one: its getter
+        // points at DH's current generation region, and DH holds each generated chunk (and with it
+        // this engine) for 5 s in chunkSaveIgnoreTimer, so every pending timer kept a whole region
+        // alive -- ~250k ProtoChunks at 2,000 chunks/s, a full heap, and allocation stalls on every
+        // thread including the server's.
+        this.lightAccess = hasSkyLight || hasBlockLight ? lightAccess : null;
         this.world = lightAccess == null ? null : (Level)lightAccess.getLevel();
         this.cachedSkyPropagators = hasSkyLight && lightAccess != null ? new ArrayDeque<>() : null;
         this.cachedBlockPropagators = hasBlockLight && lightAccess != null ? new ArrayDeque<>() : null;

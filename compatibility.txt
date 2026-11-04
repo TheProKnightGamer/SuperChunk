@@ -29,7 +29,8 @@ SUMMARY
                                           Voxy via Roxy, client only — FIXED;
                                           Distant Horizons chunk-IO thread leak — FIXED;
                                           Distant Horizons 3.3.3: DH's own code faster, two
-                                          parity fixes (one for all worlds) — see INTEGRATED, FIXED;
+                                          parity fixes (one for all worlds), server lag while
+                                          DH generates — see INTEGRATED, FIXED;
                                           Skein parallel tick phases — FIXED;
                                           YUNG's Better Caves — CLEARED;
                                           Better Chunk Loading — INCOMPATIBLE, by design;
@@ -455,6 +456,62 @@ FIXED  (was incompatible; SuperChunk changed to support it)
     every spawn chunk is ticking, and the broken one never will, so the server stays at
     "Preparing spawn area" (the fixture's first lattice hit chunk [3, 5]; it sat at 80%). Vanilla
     crashes there instead.
+
+  distanthorizons ....... DH generating = low TPS, mobs lag .......... FIXED (2026-11-03)
+
+    Reported on CurseForge: chunks load so fast that "even in a superflat world" the internal
+    server's TPS drops and mobs lag until all chunks have loaded; Distant Horizons installed.
+
+    Reproduced on a dedicated server with a superflat world and DH 3.3.3's `dh pregen` (FEATURES,
+    DH's default mode), with and without a mineflayer player flying into new terrain. TPS is game
+    time per wall second; a probe mod timed each tick and each server-thread chunk wait. Without
+    DH, a superflat Chunky pregen (3,200 chunks/s) and the player at view distance 16 both held
+    20 TPS, with ZGC and with G1 at 4 GB. Two causes:
+
+    1. A LEAK THROUGH THE LIGHT ENGINE. DH lights nothing during generation: each chunk gets a
+       DummyLightEngine built with neither sky nor block light, whose chunk getter points at DH's
+       current generation region. Vanilla's LevelLightEngine keeps no reference to the getter when
+       both are off; the bundled Starlight's StarLightInterface kept it anyway. DH holds every
+       generated chunk for 5 s in its chunkSaveIgnoreTimer, so each pending timer kept a whole
+       region alive: 272,086 ProtoChunks live mid-run (vanilla about 36,000 chunks' worth), the
+       6 GB heap at 100%, and about 14,000 ZGC allocation stalls per run, 430 of them on the server
+       thread (vanilla: none). JFR's OldObjectSample gave the path: Timer queue -> DH TimerTask ->
+       ChunkWrapper -> ProtoChunk -> DummyLightEngine -> StarLightInterface.lightAccess ->
+       LightGetterAdaptor.genRegion. With G1 the same full heap means long GC pauses instead.
+       FIX: StarLightInterface keeps the getter only when the engine has a light type.
+
+    2. DH'S STRUCTURE LOOKUPS BLOCKED THE SERVER THREAD. Superflat's default preset has villages.
+       Placing a village cat, Cat.finalizeSpawn asks the real level's structure manager about the
+       cat's position, which calls getChunk(STRUCTURE_REFERENCES) from DH's thread. Vanilla runs
+       that call as a server-thread task that blocks until the chunk, and structure starts for its
+       17 x 17 neighbourhood where no player is, have generated, and runs further such requests
+       nested inside the wait. Here that took 0.6-2.5 s per request (vanilla 0.1-0.45 s).
+       FIX: a creating getChunk from another thread (Skein's workers excepted) now only has the
+       server thread add a ticket (OffThreadChunkLoad.TICKET, one key per request) and return the
+       holder's future, and the calling thread waits for it. Afterwards a vanilla UNKNOWN ticket
+       keeps the chunk one more tick, as vanilla's own would. Kill switch:
+       -Dsuperchunk.chunkSystem.offThreadChunkLoads=false.
+
+    Not a cause: SuperChunk's chunk IO nulls IOWorker.storage (C2ME's fail-fast), so DH logs
+    "Unable to pull pre-existing chunk using synchronous method. Falling back to async method", as
+    it does under C2ME. DH joins every one of those reads before it generates.
+
+    VERIFIED 2026-11-03, NeoForge 21.1.216, DH 3.3.3, 6 GB heap, ZGC, 5 s TPS windows:
+      - DH pregen alone, before: 272k ProtoChunks, about 14,000 stalls, TPS down to 11.7-17.6,
+        worst server cycle 2.6 s, DH 2,200 chunks/s. After: 9,516 ProtoChunks, no stalls, 20.0
+        TPS in every window, worst cycle 131 ms, DH 8,200 chunks/s (DH without SuperChunk:
+        2,180-5,018).
+      - player at view distance 16 plus DH, before: 13.3 TPS at worst, worst cycle 1,342 ms, DH
+        2,870 chunks/s. After: 20.0 TPS, worst cycle 232 ms, DH 8,938. The player got all 11,025
+        chunks both times.
+      - light fix alone (off-thread loads switched off): 113 server-thread chunk waits up to
+        373 ms, worst cycle 374 ms. With the off-thread change: none.
+      - normal terrain, DH pregen r64: 20.5 -> 19.2 s, worst cycle 360 -> 61 ms, no stalls either
+        way.
+      - Forge 1.20.1: 301k -> 49k ProtoChunks, 13,651 -> 45 stalls, TPS 18.9 -> 20.0.
+
+    NOT VERIFIED: a real singleplayer client, which is what the report used. Its integrated
+    server runs the same code.
 
   distanthorizons ....... Distant Horizons (chunk-IO thread leak) .. PASS (after fix)
 

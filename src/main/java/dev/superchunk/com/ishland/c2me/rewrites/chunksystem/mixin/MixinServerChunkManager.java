@@ -2,7 +2,9 @@ package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.mixin;
 
 import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.Config;
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.OffThreadChunkLoad;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.UnreachableChunkWait;
+import dev.superchunk.compat.SkeinCompat;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ducks.IChunkSystemAccess;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.structs.ChunkSystemExecutors;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
@@ -15,6 +17,8 @@ import net.minecraft.server.level.DistanceManager;
 import net.minecraft.server.level.ChunkResult;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.server.level.ChunkLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -36,6 +40,7 @@ import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 @Mixin(ServerChunkCache.class)
 public abstract class MixinServerChunkManager {
@@ -55,6 +60,12 @@ public abstract class MixinServerChunkManager {
 
     @Shadow public abstract int getLoadedChunksCount();
 
+    @Shadow @Final private DistanceManager distanceManager;
+
+    @Shadow @Final public ServerLevel level;
+
+    @Shadow abstract boolean runDistanceManagerUpdates();
+
     @Inject(method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;", at = @At("HEAD"), cancellable = true)
     private void shortcutGetChunk(int x, int z, ChunkStatus leastStatus, boolean create, CallbackInfoReturnable<ChunkAccess> cir) {
         // The exclusive dimension owner needs the normal cache/ticket path too.
@@ -69,7 +80,47 @@ public abstract class MixinServerChunkManager {
                     return;
                 }
             }
+            // Skein's dimension workers keep vanilla's path: during its parallel phase the server
+            // thread may be parked at Skein's barrier and could not add the ticket.
+            if (create && OffThreadChunkLoad.ENABLED && !SkeinCompat.isParallelPhaseActive()
+                    && !SkeinCompat.isDimensionTicker(this.level)) {
+                cir.setReturnValue(this.superchunk$loadOffThread(x, z, leastStatus));
+            }
         }
+    }
+
+    /** See {@link OffThreadChunkLoad}: the server thread adds the ticket, this thread waits. */
+    @Unique
+    private ChunkAccess superchunk$loadOffThread(int x, int z, ChunkStatus status) {
+        final ChunkPos pos = new ChunkPos(x, z);
+        final int ticketLevel = ChunkLevel.byStatus(status);
+        final Long key = OffThreadChunkLoad.nextKey();
+        final CompletableFuture<ChunkResult<ChunkAccess>> future = CompletableFuture.supplyAsync(() -> {
+            this.distanceManager.addTicket(OffThreadChunkLoad.TICKET, pos, ticketLevel, key);
+            ChunkHolder holder = this.getVisibleChunkIfPresent(pos.toLong());
+            if (this.chunkAbsent(holder, ticketLevel)) {
+                this.runDistanceManagerUpdates();
+                holder = this.getVisibleChunkIfPresent(pos.toLong());
+            }
+            return this.chunkAbsent(holder, ticketLevel)
+                    ? GenerationChunkHolder.UNLOADED_CHUNK_FUTURE
+                    : holder.scheduleChunkGenerationTask(status, this.chunkMap);
+        }, this.mainThreadProcessor).thenCompose(Function.identity());
+        final ChunkResult<ChunkAccess> result;
+        try {
+            result = OffThreadChunkLoad.await(future, this.level.getServer());
+        } finally {
+            this.mainThreadProcessor.execute(() -> {
+                this.distanceManager.addTicket(TicketType.UNKNOWN, pos, ticketLevel, pos);
+                this.distanceManager.removeTicket(OffThreadChunkLoad.TICKET, pos, ticketLevel, key);
+            });
+        }
+        ChunkAccess chunk = result.orElse(null);
+        if (chunk instanceof ImposterProtoChunk readOnlyChunk) chunk = readOnlyChunk.getWrapped();
+        if (chunk == null) {
+            throw new IllegalStateException("Chunk not there when requested: " + result.getError());
+        }
+        return chunk;
     }
 
     /**
