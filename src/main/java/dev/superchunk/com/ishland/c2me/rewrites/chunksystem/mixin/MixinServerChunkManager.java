@@ -1,5 +1,6 @@
 package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.mixin;
 
+import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.NewChunkHolderVanillaInterface;
 import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.Config;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.OffThreadChunkLoad;
@@ -71,8 +72,8 @@ public abstract class MixinServerChunkManager {
         // The exclusive dimension owner needs the normal cache/ticket path too.
         if (!this.mainThreadProcessor.isSameThread()) {
             final ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.asLong(x, z));
-            if (holder != null) {
-                final CompletableFuture<ChunkResult<ChunkAccess>> future = holder.getOrCreateFuture(leastStatus); // thread-safe in new system
+            if (holder instanceof NewChunkHolderVanillaInterface newHolder) {
+                final CompletableFuture<ChunkResult<ChunkAccess>> future = newHolder.c2me$getOrCreateFuture(leastStatus); // thread-safe in new system
                 ChunkAccess chunk = future.getNow(GenerationChunkHolder.UNLOADED_CHUNK).orElse(null);
                 if (chunk instanceof ImposterProtoChunk readOnlyChunk) chunk = readOnlyChunk.getWrapped();
                 if (chunk != null) {

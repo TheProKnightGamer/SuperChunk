@@ -13,6 +13,7 @@
     "IHeightRangePlacementAccess",
     "IChunkAccessLevelHeight",
     "IPalettedContainerUnpackAccess",
+    "IPalettedContainerStrategyAccess",
     "IPlacementFilterAccess",
     "IRandomOffsetPlacementAccess",
     "IRepeatingPlacementAccess",

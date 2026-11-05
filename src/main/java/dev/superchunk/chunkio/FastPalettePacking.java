@@ -43,7 +43,7 @@ public final class FastPalettePacking {
             return null;
         }
         if (data.storage().getClass() == ZeroBitStorage.class
-                && strategy.calculateBitsForSerialization(registry, 1) == 0) {
+                && PaletteStrategyBits.calculate(strategy, registry, 1) == 0) {
             // Vanilla's unpack+remap visits only ID zero and emits no storage words.
             // Keep its detached, mutable palette list, including the same valueFor call.
             ArrayList<T> entries = new ArrayList<>(1);
@@ -76,7 +76,7 @@ public final class FastPalettePacking {
                 }
                 values[i] = lastPacked;
             }
-            int bits = strategy.calculateBitsForSerialization(registry, compacted.getSize());
+            int bits = PaletteStrategyBits.calculate(strategy, registry, compacted.getSize());
             Optional<LongStream> storage = Optional.empty();
             if (bits != 0) {
                 // SimpleBitStorage copies the values. No scratch memory escapes through

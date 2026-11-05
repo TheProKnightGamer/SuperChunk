@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.mixin.chunk.serialization;
 
+import dev.superchunk.mixin.IPalettedContainerStrategyAccess;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.world.chunk.CompactingPackedIntegerArray;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.world.chunk.LithiumHashPalette;
 import net.minecraft.core.IdMap;
@@ -84,11 +85,11 @@ public abstract class PalettedContainerMixin<T> {
             ((CompactingPackedIntegerArray) storage).lithium$compact(this.data.palette(), compactedPalette, array);
 
             // If the palette didn't change during compaction, do a simple copy of the data array
-            if (hashPalette != null && hashPalette.getSize() == compactedPalette.getSize() && storage.getBits() == provider.calculateBitsForSerialization(idList, hashPalette.getSize())) { // paletteSize can de-sync from palette - see https://github.com/CaffeineMC/lithium-fabric/issues/279
+            if (hashPalette != null && hashPalette.getSize() == compactedPalette.getSize() && storage.getBits() == ((IPalettedContainerStrategyAccess) provider).superchunk$calculateBitsForSerialization(idList, hashPalette.getSize())) { // paletteSize can de-sync from palette - see https://github.com/CaffeineMC/lithium-fabric/issues/279
                 data = this.asOptional(storage.getRaw().clone());
                 elements = hashPalette.getElements();
             } else {
-                int bits = provider.calculateBitsForSerialization(idList, compactedPalette.getSize());
+                int bits = ((IPalettedContainerStrategyAccess) provider).superchunk$calculateBitsForSerialization(idList, compactedPalette.getSize());
                 if (bits != 0) {
                     // Re-pack the integer array as the palette has changed size
                     SimpleBitStorage copy = new SimpleBitStorage(bits, array.length);

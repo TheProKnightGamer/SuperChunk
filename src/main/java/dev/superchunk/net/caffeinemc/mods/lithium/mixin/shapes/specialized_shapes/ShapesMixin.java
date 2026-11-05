@@ -41,6 +41,13 @@ public abstract class ShapesMixin {
 
     private static final DiscreteVoxelShape FULL_CUBE_VOXELS;
 
+    // Shadowed rather than widened by an access transformer: a public findBits would crash any mod
+    // that @Overwrites it as protected ("cannot reduce visibiliy", GitHub #31).
+    @Shadow
+    protected static int findBits(double min, double max) {
+        throw new AssertionError("mixin not applied");
+    }
+
     // Re-initialize the global cached shapes with our specialized ones. This will happen right after all the static
     // state has been initialized and before any external classes access it.
     static {
@@ -94,9 +101,9 @@ public abstract class ShapesMixin {
         //If the VoxelShape cannot be represented by a BitSet with 3 bit resolution on any axis (BitSetVoxelSet),
         //a shape without boxes inside will be used in vanilla (ArrayVoxelShape with only 2 PointPositions on each axis)
 
-        if ((xRes = Shapes.findBits(minX, maxX)) < 0 ||
-                (yRes = Shapes.findBits(minY, maxY)) < 0 ||
-                (zRes = Shapes.findBits(minZ, maxZ)) < 0) {
+        if ((xRes = findBits(minX, maxX)) < 0 ||
+                (yRes = findBits(minY, maxY)) < 0 ||
+                (zRes = findBits(minZ, maxZ)) < 0) {
             //vanilla uses ArrayVoxelShape here without any rounding of the coordinates
             return new VoxelShapeSimpleCube(FULL_CUBE_VOXELS, minX, minY, minZ, maxX, maxY, maxZ);
         } else {

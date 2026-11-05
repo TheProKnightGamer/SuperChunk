@@ -9,6 +9,7 @@
     "MixinThreadedAnvilChunkStorage",
     "MixinServerChunkManager",
     "MixinChunkHolder",
+    "MixinGenerationChunkHolder",
     "MixinChunkTicketManager",
     "MixinChunkTicketManagerTicketDistanceLevelPropagator",
     "MixinMinecraftServer",

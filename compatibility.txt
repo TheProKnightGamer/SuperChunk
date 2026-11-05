@@ -23,7 +23,9 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 9  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 10 (ModernFix, singleplayer only — FIXED;
+                                          mods that @Overwrite a method SuperChunk's access
+                                          transformer widened (GitHub #31, seen on Forge) — FIXED;
                                           CBC Neo Warfare — NOT SUPPORTED, by choice;
                                           Twilight Forest — FIXED;
                                           Voxy via Roxy, client only — FIXED;
@@ -163,6 +165,30 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  (any mod) ............. access transformer widening ........... crash on load
+
+    SuperChunk's access transformer made nine vanilla methods public that NeoForge leaves non-public,
+    among them PalettedContainer.get(int), PoiSection.isValid and Shapes.findBits. Mixin then refuses
+    another mod's @Overwrite of one of them at its vanilla visibility, unless that mod's own config
+    sets overwrites.conformVisibility, and the game crashes on load: "PROTECTED @Overwrite method ...
+    cannot reduce visibiliy of PUBLIC target method". GitHub #31 is this crash on Forge 1.20.1, with
+    Collections Of Optimizations 5.8 overwriting PalettedContainer.get(int); the same line was here.
+    The nine lines are gone. The code that used them calls through @Invoker accessors (or a @Shadow in
+    the target's own mixin); SavedTick.saveTick was unused. Two were private ChunkHolder methods that
+    the chunk system's holder overrode: setQueueLevel is only called from updateFutures, which the
+    holder overrides too, and getOrCreateFuture is now forwarded by an @Inject
+    (chunksystem.mixin.MixinGenerationChunkHolder). ChunkMap.getVisibleChunkIfPresent stays: NeoForge's
+    own access transformer makes it public.
+
+    Checked 2026-11-05 by exporting every class SuperChunk mixes into from a dedicated server run
+    (Chunky r200 and a DH pregen) and comparing method visibility with NeoForge's patched jar. What is
+    still wider comes from Chunky's own access transformer or from @Overwrites that upstream C2ME,
+    Lithium and Starlight declare public. Those stay public: with conformVisibility, Mixin keeps a
+    non-private overwrite's own visibility, so a protected overwrite would narrow a method another
+    mod's access transformer made public (Distant Horizons' does that to
+    ChunkMap.getUpdatingChunkIfPresent, which C2ME overwrites), and that mod would fail with
+    IllegalAccessError.
+
   (all worlds) .......... aquifer water at cave edges .......... one-block differences from vanilla
 
     C2ME's aquifer rewrite (bundled here; upstream C2ME has the same code) looked at the 12 nearby
