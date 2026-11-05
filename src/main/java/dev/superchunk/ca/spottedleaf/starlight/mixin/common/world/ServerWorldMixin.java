@@ -36,7 +36,7 @@ public abstract class ServerWorldMixin extends Level implements WorldGenLevel, E
     @Override
     public final LevelChunk getChunkAtImmediately(final int chunkX, final int chunkZ) {
         final ChunkMap storage = this.chunkSource.chunkMap;
-        final ChunkHolder holder = storage.getVisibleChunkIfPresent(CoordinateUtils.getChunkKey(chunkX, chunkZ));
+        final ChunkHolder holder = ((ChunkMapAccess)storage).superchunk$getVisibleChunkIfPresent(CoordinateUtils.getChunkKey(chunkX, chunkZ));
 
         if (holder == null) {
             return null;
@@ -50,7 +50,7 @@ public abstract class ServerWorldMixin extends Level implements WorldGenLevel, E
     @Override
     public final ChunkAccess getAnyChunkImmediately(final int chunkX, final int chunkZ) {
         final ChunkMap storage = this.chunkSource.chunkMap;
-        final ChunkHolder holder = storage.getVisibleChunkIfPresent(CoordinateUtils.getChunkKey(chunkX, chunkZ));
+        final ChunkHolder holder = ((ChunkMapAccess)storage).superchunk$getVisibleChunkIfPresent(CoordinateUtils.getChunkKey(chunkX, chunkZ));
 
         return holder == null ? null : holder.getLastAvailable();
     }

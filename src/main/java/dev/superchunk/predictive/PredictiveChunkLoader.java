@@ -1,5 +1,6 @@
 package dev.superchunk.predictive;
 
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
 import com.mojang.logging.LogUtils;
 import dev.superchunk.com.ishland.c2me.base.common.GlobalExecutors;
 import dev.superchunk.com.ishland.c2me.notickvd.common.NoTickSystem;
@@ -310,7 +311,7 @@ public class PredictiveChunkLoader {
         this.noTickSystem.superchunk$runBeforeTicketTicks(() -> {
             this.tacs.getDistanceManager().addTicket(VANILLA_TICKET_TYPE, pos, VANILLA_TICKET_LEVEL, pos);
             this.noTickSystem.superchunk$runAfterTicketTicks(() -> {
-                final ChunkHolder holder = this.tacs.getUpdatingChunkIfPresent(pos.toLong()); // AT-public m_140174_
+                final ChunkHolder holder = ((IThreadedAnvilChunkStorage) this.tacs).invokeGetChunkHolder(pos.toLong());
                 if (holder == null) { // defensive; frees the slot
                     future.complete(null);
                     return;

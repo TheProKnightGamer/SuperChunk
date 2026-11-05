@@ -1,5 +1,7 @@
 package dev.superchunk.ca.spottedleaf.starlight.mixin.common.lightengine;
 
+import dev.superchunk.ca.spottedleaf.starlight.mixin.common.world.ChunkMapAccess;
+
 import dev.superchunk.ca.spottedleaf.starlight.common.light.StarLightEngine;
 import dev.superchunk.ca.spottedleaf.starlight.common.light.StarLightInterface;
 import dev.superchunk.ca.spottedleaf.starlight.common.light.StarLightLightingProvider;
@@ -221,7 +223,7 @@ public abstract class ThreadedLevelLightEngineMixin extends LevelLightEngine imp
 
             // 1.20.1 vanilla releases the LIGHT ticket here (removed in 1.21) — without this
             // every lit chunk keeps its LIGHT ticket forever and never unloads.
-            this.chunkMap.releaseLightTicket(chunkPos);
+            ((ChunkMapAccess)this.chunkMap).superchunk$releaseLightTicket(chunkPos);
             return chunk;
         }, (runnable) -> {
             this.getLightEngine().scheduleChunkLight(chunkPos, runnable);

@@ -1,6 +1,7 @@
 package dev.superchunk.ca.spottedleaf.starlight.common.light;
 
 import dev.superchunk.ca.spottedleaf.starlight.common.blockstate.ExtendedAbstractBlockState;
+import dev.superchunk.ca.spottedleaf.starlight.mixin.common.chunk.PalettedContainerAccess;
 import dev.superchunk.ca.spottedleaf.starlight.common.chunk.ExtendedChunk;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
@@ -240,7 +241,7 @@ public final class BlockStarLightEngine extends StarLightEngine {
             }
 
             for (int index = 0; index < (16 * 16 * 16); ++index) {
-                final BlockState state = states.get(index);
+                final BlockState state = (BlockState)((PalettedContainerAccess)states).superchunk$get(index);
                 this.mutablePos4.set(offX | (index & 15), offY | (index >>> 8), offZ | ((index >>> 4) & 15));
                 if (state.getLightEmission(lightAccess.getLevel(), this.mutablePos1) <= 0) {
                     continue;

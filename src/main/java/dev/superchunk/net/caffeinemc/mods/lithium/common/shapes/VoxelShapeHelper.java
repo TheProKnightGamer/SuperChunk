@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.common.shapes;
 
+import dev.superchunk.net.caffeinemc.mods.lithium.mixin.util.accessors.VoxelShapeAccessor;
 import it.unimi.dsi.fastutil.doubles.*;
 import dev.superchunk.net.caffeinemc.mods.lithium.mixin.minimal_nonvanilla.collisions.empty_space.ArrayVoxelShapeInvoker;
 import dev.superchunk.net.caffeinemc.mods.lithium.mixin.minimal_nonvanilla.collisions.empty_space.BitSetDiscreteVoxelShapeAccessor;
@@ -38,9 +39,9 @@ public class VoxelShapeHelper {
         DoubleOpenHashSet yPoints = new DoubleOpenHashSet();
         DoubleOpenHashSet zPoints = new DoubleOpenHashSet();
 
-        xPoints.addAll(collidingShape.getCoords(Direction.Axis.X));
-        yPoints.addAll(collidingShape.getCoords(Direction.Axis.Y));
-        zPoints.addAll(collidingShape.getCoords(Direction.Axis.Z));
+        xPoints.addAll(((VoxelShapeAccessor) collidingShape).lithium$getCoords(Direction.Axis.X));
+        yPoints.addAll(((VoxelShapeAccessor) collidingShape).lithium$getCoords(Direction.Axis.Y));
+        zPoints.addAll(((VoxelShapeAccessor) collidingShape).lithium$getCoords(Direction.Axis.Z));
 
         double minX = collidingShape.min(Direction.Axis.X);
         double maxX = collidingShape.max(Direction.Axis.X);

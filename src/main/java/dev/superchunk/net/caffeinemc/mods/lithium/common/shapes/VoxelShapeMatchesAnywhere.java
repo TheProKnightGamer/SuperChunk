@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.common.shapes;
 
+import dev.superchunk.net.caffeinemc.mods.lithium.mixin.util.accessors.VoxelShapeAccessor;
 import it.unimi.dsi.fastutil.doubles.DoubleList;
 import net.minecraft.world.phys.shapes.BooleanOp;
 import net.minecraft.world.phys.shapes.DiscreteVoxelShape;
@@ -65,9 +66,9 @@ public class VoxelShapeMatchesAnywhere {
 
             //test the area inside otherShape
             DiscreteVoxelShape voxelSet = otherShape.shape;
-            DoubleList pointPositionsX = otherShape.getCoords(X);
-            DoubleList pointPositionsY = otherShape.getCoords(Y);
-            DoubleList pointPositionsZ = otherShape.getCoords(Z);
+            DoubleList pointPositionsX = ((VoxelShapeAccessor) otherShape).lithium$getCoords(X);
+            DoubleList pointPositionsY = ((VoxelShapeAccessor) otherShape).lithium$getCoords(Y);
+            DoubleList pointPositionsZ = ((VoxelShapeAccessor) otherShape).lithium$getCoords(Z);
 
             int xMax = voxelSet.lastFull(X); // xMax <= pointPositionsX.size()
             int yMax = voxelSet.lastFull(Y);

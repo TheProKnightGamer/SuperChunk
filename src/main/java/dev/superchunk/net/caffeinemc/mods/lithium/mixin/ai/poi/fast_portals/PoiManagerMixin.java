@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.mixin.ai.poi.fast_portals;
 
+import dev.superchunk.net.caffeinemc.mods.lithium.mixin.util.accessors.PoiSectionAccessor;
 import com.mojang.serialization.Codec;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
@@ -84,7 +85,7 @@ public abstract class PoiManagerMixin extends SectionStorage<PoiSection> {
         for (int y = minSubChunk; y <= maxSubChunk; y++) {
             Optional<PoiSection> section = this.getOrLoad(SectionPos.asLong(x, y, z));
             if (section.isPresent()) {
-                boolean result = section.get().isValid();
+                boolean result = ((PoiSectionAccessor) section.get()).lithium$isValid();
                 if (result) {
                     if (this.loadedChunks.add(longChunkPos)) {
                         worldView.getChunk(x, z, ChunkStatus.EMPTY);

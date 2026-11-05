@@ -30,7 +30,7 @@ public abstract class VoxelShapeMixin {
     protected abstract double get(Direction.Axis axis, int index);
 
     @Shadow
-    public abstract DoubleList getCoords(Direction.Axis axis);
+    protected abstract DoubleList getCoords(Direction.Axis axis);
 
     /**
      * @reason Use optimized implementation which delays searching for coordinates as long as possible

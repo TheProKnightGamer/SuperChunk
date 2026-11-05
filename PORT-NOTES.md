@@ -1,6 +1,56 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
-## SERVER LAG WHILE DISTANT HORIZONS GENERATES (2026-11-03, latest) — neo has the write-up
+## ACCESS TRANSFORMER WIDENING CRASH (GitHub #31, 2026-11-04/05, latest) — neo has the write-up too
+
+GitHub #31: the world crashed on load with Collections Of Optimizations 5.8, `PROTECTED @Overwrite
+method m_63085_ in collections_of_optimizations.mixins.json:vanilla.MixinPalettedContainerUniform
+cannot reduce visibiliy of PUBLIC target method`. `PalettedContainer.get(int)` is protected in
+vanilla; the line merged from ScalableLux's access widener made it public. Mixin refuses an
+`@Overwrite` less visible than its target unless the overwriting mod's config sets
+`overwrites.conformVisibility`, and CoO 5.6-5.8 overwrote it as protected. CoO's "Fix #39"
+(2026-10-29, after 5.8) made its overwrite public, so later CoO versions boot either way. Neo had
+the same line: `get(int)` is protected in 1.21.1 too, and NeoForge does not widen it. (The first
+write-up said it was public there; that came from reading a jar with our AT already applied.)
+
+- **Fix:** the AT widens no method that is not already public. Constructors are still widened;
+  they cannot be overwritten. The code that used the ten lines now goes through accessors:
+  - `PalettedContainer.get(int)`: `starlight.mixin.common.chunk.PalettedContainerAccess`, in
+    `StarLightEngine.getBlockState(int, int)` and the light-source scan in `BlockStarLightEngine`.
+  - `ChunkMap.getVisibleChunkIfPresent`, `releaseLightTicket`:
+    `starlight.mixin.common.world.ChunkMapAccess`.
+  - `ChunkMap.getUpdatingChunkIfPresent`: C2ME's existing `IThreadedAnvilChunkStorage
+    .invokeGetChunkHolder`, in `PredictiveChunkLoader` and `PlayerNoTickLoader`.
+  - `PoiSection.isValid`, `WalkNodeEvaluator.getBlockPathTypeRaw`, `VoxelShape.getCoords`: Lithium
+    `util.accessors.{PoiSectionAccessor, WalkNodeEvaluatorAccessor, VoxelShapeAccessor}`.
+  - `Shapes.findBits`: a `@Shadow` in Lithium's `shapes.specialized_shapes.ShapesMixin`.
+  - `PalettedContainer$Strategy.calculateBitsForSerialization`: `mixin.IPalettedContainerStrategyAccess`,
+    through `chunkio.PaletteStrategyBits`. That helper falls back to reflection because the
+    standalone regression tests (`fastPalettePackingRegressionTest`) run without Mixin.
+  - `ChunkHolder.setQueueLevel` (private): `NewChunkHolderVanillaInterface`'s no-op override is
+    gone. Vanilla's only call is in `updateFutures`, which the holder already overrides.
+- **Our `@Overwrite`s stay public.** With `conformVisibility` (all our configs set it), Mixin
+  0.8.5 upgrades a private overwrite to the target's visibility but keeps a protected or package
+  one as declared. A protected overwrite would therefore narrow a method that another mod's AT made
+  public, as Chunky's AT does to `getVisibleChunkIfPresent` and DH's to
+  `getUpdatingChunkIfPresent`, both of which C2ME overwrites. That mod's calls would then fail with
+  `IllegalAccessError`. A public overwrite only hurts a mod that overwrites
+  the same method, which conflicts with ours anyway.
+- **Tested:**
+  - #31 itself, with a fixture that copies CoO 5.8's protected overwrite (CurseForge only, no jar
+    to download). 0.6.0 crashed with the reported error. With the fix, Chunky generated r400 on
+    normal terrain (2,601 chunks, 5 s, 20 TPS) with no errors. The same held for a public copy, as
+    in CoO after Fix #39.
+  - Everything, by visibility audit, 2026-11-05. A dedicated server ran with
+    `-Dmixin.debug.export=true` through Chunky r200 and `dh pregen` r48 with DH 3.3.3. Every
+    exported vanilla class was then compared with `forge-1.20.1-47.3.0-server.jar` and the server
+    srg jar, leaving out Forge's own AT. The old lines' methods are all at vanilla visibility. What
+    is still wider comes from Chunky's or DH's AT, or from public upstream overwrites:
+    - C2ME `readChunk`, `updatePlayerTickets`, the ticket tracker's `getLevel`, `updateY`;
+    - Starlight `updateChunkStatus`;
+    - Lithium `Biome.getTemperature`, `VoxelShape.collideX`, `findIndex`, `CubeVoxelShape.getCoords`,
+      `Behavior.hasRequiredMemories`.
+
+## SERVER LAG WHILE DISTANT HORIZONS GENERATES (2026-11-03) — neo has the write-up
 
 Neo `compatibility.txt` (FIXED, "DH generating = low TPS, mobs lag") describes it. Two fixes:
 

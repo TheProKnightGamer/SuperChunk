@@ -1,6 +1,7 @@
 package dev.superchunk.ca.spottedleaf.starlight.common.light;
 
 import dev.superchunk.ca.spottedleaf.starlight.common.blockstate.ExtendedAbstractBlockState;
+import dev.superchunk.ca.spottedleaf.starlight.mixin.common.chunk.PalettedContainerAccess;
 import dev.superchunk.ca.spottedleaf.starlight.common.util.CoordinateUtils;
 import dev.superchunk.ca.spottedleaf.starlight.common.util.IntegerUtil;
 import dev.superchunk.ca.spottedleaf.starlight.common.util.WorldUtil;
@@ -365,7 +366,7 @@ public abstract class StarLightEngine {
         final LevelChunkSection section = this.sectionCache[sectionIndex];
 
         if (section != null) {
-            return section.hasOnlyAir() ? AIR_BLOCK_STATE : section.states.get(localIndex);
+            return section.hasOnlyAir() ? AIR_BLOCK_STATE : (BlockState)((PalettedContainerAccess)section.states).superchunk$get(localIndex);
         }
 
         return AIR_BLOCK_STATE;

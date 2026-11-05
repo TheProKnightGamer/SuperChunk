@@ -1,5 +1,6 @@
 package dev.superchunk.com.ishland.c2me.notickvd.common;
 
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
 import dev.superchunk.com.ishland.c2me.notickvd.common.iterators.ChunkIterator;
 import dev.superchunk.com.ishland.c2me.notickvd.common.iterators.SpiralIterator;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ChunkLoadingContext;
@@ -239,7 +240,7 @@ public class PlayerNoTickLoader {
             // after-queue) has created the holder before we look it up.
             // (ConcurrentLinkedQueue supports add-during-drain, so the nested enqueue is safe.)
             this.noTickSystem.mainAfterTicketTicks.add(() -> {
-                final ChunkHolder holder = this.tacs.getUpdatingChunkIfPresent(pos.toLong()); // AT-public m_140174_
+                final ChunkHolder holder = ((IThreadedAnvilChunkStorage) this.tacs).invokeGetChunkHolder(pos.toLong());
                 if (holder == null) { // defensive; frees the slot
                     future.complete(null);
                     return;

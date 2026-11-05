@@ -1,5 +1,6 @@
 package dev.superchunk.net.caffeinemc.mods.lithium.mixin.ai.pathing;
 
+import dev.superchunk.net.caffeinemc.mods.lithium.mixin.util.accessors.WalkNodeEvaluatorAccessor;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.ai.pathing.BlockStatePathingCache;
 import dev.superchunk.net.caffeinemc.mods.lithium.common.world.blockview.SingleBlockBlockView;
 import net.minecraft.core.BlockPos;
@@ -36,7 +37,7 @@ public abstract class BlockStateBaseMixin implements BlockStatePathingCache {
 
         SingleBlockBlockView singleBlockBlockView = SingleBlockBlockView.of(state, BlockPos.ZERO);
         try {
-            this.pathNodeType = Validate.notNull(WalkNodeEvaluator.getBlockPathTypeRaw(singleBlockBlockView, BlockPos.ZERO), "Block has no common path node type!");
+            this.pathNodeType = Validate.notNull(WalkNodeEvaluatorAccessor.lithium$getBlockPathTypeRaw(singleBlockBlockView, BlockPos.ZERO), "Block has no common path node type!");
         } catch (SingleBlockBlockView.SingleBlockViewException | ClassCastException e) {
             //This is usually hit by shulker boxes, as their hitbox depends on the block entity, and the node type depends on the hitbox
             //Also catch ClassCastException in case some modded code casts BlockView to ChunkCache

@@ -355,13 +355,10 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
     }
 
     @Override
-    public void setQueueLevel(int queueLevel) {
-        // no-op (vanilla method is private; forge AT public-f m_140086_(I)V makes it overridable)
-    }
-
-    @Override
     protected void updateFutures(ChunkMap chunkStorage, Executor executor) {
-        // no-op: the chunk system drives status promotion itself
+        // no-op: the chunk system drives status promotion itself. Vanilla's only call to the private
+        // setQueueLevel is in updateFutures, so that method needs no override (and no access
+        // transformer, which would crash any mod that @Overwrites it as private: GitHub #31).
     }
 
     public boolean isAccessible() {
