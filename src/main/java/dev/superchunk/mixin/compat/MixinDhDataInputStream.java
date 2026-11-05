@@ -37,7 +37,10 @@ public abstract class MixinDhDataInputStream {
         return new UnsyncByteArrayInputStream(buf, offset, length);
     }
 
-    @Redirect(method = SUPERCHUNK$CREATE, at = @At(value = "NEW", target = "([B)Ljava/io/ByteArrayInputStream;"))
+    // ordinal = 1 (the second `new ByteArrayInputStream`): Mixin 0.8.5 (Forge) pairs a NEW with ANY later
+    // matching constructor call, so without it this redirect also claims the first NEW and logs
+    // "@Redirect conflict. Skipping superchunk$unsync". The fingerprint gate keeps the order fixed.
+    @Redirect(method = SUPERCHUNK$CREATE, at = @At(value = "NEW", target = "([B)Ljava/io/ByteArrayInputStream;", ordinal = 1))
     private static ByteArrayInputStream superchunk$unsync(byte[] buf) {
         return new UnsyncByteArrayInputStream(buf);
     }

@@ -49,6 +49,13 @@ write-up said it was public there; that came from reading a jar with our AT alre
     - Starlight `updateChunkStatus`;
     - Lithium `Biome.getTemperature`, `VoxelShape.collideX`, `findIndex`, `CubeVoxelShape.getCoords`,
       `Behavior.hasRequiredMemories`.
+- **DH stream patch, side fix:** `MixinDhDataInputStream` logged `@Redirect conflict. Skipping
+  superchunk$unsync([B)` here, not on neo. In Mixin 0.8.5, `BeforeNew.findCtor` accepts a `NEW`
+  when any later constructor call matches the descriptor. So the `(byte[])` redirect also claimed
+  the first `new ByteArrayInputStream`, the 3-argument one, and lost it to `superchunk$unsyncSlice`.
+  Both sites were still redirected, but only because of declaration order. It now has `ordinal = 1`;
+  `DhFastPaths`' fingerprint of `create` keeps that position fixed. The exported class has both
+  sites redirected on both loaders, with no warning.
 
 ## SERVER LAG WHILE DISTANT HORIZONS GENERATES (2026-11-03) — neo has the write-up
 
