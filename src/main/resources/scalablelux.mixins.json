@@ -12,6 +12,7 @@
     "common.chunk.EmptyLevelChunkMixin",
     "common.chunk.ImposterProtoChunkMixin",
     "common.chunk.LevelChunkMixin",
+    "common.chunk.PalettedContainerAccess",
     "common.chunk.ProtoChunkMixin",
     "common.lightengine.LevelLightEngineMixin",
     "common.lightengine.ThreadedLevelLightEngineMixin",

@@ -83,7 +83,8 @@ import java.util.concurrent.atomic.LongAdder;
  * decided with the wrong math (it just gets no ids).
  *
  * <p>Everything is fail-soft: any error disables only the decide chain (corner batching
- * and the whole non-batched per-worker fused path are COMPLETELY untouched). fp64 only.
+ * and the whole non-batched per-worker fused path are COMPLETELY untouched). Built fp64
+ * (decision math fp32 by default, gpu.decideFp32), or all-fp32 when the GPU path is fp32.
  *
  * <p>All log lines are greppable as {@code [compact-ids]}.
  */
@@ -94,7 +95,7 @@ public final class CompactIds {
     /**
      * Raw flag value ({@code off|probe|verify|on}). DEFAULT {@code on} since round 8
      * (user decision: enabling the GPU should deliver the full validated recipe out of
-     * the box). The chain is opt-in at the {@code gpu.enabled} level, fp64-GPU-only,
+     * the box). The chain is opt-in at the {@code gpu.enabled} level (all-fp32 under fp32),
      * fail-soft per chunk (absent aux/route → the vanilla CPU decide path), and its
      * output envelope is measured by the flip census — zero deviations across every
      * census ever run (455.9M + 4×460M blocks). {@code -Dsuperchunk.gpu.compactIds=off}
@@ -435,11 +436,6 @@ public final class CompactIds {
             return null;
         }
         try {
-            // fp64-only feature (aq_decide is vanilla-double): don't waste the
-            // 315-cell FluidStatus capture when the decide chain can never build.
-            if (OpenCLBackend.isFp32()) {
-                return null;
-            }
             // Blending-active chunks: the emitted tail assumes the fresh-chunk
             // (StripBlending) form — never decide them.
             if (nc.getBlender() != Blender.empty()) {
@@ -583,8 +579,11 @@ public final class CompactIds {
             return null;
         }
         try {
-            if (OpenCLBackend.isFp32() || !OpenCLBackend.device().fp64()) {
-                notePlanFail("fp64 required (aq_decide is vanilla-double; census proof is fp64)");
+            // fp32 (gpu.desiredFp=fp32, or auto on a device without fp64): the program is
+            // built all-fp32 (-DSC_NO_FP64, GpuBatchDispatcher.initDecide). Not vanilla-exact,
+            // like the rest of that mode; -Dsuperchunk.gpu.compactIds=verify measures it.
+            if (!OpenCLBackend.isFp32() && !OpenCLBackend.device().fp64()) {
+                notePlanFail("fp64 decide program needs a device with fp64");
                 return null;
             }
             List<GpuDensityFunction> members = fused.members();
@@ -807,7 +806,11 @@ public final class CompactIds {
             notePlanFail("kernel resources missing");
             return null;
         }
-        return "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"
+        // SC_NO_FP64 (the all-fp32 decide build, GpuBatchDispatcher.initDecide): no fp64
+        // pragma, and any `double` left in an active line becomes a compile error, so an
+        // fp64-capable test GPU fails the same way a device without fp64 would.
+        return "#ifdef SC_NO_FP64\n#define double sc_all_fp32_decide_build_uses_double\n"
+                + "#else\n#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n#endif\n"
                 + noise + "\n" + support + "\n" + rng + "\n" + aquifer + "\n" + decide;
     }
 
@@ -830,7 +833,7 @@ public final class CompactIds {
         StringBuilder k = new StringBuilder(4096);
         k.append("__kernel void sc_decide_multichunk(\n")
                 .append("        ").append(OpenCLAstEmitter.NOISE_PARAMS).append(",\n")
-                .append("        __global const double* corners,\n")   // K*M*cornerN multichunk corner buffer (ALWAYS fp64; decision math is `real`)
+                .append("        __global const sc_corner_t* corners,\n")   // K*M*cornerN multichunk corner buffer (fp64, or float in the all-fp32 build; decision math is `real`)
                 .append("        __global const int* origins,\n")      // K*3 block origins (same table as corners)
                 .append("        const int M, const int cornerN,\n")
                 .append("        const int dimX, const int dimZ,\n")
@@ -843,11 +846,11 @@ public final class CompactIds {
                 .append("        __global const int* fluidLevel,\n")   // K*cellN
                 .append("        __global const int* fluidTypeId,\n")  // K*cellN
                 .append("        const int cellN,\n")
-                .append("        const double flowingUpdateSimilarity,\n")
+                .append("        const xreal flowingUpdateSimilarity,\n")
                 .append("        __global uchar* outIds,\n")
                 .append("        __global const int* beardData,\n")     // per-chunk beard terms (aux[18..20])
                 .append("        __global const float* beardKernel,\n")    // vanilla BEARD_KERNEL, 24^3
-                .append("        __global const double* beardTables) {\n")  // ScBeardBoxAccess.superchunk$beardTables
+                .append("        __global const xreal* beardTables) {\n")  // ScBeardBoxAccess.superchunk$beardTables
                 // Z-RUN decomposition: one work-item per sz-block z-cell run.
                 // fullZ = (dimZ-1)*sz, so runs are always exact z-cells: every block
                 // in a run shares (bx, by, cx, cy, cz, ddx, ddy) and all 8 corners of
@@ -910,7 +913,7 @@ public final class CompactIds {
         }
         // GPU beard for the whole run at once when it fits (sc_beard_run); the per-block
         // sc_beard below is the fallback for wider cells.
-        k.append("    double beardRun[SC_BEARD_RUN];\n")
+        k.append("    xreal beardRun[SC_BEARD_RUN];\n")
                 .append("    int beardRunOk = 0;\n")
                 .append("    if (aux[9] == SC_BEARD_GPU && sz <= SC_BEARD_RUN\n")
                 .append("            && x >= aux[10] && x <= aux[13] && y >= aux[11] && y <= aux[14]\n")
@@ -940,10 +943,10 @@ public final class CompactIds {
         }
         // The decisions read the CPU's density: finalDensity + Beardifier.compute. Outside the
         // beard box the beard is 0.0, which changes no comparison below, so it is only added
-        // inside (in double, as the CPU adds it). (double) is exact from either `real`.
+        // inside (in xreal: double, as the CPU adds it; float in the all-fp32 build).
         k.append("        real density = ").append(emitted.tailFn())
                 .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
-                .append("        double dens = (double) density;\n")
+                .append("        xreal dens = (xreal) density;\n")
                 .append("        if (inBeard) {\n")
                 .append("            dens = dens + (beardRunOk ? beardRun[lz]\n")
                 .append("                    : sc_beard(x, y, z, beardData + aux[18], aux[19], aux[20], beardKernel, beardTables));\n")
@@ -980,9 +983,9 @@ public final class CompactIds {
                 .append("                id = AQ_AIR;\n")
                 .append("                sched = 0;\n")
                 .append("            } else {\n")
-                .append("                double barrier = (double) ").append(emitted.barrierFn())
+                .append("                xreal barrier = (xreal) ").append(emitted.barrierFn())
                 .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
-                .append("                double m; int dg1; int flg1; int ixg1; long pg1;\n")
+                .append("                xreal m; int dg1; int flg1; int ixg1; long pg1;\n")
                 .append("                id = aq_decide(x, y, z, dens, barrier,\n")
                 .append("                        locCache + c * cellN, fluidLevel + c * cellN, fluidTypeId + c * cellN,\n")
                 .append("                        aux[1], aux[2], aux[3], aux[4], aux[5],\n")
@@ -1019,17 +1022,17 @@ public final class CompactIds {
             // noise eval in the trio — only when stage 2's d3 draw passes (~1-3%).
             // This mirrors vanilla's own lazy `&&` order exactly (see aquifer.cl);
             // the RNG stream is drawn in identical order across the stages.
-            k.append("            double vt = (double) ").append(emitted.veinToggleFn())
+            k.append("            xreal vt = (xreal) ").append(emitted.veinToggleFn())
                     .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
-                    .append("            xoro_t vrs; int vcopper; double vd1;\n")
+                    .append("            xoro_t vrs; int vcopper; xreal vd1;\n")
                     .append("            int vr = aq_vein_stage1(x, y, z, vt,\n")
                     .append("                    auxLongs[c * 2 + 0], auxLongs[c * 2 + 1], &vrs, &vcopper, &vd1);\n")
                     .append("            if (vr == AQ_VEIN_CONT) {\n")
-                    .append("                double vrid = (double) ").append(emitted.veinRidgedFn())
+                    .append("                xreal vrid = (xreal) ").append(emitted.veinRidgedFn())
                     .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
                     .append("                vr = aq_vein_stage2(vrid, vd1, vcopper, &vrs);\n")
                     .append("                if (vr == AQ_VEIN_CONT) {\n")
-                    .append("                    double vgap = (double) ").append(emitted.veinGapFn())
+                    .append("                    xreal vgap = (xreal) ").append(emitted.veinGapFn())
                     .append("(x, y, z, ").append(OpenCLAstEmitter.NOISE_ARGS).append(", _g);\n")
                     .append("                    vr = aq_vein_stage3(vgap, vcopper, &vrs);\n")
                     .append("                }\n")
@@ -1218,7 +1221,7 @@ public final class CompactIds {
         }
         if (PROBE) {
             LOG.info("[compact-ids] decide chain ON (mode={}): batched chunks get a chained decide dispatch "
-                    + "(interp+tail+aquifer+veins -> 1 byte/block ids) read back into GpuBatchStore. Requires fp64 + "
+                    + "(interp+tail+aquifer+veins -> 1 byte/block ids) read back into GpuBatchStore. Requires "
                     + "batchChunks; non-batched chunks and dimensions without a NoiseBasedAquifer stay corner-only. {}",
                     MODE.toLowerCase(),
                     CONSUME ? "CONSUME: the fill seam consumes the ids instead of the per-block decision machinery "

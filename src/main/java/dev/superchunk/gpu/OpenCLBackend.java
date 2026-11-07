@@ -63,6 +63,16 @@ public final class OpenCLBackend {
      * this session, or {@code null}. Resolved once in {@link #init}; see {@link #nvOptLevelFlag()}.
      */
     private static volatile String nvOptLevelFlag = null;
+
+    /**
+     * True when the driver accepts an async device-to-host read INTO a kept-mapped
+     * {@code CL_MEM_ALLOC_HOST_PTR} buffer, the pinned readback staging of the batcher and the fused
+     * interpolator ({@link CLProgram#allocReadStaging}). Intel's NEO driver (UHD 770, 26.05) refuses
+     * every such read with {@code CL_OUT_OF_RESOURCES} (-5), which sent every GPU batch back to the
+     * CPU on Intel iGPUs; there the staging is plain host memory instead (an iGPU shares host memory,
+     * so nothing is lost). Probed once per {@link #init} by {@link #probePinnedReadStaging()}.
+     */
+    private static volatile boolean pinnedReadStaging = true;
     private static long context = NULL;
     private static long queue = NULL;
 
@@ -210,6 +220,7 @@ public final class OpenCLBackend {
             if (!createContextAndQueue(picked)) {
                 return; // already logged
             }
+            pinnedReadStaging = probePinnedReadStaging();
 
             chosenDevice = picked;
             available = true;
@@ -470,6 +481,72 @@ public final class OpenCLBackend {
         }
     }
 
+    /**
+     * Runs the readback the staging relies on, once, on the backend queue: a non-blocking
+     * {@code clEnqueueReadBuffer} from a device buffer into the mapped pointer of a
+     * {@code CL_MEM_ALLOC_HOST_PTR} buffer, then checks the bytes. Returns false when the driver
+     * refuses it or the bytes are wrong; true (keep the pinned staging) when it works or when the
+     * probe itself could not be set up.
+     */
+    private static boolean probePinnedReadStaging() {
+        final int bytes = 4096;
+        long dev = NULL;
+        long pinned = NULL;
+        java.nio.ByteBuffer mapped = null;
+        try (MemoryStack stack = stackPush()) {
+            IntBuffer err = stack.mallocInt(1);
+            dev = clCreateBuffer(context, CL_MEM_READ_WRITE, bytes, err);
+            if (err.get(0) != CL_SUCCESS) {
+                return true;
+            }
+            pinned = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bytes, err);
+            if (err.get(0) != CL_SUCCESS) {
+                return true;
+            }
+            java.nio.ByteBuffer src = stack.malloc(bytes);
+            for (int i = 0; i < bytes; i++) {
+                src.put(i, (byte) (i * 31 + 7));
+            }
+            if (clEnqueueWriteBuffer(queue, dev, true, 0, src, null, null) != CL_SUCCESS) {
+                return true;
+            }
+            mapped = clEnqueueMapBuffer(queue, pinned, true, CL_MAP_READ, 0, bytes, null, null, err, null);
+            if (err.get(0) != CL_SUCCESS || mapped == null) {
+                mapped = null;
+                return true;
+            }
+            PointerBuffer ev = stack.mallocPointer(1);
+            int rc = clEnqueueReadBuffer(queue, dev, false, 0, mapped, null, ev);
+            if (rc == CL_SUCCESS) {
+                rc = clWaitForEvents(ev);
+                clReleaseEvent(ev.get(0));
+            }
+            boolean ok = rc == CL_SUCCESS;
+            for (int i = 0; ok && i < bytes; i++) {
+                ok = mapped.get(i) == src.get(i);
+            }
+            if (!ok) {
+                LOGGER.info("[SuperChunk-GPU] The driver refuses async reads into mapped host buffers (CL error {}): "
+                        + "GPU readback staging uses plain host memory.", rc);
+            }
+            return ok;
+        } catch (Throwable t) {
+            LOGGER.info("[SuperChunk-GPU] Pinned readback staging probe threw ({}): using plain host memory.", t.toString());
+            return false;
+        } finally {
+            if (mapped != null) {
+                clEnqueueUnmapMemObject(queue, pinned, mapped, null, null);
+            }
+            clFinish(queue);
+            if (pinned != NULL) {
+                clReleaseMemObject(pinned);
+            }
+            if (dev != NULL) {
+                clReleaseMemObject(dev);
+            }
+        }
+    }
+
     // ---- info helpers ----
 
     private static String getPlatformInfo(long platform, int param) {
@@ -569,6 +646,11 @@ public final class OpenCLBackend {
      */
     public static boolean isFp32() {
         return fp32;
+    }
+
+    /** False when the driver refuses async reads into mapped host buffers; see {@link #pinnedReadStaging}. */
+    public static boolean pinnedReadStaging() {
+        return pinnedReadStaging;
     }
 
     /**

@@ -9,6 +9,9 @@ import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 
 import java.lang.invoke.VarHandle;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
@@ -29,6 +32,12 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
 
     public static final Runnable NO_OP = () -> {
     };
+
+    /** SuperChunk: kill switch for {@link #failWaitersBehind}. */
+    public static final boolean FAIL_STUCK_WAITERS =
+            !"false".equalsIgnoreCase(System.getProperty("superchunk.chunkSystem.failStuckWaiters", "true"));
+    /** SuperChunk: how many items one {@link #failWaitersBehind} walk visits at most. */
+    public static final int STUCK_WAITER_NODE_BUDGET = 4096;
 
     private final StampedLock itemsLock = new StampedLock();
     private final Object2ReferenceOpenHashMap<K, ItemHolder<K, V, Ctx, UserData>> items = new Object2ReferenceOpenHashMap<>() {
@@ -153,6 +162,12 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
                 // SuperChunk that means the server thread inside ServerChunkCache.getChunk until the
                 // watchdog fires. See ItemHolder#failPendingFuturesAbove.
                 holder.failPendingFuturesAbove(current);
+                if (FAIL_STUCK_WAITERS) {
+                    final int failed = this.failWaitersBehind(List.of(holder), STUCK_WAITER_NODE_BUDGET);
+                    if (failed > 0) {
+                        this.onStuckWaitersFailed(failed);
+                    }
+                }
                 return;
             }
 //            holder.submitOp(CompletableFuture.runAsync(() -> advanceStatus0(holder, nextStatus, key), getBackgroundExecutor()));
@@ -491,6 +506,102 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
             }
         }
         return null;
+    }
+
+    /**
+     * SuperChunk: fail the pending futures of every item stuck behind one of {@code seeds} (broken
+     * items), as {@code tickHandle0} already does for a broken item itself, and return how many
+     * items had a future failed.
+     *
+     * <p>Those items wait forever otherwise (see {@link #findBrokenBlocker}). The server thread's
+     * waits on them end through that walk, but an asynchronous waiter has nothing that polls it.
+     * Chunky holds one of its in-flight permits, and a ticket, for every chunk it asked for until
+     * that chunk's future completes, so each broken chunk took the neighbours that need it out of
+     * Chunky's pool for good, and enough broken chunks stopped a pregeneration where it stood.
+     *
+     * <p>The walk follows dependency tickets backwards from the seeds. An item is stuck when the
+     * dependencies of its upgrade in flight include a broken or stuck item at a status that item has
+     * not reached: the test {@link #findBrokenBlocker} makes forwards, so a merely slow item is never
+     * failed. Its futures above its status fail with {@link ItemHolder#UNLOADED_EXCEPTION}, which a
+     * waiter sees as an unloaded chunk, and its own dependents are visited in turn. Items that start
+     * waiting later are found by the next walk: {@code tickHandle0} runs one when a broken item's
+     * tickets change, and {@link #failWaitersBehindBroken} is meant to be called periodically.
+     */
+    int failWaitersBehind(Collection<ItemHolder<K, V, Ctx, UserData>> seeds, int nodeBudget) {
+        final ArrayDeque<ItemHolder<K, V, Ctx, UserData>> queue = new ArrayDeque<>(seeds);
+        final ObjectOpenHashSet<K> stuck = new ObjectOpenHashSet<>();
+        for (ItemHolder<K, V, Ctx, UserData> seed : seeds) {
+            stuck.add(seed.getKey());
+        }
+        int failed = 0;
+        ItemHolder<K, V, Ctx, UserData> blocker;
+        while (nodeBudget-- > 0 && (blocker = queue.poll()) != null) {
+            final ItemStatus<K, V, Ctx>[] statuses = blocker.getStatus().getAllStatuses();
+            for (int s = blocker.getStatus().ordinal() + 1; s < statuses.length; s++) {
+                for (ItemTicket<K, V, Ctx> ticket : blocker.peekTicketsForStatus(statuses[s])) {
+                    if (ticket.getType() != ItemTicket.TicketType.DEPENDENCY) {
+                        continue;
+                    }
+                    @SuppressWarnings("unchecked") final K key = (K) ticket.getSource();
+                    if (stuck.contains(key)) {
+                        continue;
+                    }
+                    final ItemHolder<K, V, Ctx, UserData> waiter = this.getHolder(key);
+                    if (waiter == null || !waiter.isOpen() || (waiter.getFlags() & ItemHolder.FLAG_BROKEN) != 0
+                            || !waitsOn(waiter, blocker)) {
+                        continue;
+                    }
+                    stuck.add(key);
+                    if (waiter.failPendingFuturesAbove(waiter.getStatus()) > 0) {
+                        failed++;
+                    }
+                    queue.add(waiter);
+                }
+            }
+        }
+        return failed;
+    }
+
+    /** Whether {@code waiter}'s upgrade in flight needs {@code blocker} at a status it has not reached. */
+    private static <K, V, Ctx> boolean waitsOn(ItemHolder<K, V, Ctx, ?> waiter, ItemHolder<K, V, Ctx, ?> blocker) {
+        final ItemStatus<K, V, Ctx> upgrading = waiter.peekUpgradingStatus();
+        final KeyStatusPair<K, V, Ctx>[] dependencies = upgrading != null ? waiter.peekDependencies(upgrading) : null;
+        if (dependencies == null) {
+            return false;
+        }
+        for (KeyStatusPair<K, V, Ctx> dependency : dependencies) {
+            if (dependency.key().equals(blocker.getKey()) && blocker.getStatus().ordinal() < dependency.status().ordinal()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** SuperChunk: {@link #failWaitersBehind} from every broken item of this scheduler. */
+    public int failWaitersBehindBroken() {
+        if (!FAIL_STUCK_WAITERS || ItemHolder.brokenItemCount() == 0) {
+            return 0;
+        }
+        final ArrayList<ItemHolder<K, V, Ctx, UserData>> broken = new ArrayList<>();
+        final long stamp = this.itemsLock.readLock();
+        try {
+            for (ItemHolder<K, V, Ctx, UserData> holder : this.items.values()) {
+                if ((holder.getFlags() & ItemHolder.FLAG_BROKEN) != 0) {
+                    broken.add(holder);
+                }
+            }
+        } finally {
+            this.itemsLock.unlockRead(stamp);
+        }
+        final int failed = broken.isEmpty() ? 0 : this.failWaitersBehind(broken, STUCK_WAITER_NODE_BUDGET);
+        if (failed > 0) {
+            this.onStuckWaitersFailed(failed);
+        }
+        return failed;
+    }
+
+    /** SuperChunk: {@link #failWaitersBehind} failed the futures of {@code count} items. */
+    protected void onStuckWaitersFailed(int count) {
     }
 
     private ItemHolder<K, V, Ctx, UserData> getOrCreateHolder(K key) {

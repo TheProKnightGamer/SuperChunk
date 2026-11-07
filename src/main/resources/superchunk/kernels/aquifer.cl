@@ -22,15 +22,28 @@
 // value (a noise DF, separately proven GPU-bit-exact) so the decision port is
 // isolated.
 //
-// PRECISION: the aquifer math is vanilla `double`; this kernel REQUIRES fp64
-// (cl_khr_fp64). On a non-fp64 device the host skips the aquifer verify. The
-// integer RNG helpers come from the host-prepended rng.cl.
+// PRECISION: the aquifer math is vanilla `double` (`xreal`, below). The census kernels
+// REQUIRE fp64 (cl_khr_fp64); on a non-fp64 device the host skips the aquifer verify.
+// The production decide functions also build as float (-DSC_NO_FP64) for the all-fp32
+// decide program. The integer RNG helpers come from the host-prepended rng.cl.
 //
 // FP_CONTRACT OFF so a*b+c is two separately-rounded ops (vanilla never fuses).
 // =====================================================================
 
+#ifndef SC_NO_FP64
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#endif
 #pragma OPENCL FP_CONTRACT OFF
+
+// `xreal`: the type of the decision algebra below. double (vanilla) by default; float in
+// the all-fp32 decide build (-DSC_NO_FP64: gpu.desiredFp=fp32, or a device without fp64),
+// whose output envelope is measured by the compact-ids verify census, not assumed. The
+// census kernels at the end of this file stay double and are not built there.
+#ifdef SC_NO_FP64
+typedef float xreal;
+#else
+typedef double xreal;
+#endif
 
 // Block-id encoding (matches the host mapping of the CPU's returned BlockState):
 //   0 = null  (computeSubstance returned null -> default block / stone)
@@ -59,10 +72,10 @@ inline int aq_getIndex(int l, int m, int n, int minGridX, int minGridY, int minG
 }
 
 // NoiseBasedAquifer.similarity(a,b) = 1.0 - (double)Math.abs(b-a)/25.0.
-inline double aq_similarity(int a, int b) {
+inline xreal aq_similarity(int a, int b) {
     int d = b - a;
     int ad = d < 0 ? -d : d;
-    return 1.0 - (double) ad / 25.0;
+    return 1.0 - (xreal) ad / 25.0;
 }
 
 // FluidStatus.at(y) -> id, given (fluidLevel, fluidTypeId).
@@ -81,15 +94,15 @@ inline int aq_globalAt(int y, int seaLevel, int lavaLevel, int defaultFluidId) {
 }
 
 // aquiferExtracted$getQ(i,d,j) — i=blockY, d=0.5*(flA+flB), j=abs(flA-flB).
-inline double aq_getQ(double i, double d, double j) {
-    double e = i + 0.5 - d;
-    double f = j / 2.0;
-    double o = f - fabs(e);
-    double q;
+inline xreal aq_getQ(xreal i, xreal d, xreal j) {
+    xreal e = i + 0.5 - d;
+    xreal f = j / 2.0;
+    xreal o = f - fabs(e);
+    xreal q;
     if (e > 0.0) {
         q = (o > 0.0) ? (o / 1.5) : (o / 2.5);
     } else {
-        double p = 3.0 + o;
+        xreal p = 3.0 + o;
         q = (p > 0.0) ? (p / 3.0) : (p / 10.0);
     }
     return q;
@@ -97,7 +110,7 @@ inline double aq_getQ(double i, double d, double j) {
 
 // c2me$calculateDensityModified(fsA, fsB) using the single fed barrier value.
 //   barrier is barrierNoise.compute(pos) (the MutableDouble memoized once/block).
-inline double aq_pressure(int flA, int ftA, int flB, int ftB, int j, double barrier) {
+inline xreal aq_pressure(int flA, int ftA, int flB, int ftB, int j, xreal barrier) {
     int bsA = aq_at(flA, ftA, j);
     int bsB = aq_at(flB, ftB, j);
     // NOT( (LAVA&&WATER) || (WATER&&LAVA) )  -> compute; else 2.0
@@ -106,9 +119,9 @@ inline double aq_pressure(int flA, int ftA, int flB, int ftB, int j, double barr
         int dd = flA - flB;
         int jj = dd < 0 ? -dd : dd;          // Math.abs(flA - flB)
         if (jj == 0) return 0.0;
-        double d0 = 0.5 * (double)(flA + flB);
-        double q = aq_getQ((double) j, d0, (double) jj);
-        double r;
+        xreal d0 = 0.5 * (xreal)(flA + flB);
+        xreal q = aq_getQ((xreal) j, d0, (xreal) jj);
+        xreal r;
         if (!(q < -2.0) && !(q > 2.0)) r = barrier; else r = 0.0;
         return 2.0 * (r + q);
     } else {
@@ -118,8 +131,8 @@ inline double aq_pressure(int flA, int ftA, int flB, int ftB, int j, double barr
 
 // C2ME/vanilla FLOWING_UPDATE_SIMULARITY = similarity(Mth.square(10), Mth.square(12))
 // = 1.0 - (double)|144-100|/25.0. Same IEEE ops as Java -> bit-identical constant.
-inline double aq_flowing_update_similarity() {
-    return 1.0 - (double) 44 / 25.0;
+inline xreal aq_flowing_update_similarity() {
+    return 1.0 - (xreal) 44 / 25.0;
 }
 
 // =====================================================================
@@ -155,7 +168,7 @@ inline double aq_flowing_update_similarity() {
 // -> shift; dist1<dist<=dist2 -> replace dist2; else no-op — identical in all
 // three cases, ties included).
 // =====================================================================
-inline double aq_airpath_similarity(int i, int j, int k,
+inline xreal aq_airpath_similarity(int i, int j, int k,
         __global const long* locCache,
         int minGridX, int minGridY, int minGridZ, int gridSizeX, int gridSizeZ) {
     int gx = (i - 5) >> 4;
@@ -210,9 +223,9 @@ inline double aq_airpath_similarity(int i, int j, int k,
 
 // Mth.clampedMap(double,...) = clampedLerp(outMin, outMax, inverseLerp(input, inMin, inMax)),
 // hard-typed double (aquifer.cl builds without dfc_support.cl's `real` helpers).
-inline double aq_clamped_map(double input, double inMin, double inMax,
-                             double outMin, double outMax) {
-    double t = (input - inMin) / (inMax - inMin);   // Mth.inverseLerp
+inline xreal aq_clamped_map(xreal input, xreal inMin, xreal inMax,
+                             xreal outMin, xreal outMax) {
+    xreal t = (input - inMin) / (inMax - inMin);   // Mth.inverseLerp
     if (t < 0.0) return outMin;                     // Mth.clampedLerp
     if (t > 1.0) return outMax;
     return outMin + t * (outMax - outMin);          // Mth.lerp
@@ -237,20 +250,20 @@ inline float aq_next_float(__private xoro_t* s) {
 
 // Stage 1 (needs only vt): vein type + y-band + veininess edge gate + the 0.7f
 // skip draw. Returns AQ_NULL or AQ_VEIN_CONT with *rs/*copper/*d1 primed.
-inline int aq_vein_stage1(int x, int y, int z, double vt,
+inline int aq_vein_stage1(int x, int y, int z, xreal vt,
                           long oreSeedLo, long oreSeedHi,
                           __private xoro_t* rs, __private int* copper,
-                          __private double* d1) {
+                          __private xreal* d1) {
     int cp = (vt > 0.0) ? 1 : 0;                     // VeinType: COPPER : IRON
-    double dd1 = fabs(vt);                           // Math.abs(d0)
+    xreal dd1 = fabs(vt);                           // Math.abs(d0)
     int jj = (cp ? 50 : -8) - y;                     // type.maxY - blockY
     int kk = y - (cp ? 0 : -60);                     // blockY - type.minY
     if (kk < 0 || jj < 0) {                          // outside the vein type's band
         return AQ_NULL;
     }
     int l = jj < kk ? jj : kk;                       // Math.min(j, k)
-    double d2 = aq_clamped_map((double) l, 0.0, 20.0, -0.2, 0.0);
-    if (dd1 + d2 < (double) 0.4f) {                  // veininess edge gate (0.4F -> double)
+    xreal d2 = aq_clamped_map((xreal) l, 0.0, 20.0, -0.2, 0.0);
+    if (dd1 + d2 < (xreal) 0.4f) {                  // veininess edge gate (0.4F -> double)
         return AQ_NULL;
     }
     *rs = xoro_at(oreSeedLo, oreSeedHi, x, y, z);    // random.at(blockX, blockY, blockZ)
@@ -265,13 +278,13 @@ inline int aq_vein_stage1(int x, int y, int z, double vt,
 // Stage 2 (needs vrid): ridged gate + the d3 draw. Returns AQ_NULL, a filler id
 // (the d3 draw failed — vanilla never evaluates vgap on this path), or
 // AQ_VEIN_CONT (caller must evaluate vgap and finish with stage 3).
-inline int aq_vein_stage2(double vrid, double d1, int copper,
+inline int aq_vein_stage2(xreal vrid, xreal d1, int copper,
                           __private xoro_t* rs) {
     if (vrid >= 0.0) {                               // ridged gate
         return AQ_NULL;
     }
-    double d3 = aq_clamped_map(d1, (double) 0.4f, (double) 0.6f, (double) 0.1f, (double) 0.3f);
-    if ((double) aq_next_float(rs) < d3) {
+    xreal d3 = aq_clamped_map(d1, (xreal) 0.4f, (xreal) 0.6f, (xreal) 0.1f, (xreal) 0.3f);
+    if ((xreal) aq_next_float(rs) < d3) {
         return AQ_VEIN_CONT;
     }
     return copper ? 6 : 9;                           // filler (granite / tuff)
@@ -279,8 +292,8 @@ inline int aq_vein_stage2(double vrid, double d1, int copper,
 
 // Stage 3 (needs vgap): the gap gate + the ore/raw draw (drawn ONLY when the
 // gap gate passes — vanilla stream order).
-inline int aq_vein_stage3(double vgap, int copper, __private xoro_t* rs) {
-    if (vgap > (double) -0.3f) {
+inline int aq_vein_stage3(xreal vgap, int copper, __private xoro_t* rs) {
+    if (vgap > (xreal) -0.3f) {
         return (aq_next_float(rs) < 0.02f) ? (copper ? 5 : 8)    // raw ore block
                                            : (copper ? 4 : 7);   // ore
     }
@@ -291,11 +304,11 @@ inline int aq_vein_stage3(double vgap, int copper, __private xoro_t* rs) {
 // (eager callers like the census kernels are unchanged; the staging is
 // draw-order-identical to the previous monolithic body).
 inline int aq_vein_decide(int x, int y, int z,
-                          double vt, double vrid, double vgap,
+                          xreal vt, xreal vrid, xreal vgap,
                           long oreSeedLo, long oreSeedHi) {
     xoro_t rs;
     int copper;
-    double d1;
+    xreal d1;
     int r = aq_vein_stage1(x, y, z, vt, oreSeedLo, oreSeedHi, &rs, &copper, &d1);
     if (r != AQ_VEIN_CONT) {
         return AQ_NULL;
@@ -325,19 +338,19 @@ inline int aq_vein_decide(int x, int y, int z,
 // (water/lava) — the host compares both the raw bit and that effective bit.
 // =====================================================================
 inline int aq_decide(
-        int i, int j, int k, double density, double barrier,
+        int i, int j, int k, xreal density, xreal barrier,
         __global const long* locCache,
         __global const int* fluidLevel,
         __global const int* fluidTypeId,
         int minGridX, int minGridY, int minGridZ, int gridSizeX, int gridSizeZ,
         int seaLevel, int lavaLevel, int defaultFluidId,
-        double flowingUpdateSimilarity,
-        __private double* outMargin, __private int* outSched,
+        xreal flowingUpdateSimilarity,
+        __private xreal* outMargin, __private int* outSched,
         __private int* outDist1, __private int* outFl1,
         __private int* outIdx1, __private long* outPos1) {
 
     // density<=0 branch only (host filters; density>0 -> AQ_NULL handled host-side).
-    double margin = fabs(density);              // boundary: density vs 0 (density>0 -> null)
+    xreal margin = fabs(density);              // boundary: density vs 0 (density>0 -> null)
     *outDist1 = -1; *outFl1 = -2147483648; *outIdx1 = -1; *outPos1 = 0; // diagnostics
     *outSched = 0;
 
@@ -380,7 +393,7 @@ inline int aq_decide(
 
     // ----- applyPost -----
     int blockState = aq_at(fl1, ft1, j);                 // fluidLevel2.at(j)
-    double d = aq_similarity(dist1, dist2);
+    xreal d = aq_similarity(dist1, dist2);
     if (d <= 0.0) {
         // vanilla: shouldScheduleFluidUpdate = d >= FLOWING_UPDATE_SIMULARITY
         *outSched = (d >= flowingUpdateSimilarity) ? 1 : 0;
@@ -393,20 +406,20 @@ inline int aq_decide(
         *outMargin = margin;
         return blockState;
     }
-    double e = d * aq_pressure(fl1, ft1, fl2, ft2, j, barrier);
+    xreal e = d * aq_pressure(fl1, ft1, fl2, ft2, j, barrier);
     margin = fmin(margin, fabs(density + e));            // boundary: density+e vs 0
     if (density + e > 0.0) { *outSched = 0; *outMargin = margin; return AQ_NULL; }
 
     // getFinalBlockState
-    double f = aq_similarity(dist1, dist3);
+    xreal f = aq_similarity(dist1, dist3);
     if (f > 0.0) {
-        double g1 = d * f * aq_pressure(fl1, ft1, fl3, ft3, j, barrier);
+        xreal g1 = d * f * aq_pressure(fl1, ft1, fl3, ft3, j, barrier);
         margin = fmin(margin, fabs(density + g1));
         if (density + g1 > 0.0) { *outSched = 0; *outMargin = margin; return AQ_NULL; }
     }
-    double g = aq_similarity(dist2, dist3);
+    xreal g = aq_similarity(dist2, dist3);
     if (g > 0.0) {
-        double g2 = d * g * aq_pressure(fl2, ft2, fl3, ft3, j, barrier);
+        xreal g2 = d * g * aq_pressure(fl2, ft2, fl3, ft3, j, barrier);
         margin = fmin(margin, fabs(density + g2));
         if (density + g2 > 0.0) { *outSched = 0; *outMargin = margin; return AQ_NULL; }
     }
@@ -415,6 +428,7 @@ inline int aq_decide(
     return blockState;
 }
 
+#ifndef SC_NO_FP64   // Stage-3 census kernels: fp64 verification tools, not built in the all-fp32 decide program
 __kernel void aquifer_decide(
         __global const int* bx, __global const int* by, __global const int* bz,
         __global const double* dens,
@@ -532,3 +546,5 @@ __kernel void aquifer_census(
     outMargin[gid] = m;
     outSched[gid] = sched;
 }
+
+#endif  // !SC_NO_FP64

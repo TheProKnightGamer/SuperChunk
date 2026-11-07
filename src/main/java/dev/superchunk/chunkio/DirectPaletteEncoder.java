@@ -277,7 +277,7 @@ public final class DirectPaletteEncoder {
         if (storageClass == ZeroBitStorage.class) {
             // Every index holds id 0: one lookup, one value.
             scratch.remap(0, generation, scratch.numberOf(palette.valueFor(0)));
-            int bits = strategy.calculateBitsForSerialization(registry, scratch.count);
+            int bits = PaletteStrategyBits.calculate(strategy, registry, scratch.count);
             scratch.raw = bits == 0 ? null : new long[(size + 64 / bits - 1) / (64 / bits)]; // all zeros, as packed
             return true;
         }
@@ -321,7 +321,7 @@ public final class DirectPaletteEncoder {
             }
             index += n;
         }
-        int outBits = strategy.calculateBitsForSerialization(registry, scratch.count);
+        int outBits = PaletteStrategyBits.calculate(strategy, registry, scratch.count);
         if (outBits == 0) {
             scratch.raw = null;
         } else if (identity && outBits == bits) {

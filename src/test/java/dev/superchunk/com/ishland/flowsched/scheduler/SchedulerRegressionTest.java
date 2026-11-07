@@ -193,8 +193,10 @@ public final class SchedulerRegressionTest {
 
     private static void checkBrokenDependencyBlocker() {
         // Item 1 needs item 2 at status 4 to reach 5; item 2's upgrade to 4 fails. Item 2 is broken
-        // and its futures fail, but item 1 is not broken: it parks in its upgrade to 5 with pending
-        // futures (what froze the server thread), and findBrokenBlocker must name item 2.
+        // and its futures fail. Item 1 is not broken but parks in its upgrade to 5: findBrokenBlocker
+        // must name item 2, and failWaitersBehind must fail item 1's futures too (pending, they froze
+        // the server thread and starved Chunky). Item 3 needs item 1 at 6 and starts after the break;
+        // the periodic walk must fail it. Item 4 is healthy and must be left alone.
         ArrayDeque<Runnable> work = new ArrayDeque<>();
         RuntimeException upgradeFailure = new RuntimeException("intentional item-2 upgrade failure");
         StatusAdvancingScheduler<Integer, Object, Object, Object> scheduler = new StatusAdvancingScheduler<>() {
@@ -225,16 +227,34 @@ public final class SchedulerRegressionTest {
         require(broken.getStatus() == DepStatus.ALL[3], "broken dependency is not at status 3");
         require(ItemHolder.brokenItemCount() == brokenBefore + 1, "broken item count did not rise by one");
         require(dependent.getStatus() == DepStatus.ALL[4], "dependent is not parked below its broken dependency");
-        require(!dependent.getFutureForStatus(DepStatus.ALL[7]).isDone(), "test premise: the dependent's future is pending");
+        requireUnloaded(dependent.getFutureForStatus(DepStatus.ALL[7]));
+        requireUnloaded(dependent.getFutureForStatus(DepStatus.ALL[5]));
+        requireSucceeded(dependent.getFutureForStatus(DepStatus.ALL[4]));
+        scheduler.addTicket(1, "late waiter", DepStatus.ALL[7], () -> { });
+        requireUnloaded(dependent.getFutureForStatus(DepStatus.ALL[7]));
+        ItemHolder<Integer, Object, Object, Object> chained = scheduler.addTicket(3, DepStatus.ALL[7], () -> { });
+        ItemHolder<Integer, Object, Object, Object> healthy = scheduler.addTicket(4, DepStatus.ALL[7], () -> { });
+        while (!work.isEmpty()) {
+            require(++tasks < 2_000, "scheduler never went idle");
+            work.removeFirst().run();
+        }
+        require(chained.getStatus() == DepStatus.ALL[4], "chained item is not parked below the stuck one");
+        require(!chained.getFutureForStatus(DepStatus.ALL[7]).isDone(), "test premise: the chained item's future is pending");
+        require(scheduler.failWaitersBehindBroken() == 1, "the periodic walk did not fail exactly the chained item");
+        requireUnloaded(chained.getFutureForStatus(DepStatus.ALL[7]));
+        requireSucceeded(healthy.getFutureForStatus(DepStatus.ALL[7]));
+        require(scheduler.failWaitersBehindBroken() == 0, "a second walk failed something again");
         require(scheduler.findBrokenBlocker(1, DepStatus.ALL[7], 64) == 2, "blocker not found through the dependency");
         require(scheduler.findBrokenBlocker(1, DepStatus.ALL[5], 64) == 2, "blocker not found for the next status");
         require(scheduler.findBrokenBlocker(1, DepStatus.ALL[4], 64) == null, "a reached status reported blocked");
         require(scheduler.findBrokenBlocker(2, DepStatus.ALL[7], 64) == 2, "a broken item is its own blocker");
-        require(scheduler.findBrokenBlocker(3, DepStatus.ALL[7], 64) == null, "an absent item reported blocked");
+        require(scheduler.findBrokenBlocker(5, DepStatus.ALL[7], 64) == null, "an absent item reported blocked");
+        require(scheduler.findBrokenBlocker(3, DepStatus.ALL[7], 64) == 2, "blocker not found through a stuck item");
+        require(scheduler.findBrokenBlocker(4, DepStatus.ALL[7], 64) == null, "a healthy item reported blocked");
         require(scheduler.findBrokenBlocker(1, DepStatus.ALL[7], 0) == null, "the node budget was not honoured");
     }
 
-    /** Like {@link Status}, but status 5 of item 1 needs item 2 at status 4. */
+    /** Like {@link Status}, but status 5 of item 1 needs item 2 at status 4, and of item 3 item 1 at 6. */
     private record DepStatus(int ordinal) implements ItemStatus<Integer, Object, Object> {
         private static final DepStatus[] ALL = new DepStatus[16];
         static {
@@ -249,6 +269,9 @@ public final class SchedulerRegressionTest {
         @Override public KeyStatusPair<Integer, Object, Object>[] getDependencies(ItemHolder<Integer, Object, Object, ?> holder) {
             if (this.ordinal == 5 && holder.getKey() == 1) {
                 return new KeyStatusPair[]{new KeyStatusPair<>(2, ALL[4])};
+            }
+            if (this.ordinal == 5 && holder.getKey() == 3) {
+                return new KeyStatusPair[]{new KeyStatusPair<>(1, ALL[6])};
             }
             return EMPTY_DEPENDENCIES;
         }

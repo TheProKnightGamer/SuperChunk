@@ -147,6 +147,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
     // what the decide program was built from (-Dsuperchunk.gpu.dumpDecideTo replays it)
     private String decideSource, decideOptions;
     private boolean decideReal32;
+    // All-fp32 decide program (-DSC_NO_FP64: the batcher itself is fp32): float corners,
+    // aquifer algebra, beard tables and flowingUpdateSimilarity argument.
+    private boolean decideNoFp64;
     /**
      * Sticky OFF switch for the decide chain: flipped (never cleared) on any decide
      * enqueue/map fault so subsequent batches ride corner-only. The chain's native
@@ -507,6 +510,11 @@ public final class GpuBatchDispatcher implements AutoCloseable {
     private void dumpDecide(Slot s, int K, int M, int cornerN, int dimX, int dimZ, int sx, int sy, int sz,
                             int fullX, int fullY, int fullZ, int fullN, int total, int cellN, double flowingSim,
                             int beardInts) {
+        // The replay format (and the decidebench tool reading it) has fp64 corners and
+        // beard tables; the all-fp32 program has float ones.
+        if (decideNoFp64) {
+            return;
+        }
         long seq = DUMP_DECIDE_SEQ.incrementAndGet();
         if (seq > DUMP_DECIDE_COUNT) {
             return;
@@ -1360,7 +1368,11 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // deltas + emitted tail/barrier/vein ASTs + the noise-registry element type — so
         // the uploads below must match). Fail-soft: an fp32 build failure retries the
         // proven fp64 program before giving up on the chain.
-        boolean decFp32 = OpenCLBackend.config().decideFp32();
+        // gpu.desiredFp=fp32 (or auto on a device without fp64): this batcher's corners are
+        // float, so the decide program is the all-fp32 build — decideFp32 is implied and
+        // there is no fp64 program to fall back to.
+        boolean noFp64 = fp32;
+        boolean decFp32 = noFp64 || OpenCLBackend.config().decideFp32();
         // FMA contraction for the fp32 decide program only (gpu.decideFmaContract,
         // default false — measured throughput-neutral on GA104): flip ONLY the FIRST
         // FP_CONTRACT pragma (noise.cl's, which governs the emitted real ASTs); the
@@ -1381,11 +1393,16 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // (FP_CONTRACT stays per-source), and the bit-exact/census gates re-prove it.
         boolean decInline = !"false".equalsIgnoreCase(
                 System.getProperty("superchunk.gpu.decideInline", "true"));
-        String opts = (decFp32 ? "-DUSE_FP32" : "")
-                + (decInline ? (decFp32 ? " " : "") + CLProgram.FORCE_INLINE_MARKER : "");
+        // -cl-single-precision-constant: unsuffixed literals in the shared helpers are float
+        // there, as a device without fp64 requires.
+        String opts = String.join(" ", java.util.stream.Stream.of(
+                        decFp32 ? "-DUSE_FP32" : "",
+                        noFp64 ? "-DSC_NO_FP64 -DSC_CORNER_F32 -cl-single-precision-constant" : "",
+                        decInline ? CLProgram.FORCE_INLINE_MARKER : "")
+                .filter(o -> !o.isEmpty()).toList());
         long tBuild0 = System.nanoTime();
         CLProgram p = CLProgramCache.getOrBuild(fp32Src, opts);
-        if (p == null && decFp32) {
+        if (p == null && decFp32 && !noFp64) {
             LOGGER.warn("[SuperChunk-GPU] [compact-ids] fp32 decide clBuildProgram failed — "
                     + "falling back to the fp64 decide program.");
             decFp32 = false;
@@ -1415,7 +1432,7 @@ public final class GpuBatchDispatcher implements AutoCloseable {
                 bk[i] = beardKernel[i];
             }
             decideBeardKernelMem = p.uploadReals(true, bk);
-            decideBeardTablesPlaceholder = p.uploadReals(false, new double[1]);
+            decideBeardTablesPlaceholder = p.uploadReals(noFp64, new double[1]);
             for (Slot s : slots) {
                 long k = p.kernel(plan.kernelName);
                 for (int i = 0; i < 8; i++) {
@@ -1429,11 +1446,13 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             decideSource = decFp32 ? fp32Src : plan.source;
             decideOptions = decFp32 ? opts : (decInline ? CLProgram.FORCE_INLINE_MARKER : "");
             decideReal32 = decFp32;
-            CompactIds.noteDecideFp(decFp32 ? "fp32" : "fp64");
+            decideNoFp64 = noFp64;
+            CompactIds.noteDecideFp(noFp64 ? "fp32-all" : decFp32 ? "fp32" : "fp64");
             LOGGER.info("[SuperChunk-GPU] [compact-ids] decide chain READY on the batched dispatcher "
                     + "(kernel={}, gridSlots={}, veins={}, slots={}, decideFp={}, fmaContract={}). Batched chunks with "
                     + "aux now get a chained 1-byte/block id dispatch; PROBE discards the ids after readback.",
-                    plan.kernelName, plan.gridSlots, plan.veins, slots.length, decFp32 ? "fp32" : "fp64", fma && decFp32);
+                    plan.kernelName, plan.gridSlots, plan.veins, slots.length,
+                    noFp64 ? "fp32-all" : decFp32 ? "fp32" : "fp64", fma && decFp32);
         } catch (Throwable t) {
             for (Slot s : slots) {
                 CLProgram.releaseKernel(s.decideKernel);
@@ -1782,13 +1801,17 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         decideProgram.setArgPointer(s.decideKernel, a2++, s.auxFlMem);
         decideProgram.setArgPointer(s.decideKernel, a2++, s.auxFtMem);
         decideProgram.setArgInt(s.decideKernel, a2++, cellN);
-        decideProgram.setArgDouble(s.decideKernel, a2++, flowingSim);
+        if (decideNoFp64) {
+            decideProgram.setArgFloat(s.decideKernel, a2++, (float) flowingSim);
+        } else {
+            decideProgram.setArgDouble(s.decideKernel, a2++, flowingSim);
+        }
         decideProgram.setArgPointer(s.decideKernel, a2++, s.idsMem);
         decideProgram.setArgPointer(s.decideKernel, a2++, s.beardMem);
         decideProgram.setArgPointer(s.decideKernel, a2++, decideBeardKernelMem);
         if (beardAt > 0 && decideBeardTablesMem == NULL && CompactIds.beardTables() != null) {
             // Drainer thread only (every decide enqueue runs there): a one-time upload.
-            decideBeardTablesMem = decideProgram.uploadReals(false, CompactIds.beardTables());
+            decideBeardTablesMem = decideProgram.uploadReals(decideNoFp64, CompactIds.beardTables());
         }
         decideProgram.setArgPointer(s.decideKernel, a2,
                 decideBeardTablesMem != NULL ? decideBeardTablesMem : decideBeardTablesPlaceholder);
@@ -1964,6 +1987,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // kept mapped: the device->host readback of the whole K*M*n buffer DMAs into pinned
         // host memory (~2x bandwidth vs pageable on the discrete GPU). hOutF/hOutD are VIEWS
         // into pinnedAddr, so the readback + per-slice copy code reads it directly.
+        // Allocated by CLProgram.allocReadStaging: on a driver that refuses reads into a mapped
+        // pointer (Intel NEO) pinnedMem stays NULL and pinnedAddr is plain host memory.
         long pinnedMem = NULL;
         long pinnedAddr = NULL;
         long pinnedBytes = 0;
@@ -2211,8 +2236,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             freeHostOut();
             // Pinned host staging for the readback DMA (see field comment). Kept mapped.
             long bytes = (long) outElems * realBytes;
-            pinnedMem = program.createHostReadWriteBuffer(bytes);
-            pinnedAddr = program.mapRead(queue, pinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            pinnedAddr = program.allocReadStaging(queue, bytes, stagingMem);
+            pinnedMem = stagingMem[0];
             pinnedBytes = bytes;
             if (fp32) {
                 hOutF = MemoryUtil.memFloatBuffer(pinnedAddr, outElems);
@@ -2228,14 +2254,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // pinnedMem.
             hOutF = null;
             hOutD = null;
-            if (pinnedAddr != NULL) {
-                program.unmap(queue, pinnedMem, pinnedAddr, pinnedBytes);
-                pinnedAddr = NULL;
-            }
-            if (pinnedMem != NULL) {
-                CLProgram.releaseMem(pinnedMem);
-                pinnedMem = NULL;
-            }
+            program.freeReadStaging(queue, pinnedMem, pinnedAddr, pinnedBytes);
+            pinnedAddr = NULL;
+            pinnedMem = NULL;
             pinnedBytes = 0;
         }
 
@@ -2328,8 +2349,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // readback (see the field comment; mirrors ensureOutCapacity exactly).
             idsMem = decideProgram.createOutputBuffer(bytes);
             freeIdsHost();
-            idsPinnedMem = decideProgram.createHostReadWriteBuffer(bytes);
-            idsPinnedAddr = decideProgram.mapRead(queue, idsPinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            idsPinnedAddr = decideProgram.allocReadStaging(queue, bytes, stagingMem);
+            idsPinnedMem = stagingMem[0];
             if (idsPinnedAddr == NULL) {
                 // Fail soft via the enqueueDecide catch (decide sticky-disable) rather
                 // than wrapping address 0 and SIGSEGV-ing on the first ids() copy.
@@ -2345,14 +2367,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // drop the ref; the backing host memory is released by unmapping + releasing
             // idsPinnedMem (same contract as freeHostOut()).
             hIds = null;
-            if (idsPinnedAddr != NULL) {
-                decideProgram.unmap(queue, idsPinnedMem, idsPinnedAddr, idsPinnedBytes);
-                idsPinnedAddr = NULL;
-            }
-            if (idsPinnedMem != NULL) {
-                CLProgram.releaseMem(idsPinnedMem);
-                idsPinnedMem = NULL;
-            }
+            decideProgram.freeReadStaging(queue, idsPinnedMem, idsPinnedAddr, idsPinnedBytes);
+            idsPinnedAddr = NULL;
+            idsPinnedMem = NULL;
             idsPinnedBytes = 0;
         }
 
@@ -2384,8 +2401,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             climOutMem = program.createOutputBuffer((long) outElems * realBytes);
             freeClimHostOut();
             long bytes = (long) outElems * realBytes;
-            climPinnedMem = program.createHostReadWriteBuffer(bytes);
-            climPinnedAddr = program.mapRead(queue, climPinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            climPinnedAddr = program.allocReadStaging(queue, bytes, stagingMem);
+            climPinnedMem = stagingMem[0];
             climPinnedBytes = bytes;
             if (fp32) {
                 hClimOutF = MemoryUtil.memFloatBuffer(climPinnedAddr, outElems);
@@ -2398,14 +2416,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         void freeClimHostOut() {
             hClimOutF = null;
             hClimOutD = null;
-            if (climPinnedAddr != NULL) {
-                program.unmap(queue, climPinnedMem, climPinnedAddr, climPinnedBytes);
-                climPinnedAddr = NULL;
-            }
-            if (climPinnedMem != NULL) {
-                CLProgram.releaseMem(climPinnedMem);
-                climPinnedMem = NULL;
-            }
+            program.freeReadStaging(queue, climPinnedMem, climPinnedAddr, climPinnedBytes);
+            climPinnedAddr = NULL;
+            climPinnedMem = NULL;
             climPinnedBytes = 0;
         }
 

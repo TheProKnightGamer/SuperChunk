@@ -23,13 +23,16 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 9  (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 10 (ModernFix, singleplayer only — FIXED;
+                                          mods that @Overwrite a method SuperChunk's access
+                                          transformer widened (GitHub #31, seen on Forge) — FIXED;
                                           CBC Neo Warfare — NOT SUPPORTED, by choice;
                                           Twilight Forest — FIXED;
                                           Voxy via Roxy, client only — FIXED;
                                           Distant Horizons chunk-IO thread leak — FIXED;
                                           Distant Horizons 3.3.3: DH's own code faster, two
-                                          parity fixes (one for all worlds) — see INTEGRATED, FIXED;
+                                          parity fixes (one for all worlds), server lag while
+                                          DH generates — see INTEGRATED, FIXED;
                                           Skein parallel tick phases — FIXED;
                                           YUNG's Better Caves — CLEARED;
                                           Better Chunk Loading — INCOMPATIBLE, by design;
@@ -162,6 +165,30 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  (any mod) ............. access transformer widening ........... crash on load
+
+    SuperChunk's access transformer made nine vanilla methods public that NeoForge leaves non-public,
+    among them PalettedContainer.get(int), PoiSection.isValid and Shapes.findBits. Mixin then refuses
+    another mod's @Overwrite of one of them at its vanilla visibility, unless that mod's own config
+    sets overwrites.conformVisibility, and the game crashes on load: "PROTECTED @Overwrite method ...
+    cannot reduce visibiliy of PUBLIC target method". GitHub #31 is this crash on Forge 1.20.1, with
+    Collections Of Optimizations 5.8 overwriting PalettedContainer.get(int); the same line was here.
+    The nine lines are gone. The code that used them calls through @Invoker accessors (or a @Shadow in
+    the target's own mixin); SavedTick.saveTick was unused. Two were private ChunkHolder methods that
+    the chunk system's holder overrode: setQueueLevel is only called from updateFutures, which the
+    holder overrides too, and getOrCreateFuture is now forwarded by an @Inject
+    (chunksystem.mixin.MixinGenerationChunkHolder). ChunkMap.getVisibleChunkIfPresent stays: NeoForge's
+    own access transformer makes it public.
+
+    Checked 2026-11-05 by exporting every class SuperChunk mixes into from a dedicated server run
+    (Chunky r200 and a DH pregen) and comparing method visibility with NeoForge's patched jar. What is
+    still wider comes from Chunky's own access transformer or from @Overwrites that upstream C2ME,
+    Lithium and Starlight declare public. Those stay public: with conformVisibility, Mixin keeps a
+    non-private overwrite's own visibility, so a protected overwrite would narrow a method another
+    mod's access transformer made public (Distant Horizons' does that to
+    ChunkMap.getUpdatingChunkIfPresent, which C2ME overwrites), and that mod would fail with
+    IllegalAccessError.
+
   (all worlds) .......... aquifer water at cave edges .......... one-block differences from vanilla
 
     C2ME's aquifer rewrite (bundled here; upstream C2ME has the same code) looked at the 12 nearby
@@ -414,6 +441,103 @@ FIXED  (was incompatible; SuperChunk changed to support it)
       - FIXED leg (same corrupted world): the same command returned in 0.0s with "An unexpected
         error occurred trying to execute that command Chunk not there when requested: Unloaded
         chunk", `time query gametime` answered normally, and `stop` shut down cleanly.
+
+  (any mod) ............. broken chunk = Chunky stops for good ...... FIXED (2026-11-02)
+
+    Reported on CurseForge: Chunky "almost always freezes completely" at the same percentage
+    (62%), with chunk errors popping up, and removing mods did not help.
+
+    The fix above fails a broken chunk's own futures, and the 2026-09-25 one ends the server
+    thread's waits on its neighbours (UnreachableChunkWait). The neighbours' futures stayed
+    pending: their next upgrade needs the broken chunk at a status it will never reach. Chunky
+    holds one of its in-flight permits, and a ticket, for every chunk it asked for until that
+    chunk's future completes, so each broken chunk cost it the ring of neighbours for good. Once
+    the leaked permits reach chunky.maxWorkingCount, Chunky stops where it stands, at the same
+    percentage every run on the same world. Vanilla crashes on a chunk that throws during
+    generation, so this was SuperChunk's.
+
+    FIX: StatusAdvancingScheduler.failWaitersBehind walks dependency tickets backwards from
+    broken chunks. A chunk is stuck when its upgrade in flight needs a broken or stuck chunk at a
+    status that chunk has not reached (the test findBrokenBlocker makes forwards, so a merely slow
+    chunk is never touched). Its futures above its status then fail with UNLOADED_EXCEPTION,
+    which waiters see as an unloaded chunk; Chunky counts it and moves on. The walk runs when a
+    broken chunk's tickets change, and once a second from the server tick while any chunk is
+    broken (TheChunkSystem.superchunk$failStuckWaiters), for chunks that start waiting on a stuck
+    one later. ItemHolder.setStatus gives a later waiter a fresh future if a failed status is
+    ever reached anyway. One WARN at most every 10 s counts the ended loads. Kill switch:
+    -Dsuperchunk.chunkSystem.failStuckWaiters=false.
+
+    VERIFIED 2026-11-02 with a fixture mod whose features step throws on a 23 x 19 chunk lattice
+    (never near spawn), Chunky r512 at center 2048,2048, -Dchunky.maxWorkingCount=64:
+      - 0.6.0 as released: 11 chunks broke, then Chunky sat at 3,674 of 4,225 chunks (86.96%)
+        until the 240 s timeout.
+      - fixed: all 12 lattice chunks broke; Chunky finished 4,225 of 4,225 in 19 s. The two WARN
+        lines counted 37 ended loads; no scheduler assertion fired; clean stop.
+      - Forge 1.20.1, same test: 0.6.0 stopped at 3,688 (87.29%); fixed finished in 27 s.
+    SchedulerRegressionTest.checkBrokenDependencyBlocker now also checks that the dependent's
+    futures fail, that a waiter added later gets the failed future, that a second-level item which
+    starts waiting after the break is failed by the periodic walk, and that a healthy item is not.
+
+    NOT FIXED: a broken chunk inside the spawn area. MinecraftServer.prepareLevels waits until
+    every spawn chunk is ticking, and the broken one never will, so the server stays at
+    "Preparing spawn area" (the fixture's first lattice hit chunk [3, 5]; it sat at 80%). Vanilla
+    crashes there instead.
+
+  distanthorizons ....... DH generating = low TPS, mobs lag .......... FIXED (2026-11-03)
+
+    Reported on CurseForge: chunks load so fast that "even in a superflat world" the internal
+    server's TPS drops and mobs lag until all chunks have loaded; Distant Horizons installed.
+
+    Reproduced on a dedicated server with a superflat world and DH 3.3.3's `dh pregen` (FEATURES,
+    DH's default mode), with and without a mineflayer player flying into new terrain. TPS is game
+    time per wall second; a probe mod timed each tick and each server-thread chunk wait. Without
+    DH, a superflat Chunky pregen (3,200 chunks/s) and the player at view distance 16 both held
+    20 TPS, with ZGC and with G1 at 4 GB. Two causes:
+
+    1. A LEAK THROUGH THE LIGHT ENGINE. DH lights nothing during generation: each chunk gets a
+       DummyLightEngine built with neither sky nor block light, whose chunk getter points at DH's
+       current generation region. Vanilla's LevelLightEngine keeps no reference to the getter when
+       both are off; the bundled Starlight's StarLightInterface kept it anyway. DH holds every
+       generated chunk for 5 s in its chunkSaveIgnoreTimer, so each pending timer kept a whole
+       region alive: 272,086 ProtoChunks live mid-run (vanilla about 36,000 chunks' worth), the
+       6 GB heap at 100%, and about 14,000 ZGC allocation stalls per run, 430 of them on the server
+       thread (vanilla: none). JFR's OldObjectSample gave the path: Timer queue -> DH TimerTask ->
+       ChunkWrapper -> ProtoChunk -> DummyLightEngine -> StarLightInterface.lightAccess ->
+       LightGetterAdaptor.genRegion. With G1 the same full heap means long GC pauses instead.
+       FIX: StarLightInterface keeps the getter only when the engine has a light type.
+
+    2. DH'S STRUCTURE LOOKUPS BLOCKED THE SERVER THREAD. Superflat's default preset has villages.
+       Placing a village cat, Cat.finalizeSpawn asks the real level's structure manager about the
+       cat's position, which calls getChunk(STRUCTURE_REFERENCES) from DH's thread. Vanilla runs
+       that call as a server-thread task that blocks until the chunk, and structure starts for its
+       17 x 17 neighbourhood where no player is, have generated, and runs further such requests
+       nested inside the wait. Here that took 0.6-2.5 s per request (vanilla 0.1-0.45 s).
+       FIX: a creating getChunk from another thread (Skein's workers excepted) now only has the
+       server thread add a ticket (OffThreadChunkLoad.TICKET, one key per request) and return the
+       holder's future, and the calling thread waits for it. Afterwards a vanilla UNKNOWN ticket
+       keeps the chunk one more tick, as vanilla's own would. Kill switch:
+       -Dsuperchunk.chunkSystem.offThreadChunkLoads=false.
+
+    Not a cause: SuperChunk's chunk IO nulls IOWorker.storage (C2ME's fail-fast), so DH logs
+    "Unable to pull pre-existing chunk using synchronous method. Falling back to async method", as
+    it does under C2ME. DH joins every one of those reads before it generates.
+
+    VERIFIED 2026-11-03, NeoForge 21.1.216, DH 3.3.3, 6 GB heap, ZGC, 5 s TPS windows:
+      - DH pregen alone, before: 272k ProtoChunks, about 14,000 stalls, TPS down to 11.7-17.6,
+        worst server cycle 2.6 s, DH 2,200 chunks/s. After: 9,516 ProtoChunks, no stalls, 20.0
+        TPS in every window, worst cycle 131 ms, DH 8,200 chunks/s (DH without SuperChunk:
+        2,180-5,018).
+      - player at view distance 16 plus DH, before: 13.3 TPS at worst, worst cycle 1,342 ms, DH
+        2,870 chunks/s. After: 20.0 TPS, worst cycle 232 ms, DH 8,938. The player got all 11,025
+        chunks both times.
+      - light fix alone (off-thread loads switched off): 113 server-thread chunk waits up to
+        373 ms, worst cycle 374 ms. With the off-thread change: none.
+      - normal terrain, DH pregen r64: 20.5 -> 19.2 s, worst cycle 360 -> 61 ms, no stalls either
+        way.
+      - Forge 1.20.1: 301k -> 49k ProtoChunks, 13,651 -> 45 stalls, TPS 18.9 -> 20.0.
+
+    NOT VERIFIED: a real singleplayer client, which is what the report used. Its integrated
+    server runs the same code.
 
   distanthorizons ....... Distant Horizons (chunk-IO thread leak) .. PASS (after fix)
 

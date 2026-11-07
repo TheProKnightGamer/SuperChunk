@@ -352,13 +352,10 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
     }
 
     @Override
-    public void setQueueLevel(int queueLevel) {
-        // no-op
-    }
-
-    @Override
     protected void updateFutures(ChunkMap chunkStorage, Executor executor) {
-        // no-op: the chunk system drives status promotion itself
+        // no-op: the chunk system drives status promotion itself. Vanilla's only call to the private
+        // setQueueLevel is in updateFutures, so that method needs no override (and no access
+        // transformer, which would crash any mod that @Overwrites it as private: GitHub #31).
     }
 
     /**
@@ -385,8 +382,13 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
         return this.getGenerationRefCount() == 0 && this.getSavingFuture().isDone();
     }
 
-    @Override
-    public CompletableFuture<ChunkResult<ChunkAccess>> getOrCreateFuture(ChunkStatus status) {
+    /**
+     * Our version of vanilla's private {@code GenerationChunkHolder.getOrCreateFuture}. It used to
+     * override it through a {@code public-f} access transformer; that crashes any mod that
+     * {@code @Overwrite}s the method as private (GitHub #31). Vanilla's remaining caller,
+     * {@code applyStep}, reaches this through {@code mixin.MixinGenerationChunkHolder}.
+     */
+    public CompletableFuture<ChunkResult<ChunkAccess>> c2me$getOrCreateFuture(ChunkStatus status) {
         NewChunkStatus status1 = NewChunkStatus.fromVanillaStatus(status);
         triggerDeferredLoad(status1);
         final CompletableFuture<Void> futureForStatus = this.newHolder.getFutureForStatus0(status1);
@@ -398,13 +400,13 @@ public class NewChunkHolderVanillaInterface extends ChunkHolder implements IFast
      * through {@link net.minecraft.server.level.GenerationChunkHolder#scheduleChunkGenerationTask}, which
      * gates on the vanilla {@code highestAllowedStatus}/{@code isStatusDisallowed} machinery and on vanilla's
      * own {@code ChunkGenerationTask} pipeline. The chunk system drives status promotion itself, so we bypass
-     * all of that and route directly to our {@link #getOrCreateFuture(ChunkStatus)} (which raises the FlowSched
+     * all of that and route directly to our {@link #c2me$getOrCreateFuture(ChunkStatus)} (which raises the FlowSched
      * target status via the deferred-load tickets). Without this, the new holder never sets
      * {@code highestAllowedStatus}, so vanilla short-circuits to UNLOADED ("Chunk not there when requested").
      */
     @Override
     public CompletableFuture<ChunkResult<ChunkAccess>> scheduleChunkGenerationTask(ChunkStatus targetStatus, ChunkMap chunkMap) {
-        return this.getOrCreateFuture(targetStatus);
+        return this.c2me$getOrCreateFuture(targetStatus);
     }
 
     @Nullable
