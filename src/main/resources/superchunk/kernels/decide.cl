@@ -22,9 +22,11 @@
 //   fp64 pragma + noise.cl + dfc_support.cl + rng.cl + aquifer.cl + THIS +
 //   emitted(tail/barrier fns) + generated kernel entry.
 //
-// PRECISION: the CORNER BUFFER is always fp64 (produced by the fp64 batcher
-// corner NDRange; the `corners` pointers below are hard-typed double and
-// converted at load). The DECISION math (`real`: interpolation, emitted
+// PRECISION: the CORNER BUFFER is fp64 (produced by the fp64 batcher corner
+// NDRange; the `corners` pointers below are `sc_corner_t` and converted at load),
+// or float when the whole GPU path runs single precision (-DSC_CORNER_F32,
+// gpu.desiredFp=fp32 / no fp64 on the device, built together with -DSC_NO_FP64:
+// then aq_decide's `xreal` and the beard sum below are float too). The DECISION math (`real`: interpolation, emitted
 // tail/barrier/vein noise ASTs) follows the build: fp64 by default, fp32
 // under -DUSE_FP32 (gpu.decideFp32 — the decide chain is ALU-bound and GA104
 // fp64 is 1/64 rate). aq_decide's comparison algebra stays hard-typed double
@@ -48,6 +50,12 @@
 //   7 deepslate_iron_ore 8 raw_iron 9 tuff (IRON vein: ore/raw/filler)
 //  10 beard-sentinel (inside the chunk's beard AABB -> CPU decides)
 // 255 absent (chunk had no aux -> no decision; host never slices these)
+#ifdef SC_CORNER_F32
+typedef float sc_corner_t;
+#else
+typedef double sc_corner_t;
+#endif
+
 #define SC_DEC_BEARD  10
 #define SC_DEC_ABSENT 255
 
@@ -66,7 +74,7 @@
 // order). Same corner flat index (Y-outer/X-mid/Z-inner) and n[X][Y][Z] naming
 // as df_full_field_interp_lerp3 (fullfield.cl); mc_lerp3 == Mth.lerp3
 // op-for-op (mc_lerp = a + t*(b-a), FP_CONTRACT OFF from noise.cl).
-inline real sc_dec_lerp3_grid(__global const double* corners, int base,
+inline real sc_dec_lerp3_grid(__global const sc_corner_t* corners, int base,
                               int cx, int cy, int cz, int dimX, int dimZ,
                               real dx, real dy, real dz) {
     real n000 = (real) corners[base + ((cy)     * dimX + (cx))     * dimZ + (cz)];
@@ -83,7 +91,7 @@ inline real sc_dec_lerp3_grid(__global const double* corners, int base,
 // In-register 8-corner fetch + Y->X->Z value-path order (NoiseInterpolator
 // updateForY/updateForX/updateForZ `this.value` — the per-block vein DF reads).
 // Mirrors df_full_field_interp (fullfield.cl) exactly.
-inline real sc_dec_value_grid(__global const double* corners, int base,
+inline real sc_dec_value_grid(__global const sc_corner_t* corners, int base,
                               int cx, int cy, int cz, int dimX, int dimZ,
                               real dx, real dy, real dz) {
     real n000 = (real) corners[base + ((cy)     * dimX + (cx))     * dimZ + (cz)];
@@ -123,7 +131,7 @@ inline real sc_dec_value_grid(__global const double* corners, int base,
 // the value order (sc_dec_value_grid): its dy-then-dx stages are the shared
 // prefix and its final mc_lerp(ddz, vZ0, vZ1) is the per-block op.
 // =====================================================================
-inline void sc_dec_lerp3_prefix(__global const double* corners, int base,
+inline void sc_dec_lerp3_prefix(__global const sc_corner_t* corners, int base,
                                 int cx, int cy, int cz, int dimX, int dimZ,
                                 real dx, real dy,
                                 __private real* p0, __private real* p1) {
@@ -139,7 +147,7 @@ inline void sc_dec_lerp3_prefix(__global const double* corners, int base,
     *p1 = mc_lerp2(dx, dy, n001, n101, n011, n111);
 }
 
-inline void sc_dec_value_prefix(__global const double* corners, int base,
+inline void sc_dec_value_prefix(__global const sc_corner_t* corners, int base,
                                 int cx, int cy, int cz, int dimX, int dimZ,
                                 real dx, real dy,
                                 __private real* p0, __private real* p1) {
@@ -169,7 +177,7 @@ inline void sc_dec_value_prefix(__global const double* corners, int base,
 // the block's small integer distances to its piece or junction, so the CPU fills
 // tables of every such term once (ScBeardBoxAccess.superchunk$beardTables), each
 // computed by the same functions and factor compute() uses — a lookup IS that term's
-// double. The sum stays double in every build (like aq_decide). BEARD_BOX terms also
+// double. The sum is `xreal` like aq_decide: double, except in the all-fp32 build. BEARD_BOX terms also
 // depend on the piece's height and are computed here: op-for-op vanilla
 // getBeardContribution and Mth.fastInvSqrt, FP_CONTRACT OFF from aquifer.cl, on
 // vanilla's own BEARD_KERNEL floats.
@@ -190,26 +198,38 @@ inline void sc_dec_value_prefix(__global const double* corners, int base,
 #define SC_BT_BURY  27648
 #define SC_BT_ENCAP 28873
 
-inline double sc_fast_inv_sqrt(double number) {
-    double d0 = 0.5 * number;
+#ifdef SC_NO_FP64
+// All-fp32 decide build: the single-precision form of the same bit trick (the classic
+// 0x5f3759df constant). Not vanilla-exact; that build's envelope is measured, not proven.
+inline xreal sc_fast_inv_sqrt(xreal number) {
+    xreal d0 = 0.5f * number;
+    int i = as_int(number);
+    i = 0x5f3759df - (i >> 1);
+    number = as_float(i);
+    return number * (1.5f - d0 * number * number);
+}
+#else
+inline xreal sc_fast_inv_sqrt(xreal number) {
+    xreal d0 = 0.5 * number;
     long i = as_long(number);
     i = 6910469410427058090L - (i >> 1);
     number = as_double(i);
     return number * (1.5 - d0 * number * number);
 }
+#endif
 
 // Vanilla getBeardContribution, for arguments already inside the kernel range.
-inline double sc_beard_contribution(int x, int y, int z, int height, __global const float* kern) {
-    double d0 = (double) height + 0.5;
-    double d1 = (double) x * (double) x + d0 * d0 + (double) z * (double) z;
-    double d2 = -d0 * sc_fast_inv_sqrt(d1 / 2.0) / 2.0;
-    return d2 * (double) kern[(z + 12) * 24 * 24 + (x + 12) * 24 + (y + 12)];
+inline xreal sc_beard_contribution(int x, int y, int z, int height, __global const float* kern) {
+    xreal d0 = (xreal) height + 0.5;
+    xreal d1 = (xreal) x * (xreal) x + d0 * d0 + (xreal) z * (xreal) z;
+    xreal d2 = -d0 * sc_fast_inv_sqrt(d1 / 2.0) / 2.0;
+    return d2 * (xreal) kern[(z + 12) * 24 * 24 + (x + 12) * 24 + (y + 12)];
 }
 
 // One piece's term at block (i, j, k), or 0.0 (skipped by the caller's test first).
 // Returns whether the term may be nonzero; *v is the term.
 inline int sc_beard_piece(__global const int* bd, int i1, int j1, int j, int k1, int l1,
-                          __global const float* kern, __global const double* bt, double* v) {
+                          __global const float* kern, __global const xreal* bt, xreal* v) {
     int adj = bd[7];
     if (adj == 1) {                                             // BURY
         if (i1 > 6 || j1 > 6 || l1 > 12 || l1 < -12) {
@@ -239,9 +259,9 @@ inline int sc_beard_piece(__global const int* bd, int i1, int j1, int j, int k1,
 
 // Beardifier.compute at block (i, j, k) over this chunk's packed terms (layout:
 // ScBeardBoxAccess.superchunk$beardTerms, without its two-int header).
-inline double sc_beard(int i, int j, int k, __global const int* bd, int nPieces, int nJunctions,
-                       __global const float* kern, __global const double* bt) {
-    double d0 = 0.0;
+inline xreal sc_beard(int i, int j, int k, __global const int* bd, int nPieces, int nJunctions,
+                       __global const float* kern, __global const xreal* bt) {
+    xreal d0 = 0.0;
     for (int p = 0; p < nPieces; ++p, bd += 8) {
         int i1 = max(0, max(bd[0] - i, i - bd[3]));
         int j1 = max(0, max(bd[2] - k, k - bd[5]));
@@ -249,7 +269,7 @@ inline double sc_beard(int i, int j, int k, __global const int* bd, int nPieces,
             continue;
         }
         int k1 = bd[1] + bd[6];
-        double v;
+        xreal v;
         if (sc_beard_piece(bd, i1, j1, j, k1, j - k1, kern, bt, &v)) {
             d0 += v;
         }
@@ -272,7 +292,7 @@ inline double sc_beard(int i, int j, int k, __global const int* bd, int nPieces,
 // done once for the run instead of once per block.
 #define SC_BEARD_RUN 8
 inline void sc_beard_run(int i, int j, int k0, int n, __global const int* bd, int nPieces, int nJunctions,
-                         __global const float* kern, __global const double* bt, __private double* out) {
+                         __global const float* kern, __global const xreal* bt, __private xreal* out) {
     for (int l = 0; l < n; ++l) {
         out[l] = 0.0;
     }
@@ -290,7 +310,7 @@ inline void sc_beard_run(int i, int j, int k0, int n, __global const int* bd, in
         for (int l = 0; l < n; ++l) {
             int k = k0 + l;
             int j1 = max(0, max(bd[2] - k, k - bd[5]));
-            double v;
+            xreal v;
             if (j1 < 12 && sc_beard_piece(bd, i1, j1, j, k1, l1, kern, bt, &v)) {
                 out[l] += v;
             }
@@ -302,7 +322,7 @@ inline void sc_beard_run(int i, int j, int k0, int n, __global const int* bd, in
         if (j2 < -12 || j2 > 11 || k2 < -12 || k2 > 11) {
             continue;
         }
-        __global const double* row = bt + SC_BT_JUNC + (j2 + 12) * 576 + (k2 + 12) * 24 + 12;
+        __global const xreal* row = bt + SC_BT_JUNC + (j2 + 12) * 576 + (k2 + 12) * 24 + 12;
         for (int l = 0; l < n; ++l) {
             int l2 = k0 + l - bd[2];
             if (l2 >= -12 && l2 <= 11) {
