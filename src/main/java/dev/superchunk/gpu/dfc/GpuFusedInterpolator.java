@@ -1556,8 +1556,9 @@ public final class GpuFusedInterpolator implements AutoCloseable {
             // KEPT mapped for the buffer's lifetime. benchHostF/D are typed VIEWS over the
             // pinned host pointer (NOT memAlloc'd), so the readBench() DMA below is a fast
             // device->pinned-host transfer instead of a slow staged copy.
-            benchPinnedMem = benchProgram.createHostReadWriteBuffer(bytes);
-            benchPinnedAddr = benchProgram.mapRead(benchQueue, benchPinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            benchPinnedAddr = benchProgram.allocReadStaging(benchQueue, bytes, stagingMem);
+            benchPinnedMem = stagingMem[0];
             benchPinnedBytes = bytes;
             if (fp32) {
                 benchHostF = MemoryUtil.memFloatBuffer(benchPinnedAddr, total);
@@ -1591,17 +1592,9 @@ public final class GpuFusedInterpolator implements AutoCloseable {
         void freeBenchHost() {
             benchHostF = null;
             benchHostD = null;
-            if (benchPinnedMem != NULL) {
-                if (benchPinnedAddr != NULL) {
-                    try {
-                        benchProgram.unmap(benchQueue, benchPinnedMem, benchPinnedAddr, benchPinnedBytes);
-                    } catch (Throwable ignored) {
-                    }
-                    benchPinnedAddr = NULL;
-                }
-                CLProgram.releaseMem(benchPinnedMem);
-                benchPinnedMem = NULL;
-            }
+            benchProgram.freeReadStaging(benchQueue, benchPinnedMem, benchPinnedAddr, benchPinnedBytes);
+            benchPinnedAddr = NULL;
+            benchPinnedMem = NULL;
             benchPinnedBytes = 0;
         }
 
@@ -1621,8 +1614,9 @@ public final class GpuFusedInterpolator implements AutoCloseable {
             freeFfHost();             // unmaps + releases the old pinned staging (needs benchQueue)
             ffCapacity = 0;
             ffOutMem = benchProgram.createOutputBuffer(bytes);
-            ffPinnedMem = benchProgram.createHostReadWriteBuffer(bytes);
-            ffPinnedAddr = benchProgram.mapRead(benchQueue, ffPinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            ffPinnedAddr = benchProgram.allocReadStaging(benchQueue, bytes, stagingMem);
+            ffPinnedMem = stagingMem[0];
             ffPinnedBytes = bytes;
             if (fp32) {
                 ffHostF = MemoryUtil.memFloatBuffer(ffPinnedAddr, total);
@@ -1824,17 +1818,9 @@ public final class GpuFusedInterpolator implements AutoCloseable {
         void freeFfHost() {
             ffHostF = null;
             ffHostD = null;
-            if (ffPinnedMem != NULL) {
-                if (ffPinnedAddr != NULL) {
-                    try {
-                        benchProgram.unmap(benchQueue, ffPinnedMem, ffPinnedAddr, ffPinnedBytes);
-                    } catch (Throwable ignored) {
-                    }
-                    ffPinnedAddr = NULL;
-                }
-                CLProgram.releaseMem(ffPinnedMem);
-                ffPinnedMem = NULL;
-            }
+            benchProgram.freeReadStaging(benchQueue, ffPinnedMem, ffPinnedAddr, ffPinnedBytes);
+            ffPinnedAddr = NULL;
+            ffPinnedMem = NULL;
             ffPinnedBytes = 0;
         }
 
@@ -1849,8 +1835,9 @@ public final class GpuFusedInterpolator implements AutoCloseable {
             freeFfLerp3Host();        // unmaps + releases the old pinned staging (needs benchQueue)
             ffLerp3Capacity = 0;
             ffLerp3OutMem = benchProgram.createOutputBuffer(bytes);
-            ffLerp3PinnedMem = benchProgram.createHostReadWriteBuffer(bytes);
-            ffLerp3PinnedAddr = benchProgram.mapRead(benchQueue, ffLerp3PinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            ffLerp3PinnedAddr = benchProgram.allocReadStaging(benchQueue, bytes, stagingMem);
+            ffLerp3PinnedMem = stagingMem[0];
             ffLerp3PinnedBytes = bytes;
             if (fp32) {
                 ffLerp3HostF = MemoryUtil.memFloatBuffer(ffLerp3PinnedAddr, total);
@@ -1880,17 +1867,9 @@ public final class GpuFusedInterpolator implements AutoCloseable {
         void freeFfLerp3Host() {
             ffLerp3HostF = null;
             ffLerp3HostD = null;
-            if (ffLerp3PinnedMem != NULL) {
-                if (ffLerp3PinnedAddr != NULL) {
-                    try {
-                        benchProgram.unmap(benchQueue, ffLerp3PinnedMem, ffLerp3PinnedAddr, ffLerp3PinnedBytes);
-                    } catch (Throwable ignored) {
-                    }
-                    ffLerp3PinnedAddr = NULL;
-                }
-                CLProgram.releaseMem(ffLerp3PinnedMem);
-                ffLerp3PinnedMem = NULL;
-            }
+            benchProgram.freeReadStaging(benchQueue, ffLerp3PinnedMem, ffLerp3PinnedAddr, ffLerp3PinnedBytes);
+            ffLerp3PinnedAddr = NULL;
+            ffLerp3PinnedMem = NULL;
             ffLerp3PinnedBytes = 0;
         }
 

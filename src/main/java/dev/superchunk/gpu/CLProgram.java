@@ -1137,6 +1137,57 @@ public final class CLProgram implements AutoCloseable {
         checkCL(clEnqueueUnmapMemObject(q, mem, mapped, null, null));
     }
 
+    /**
+     * Allocates {@code bytes} of host staging for {@link #enqueueReadAsync} reads and returns its
+     * address; slot 0 of {@code memOut} receives the backing {@code cl_mem}, or {@code NULL}.
+     * Normally a {@code CL_MEM_ALLOC_HOST_PTR} buffer mapped once and kept mapped, so the read DMAs
+     * into pinned memory (about 2x the pageable bandwidth on a discrete GPU). Where the driver
+     * refuses a read into a mapped pointer ({@link OpenCLBackend#pinnedReadStaging()} false, e.g.
+     * Intel NEO) it is plain aligned host memory. Release with {@link #freeReadStaging}.
+     */
+    public long allocReadStaging(long q, long bytes, long[] memOut) {
+        memOut[0] = NULL;
+        if (!OpenCLBackend.pinnedReadStaging()) {
+            long addr = org.lwjgl.system.MemoryUtil.nmemAlignedAlloc(64, bytes);
+            if (addr == NULL) {
+                throw new OutOfMemoryError("GPU readback staging: " + bytes + " bytes");
+            }
+            return addr;
+        }
+        long mem = createHostReadWriteBuffer(bytes);
+        long addr;
+        try {
+            addr = mapRead(q, mem, bytes);
+        } catch (RuntimeException | Error e) {
+            releaseMem(mem);
+            throw e;
+        }
+        memOut[0] = mem;
+        return addr;
+    }
+
+    /**
+     * Releases staging from {@link #allocReadStaging}. Best effort, never throws. Plain host memory
+     * is freed only after {@code q} drains, since a read still in flight may target it (a mapped
+     * buffer's unmap is ordered behind such a read by the in-order queue).
+     */
+    public void freeReadStaging(long q, long mem, long addr, long bytes) {
+        if (mem != NULL) {
+            if (addr != NULL) {
+                try {
+                    unmap(q, mem, addr, bytes);
+                } catch (Throwable ignored) {
+                }
+            }
+            releaseMem(mem);
+        } else if (addr != NULL) {
+            if (q != NULL) {
+                CL10.clFinish(q);
+            }
+            org.lwjgl.system.MemoryUtil.nmemAlignedFree(addr);
+        }
+    }
+
     /** Blocks until all commands on {@code q} complete (explicit sync). */
     public void finish(long q) {
         checkCL(CL10.clFinish(q));

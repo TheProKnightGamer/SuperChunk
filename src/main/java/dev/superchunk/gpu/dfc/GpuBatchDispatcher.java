@@ -1987,6 +1987,8 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         // kept mapped: the device->host readback of the whole K*M*n buffer DMAs into pinned
         // host memory (~2x bandwidth vs pageable on the discrete GPU). hOutF/hOutD are VIEWS
         // into pinnedAddr, so the readback + per-slice copy code reads it directly.
+        // Allocated by CLProgram.allocReadStaging: on a driver that refuses reads into a mapped
+        // pointer (Intel NEO) pinnedMem stays NULL and pinnedAddr is plain host memory.
         long pinnedMem = NULL;
         long pinnedAddr = NULL;
         long pinnedBytes = 0;
@@ -2234,8 +2236,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             freeHostOut();
             // Pinned host staging for the readback DMA (see field comment). Kept mapped.
             long bytes = (long) outElems * realBytes;
-            pinnedMem = program.createHostReadWriteBuffer(bytes);
-            pinnedAddr = program.mapRead(queue, pinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            pinnedAddr = program.allocReadStaging(queue, bytes, stagingMem);
+            pinnedMem = stagingMem[0];
             pinnedBytes = bytes;
             if (fp32) {
                 hOutF = MemoryUtil.memFloatBuffer(pinnedAddr, outElems);
@@ -2251,14 +2254,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // pinnedMem.
             hOutF = null;
             hOutD = null;
-            if (pinnedAddr != NULL) {
-                program.unmap(queue, pinnedMem, pinnedAddr, pinnedBytes);
-                pinnedAddr = NULL;
-            }
-            if (pinnedMem != NULL) {
-                CLProgram.releaseMem(pinnedMem);
-                pinnedMem = NULL;
-            }
+            program.freeReadStaging(queue, pinnedMem, pinnedAddr, pinnedBytes);
+            pinnedAddr = NULL;
+            pinnedMem = NULL;
             pinnedBytes = 0;
         }
 
@@ -2351,8 +2349,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // readback (see the field comment; mirrors ensureOutCapacity exactly).
             idsMem = decideProgram.createOutputBuffer(bytes);
             freeIdsHost();
-            idsPinnedMem = decideProgram.createHostReadWriteBuffer(bytes);
-            idsPinnedAddr = decideProgram.mapRead(queue, idsPinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            idsPinnedAddr = decideProgram.allocReadStaging(queue, bytes, stagingMem);
+            idsPinnedMem = stagingMem[0];
             if (idsPinnedAddr == NULL) {
                 // Fail soft via the enqueueDecide catch (decide sticky-disable) rather
                 // than wrapping address 0 and SIGSEGV-ing on the first ids() copy.
@@ -2368,14 +2367,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             // drop the ref; the backing host memory is released by unmapping + releasing
             // idsPinnedMem (same contract as freeHostOut()).
             hIds = null;
-            if (idsPinnedAddr != NULL) {
-                decideProgram.unmap(queue, idsPinnedMem, idsPinnedAddr, idsPinnedBytes);
-                idsPinnedAddr = NULL;
-            }
-            if (idsPinnedMem != NULL) {
-                CLProgram.releaseMem(idsPinnedMem);
-                idsPinnedMem = NULL;
-            }
+            decideProgram.freeReadStaging(queue, idsPinnedMem, idsPinnedAddr, idsPinnedBytes);
+            idsPinnedAddr = NULL;
+            idsPinnedMem = NULL;
             idsPinnedBytes = 0;
         }
 
@@ -2407,8 +2401,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
             climOutMem = program.createOutputBuffer((long) outElems * realBytes);
             freeClimHostOut();
             long bytes = (long) outElems * realBytes;
-            climPinnedMem = program.createHostReadWriteBuffer(bytes);
-            climPinnedAddr = program.mapRead(queue, climPinnedMem, bytes);
+            long[] stagingMem = new long[1];
+            climPinnedAddr = program.allocReadStaging(queue, bytes, stagingMem);
+            climPinnedMem = stagingMem[0];
             climPinnedBytes = bytes;
             if (fp32) {
                 hClimOutF = MemoryUtil.memFloatBuffer(climPinnedAddr, outElems);
@@ -2421,14 +2416,9 @@ public final class GpuBatchDispatcher implements AutoCloseable {
         void freeClimHostOut() {
             hClimOutF = null;
             hClimOutD = null;
-            if (climPinnedAddr != NULL) {
-                program.unmap(queue, climPinnedMem, climPinnedAddr, climPinnedBytes);
-                climPinnedAddr = NULL;
-            }
-            if (climPinnedMem != NULL) {
-                CLProgram.releaseMem(climPinnedMem);
-                climPinnedMem = NULL;
-            }
+            program.freeReadStaging(queue, climPinnedMem, climPinnedAddr, climPinnedBytes);
+            climPinnedAddr = NULL;
+            climPinnedMem = NULL;
             climPinnedBytes = 0;
         }
 
