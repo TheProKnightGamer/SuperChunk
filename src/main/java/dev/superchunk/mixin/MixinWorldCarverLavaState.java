@@ -29,7 +29,7 @@ import org.spongepowered.asm.mixin.injection.At;
 public abstract class MixinWorldCarverLavaState {
 
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$LAVA_STATE_ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.lavaStateCache", "true"));
 
     @Unique
@@ -42,7 +42,7 @@ public abstract class MixinWorldCarverLavaState {
                     target = "Lnet/minecraft/world/level/material/FluidState;createLegacyBlock()Lnet/minecraft/world/level/block/state/BlockState;"),
             require = 0)
     private BlockState superchunk$cachedLava(FluidState instance, Operation<BlockState> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$LAVA_STATE_ENABLED) {
             return original.call(instance);
         }
         BlockState s = superchunk$lavaLegacyBlock;

@@ -297,10 +297,18 @@ public final class SuperChunkConfig {
         section("pregen.chunkyWorkingCount", "Chunky pre-generation", null);
         def("pregen.chunkyWorkingCount", "auto",
                 "How many chunks Chunky keeps generating at once. Chunky's own default of 50 holds this "
-                        + "mod's pipeline back badly. auto = 192 per GB of maximum heap, between 256 and 3072. "
-                        + "default = leave Chunky's setting alone. A number is used as given. "
-                        + "-Dchunky.maxWorkingCount on the command line always wins. Measured with a 16 GB "
-                        + "heap: 3072 was fastest, 768 about 6% slower, 6144 slower again.");
+                        + "mod's pipeline back, but more is not better: every chunk in flight keeps about 30 "
+                        + "neighbours in memory (roughly 2.5 MB in a vanilla world, more with world generation "
+                        + "mods), and the garbage collector pays for all of them. auto = 12 per CPU thread, at "
+                        + "least 256, and never more than 128 per GB of maximum heap. default = leave Chunky's "
+                        + "setting alone. A number is used as given. -Dchunky.maxWorkingCount on the command "
+                        + "line always wins. Measured on 28 threads with an 8 GB heap: 256 used 12-16% less CPU "
+                        + "per chunk than 1024 and finished no later, with or without the GPU.");
+        def("pregen.memoryGate", "true",
+                "Slow Chunky down while the heap is nearly full of live data (more than 90% in use right "
+                        + "after garbage collection), instead of letting the server grind to a halt and a "
+                        + "mod's world generation fail with OutOfMemoryError. A warning is logged once a "
+                        + "minute while this is happening. false = never slow Chunky down.");
 
         section("player.fullSpeedLoading", "Fast chunk loading for moving players",
                 "Server-side only: a slow client still receives, builds and acknowledges chunks at its own "
@@ -670,12 +678,17 @@ public final class SuperChunkConfig {
      *
      * <p>Three rules make this safe to set on a user's behalf: an explicit {@code -D} always wins
      * (same contract as {@link #applyC2me}), {@code default} leaves Chunky entirely alone, and the
-     * {@code auto} default scales with the heap rather than hard-coding the value that happened to
-     * win on a 16 GB benchmark box — every in-flight chunk is retained, so a number sized for 16 GB
-     * is a way to run a 4 GB server out of memory. The class is only touched if Chunky is installed
+     * {@code auto} default is sized to keep the workers busy (12 per CPU thread) and bounded by
+     * the heap (128 per GB) — every in-flight chunk keeps about 30 neighbours loaded, so a large
+     * number costs garbage-collection time everywhere and runs a small server out of memory. The class is only touched if Chunky is installed
      * at all; writing a system property no one reads is inert.
      */
     private static void applyChunky(Properties p) {
+        // read by dev.superchunk.pregen.PregenMemoryGate; an explicit -D wins
+        final String gate = p.getProperty("pregen.memoryGate");
+        if (gate != null && !gate.isBlank() && System.getProperty("superchunk.pregen.memoryGate") == null) {
+            System.setProperty("superchunk.pregen.memoryGate", gate.trim());
+        }
         String val = p.getProperty("pregen.chunkyWorkingCount");
         if (val == null || val.isBlank() || val.equalsIgnoreCase(DEFAULT_PLACEHOLDER)) {
             return;
@@ -689,8 +702,14 @@ public final class SuperChunkConfig {
         String how;
         if ("auto".equalsIgnoreCase(val.trim())) {
             double heapGb = Runtime.getRuntime().maxMemory() / (1024.0 * 1024.0 * 1024.0);
-            n = (int) Math.max(256, Math.min(3072, heapGb * 192.0));
-            how = String.format("auto from a %.1f GB max heap", heapGb);
+            // Enough chunks in flight to keep every worker busy (measured: 64 starves 18 workers,
+            // 128 does not), and no more: each one keeps about 30 neighbours loaded, which the
+            // garbage collector has to trace and copy. 1024 instead of 256 cost 2 ms of GC per
+            // chunk on an 8 GB heap. The heap bound keeps small servers safe.
+            final int cpus = Runtime.getRuntime().availableProcessors();
+            n = Math.max(256, Math.min(3072, cpus * 12));
+            n = Math.min(n, (int) Math.max(128, heapGb * 128.0));
+            how = String.format("auto from %d CPU threads and a %.1f GB max heap", cpus, heapGb);
         } else {
             try {
                 n = Integer.parseInt(val.trim());

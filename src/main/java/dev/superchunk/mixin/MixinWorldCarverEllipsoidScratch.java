@@ -32,7 +32,7 @@ import org.spongepowered.asm.mixin.injection.At;
 public abstract class MixinWorldCarverEllipsoidScratch {
 
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$ELLIPSOID_ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.carverScratchReuse", "true"));
 
     @Unique
@@ -52,7 +52,7 @@ public abstract class MixinWorldCarverEllipsoidScratch {
             at = @At(value = "NEW", target = "net/minecraft/core/BlockPos$MutableBlockPos", ordinal = 0),
             require = 0)
     private BlockPos.MutableBlockPos superchunk$reuseCursor(Operation<BlockPos.MutableBlockPos> original) {
-        return SUPERCHUNK$ENABLED ? superchunk$cursor.get() : original.call();
+        return SUPERCHUNK$ELLIPSOID_ENABLED ? superchunk$cursor.get() : original.call();
     }
 
     @WrapOperation(
@@ -60,7 +60,7 @@ public abstract class MixinWorldCarverEllipsoidScratch {
             at = @At(value = "NEW", target = "net/minecraft/core/BlockPos$MutableBlockPos", ordinal = 1),
             require = 0)
     private BlockPos.MutableBlockPos superchunk$reuseCheckPos(Operation<BlockPos.MutableBlockPos> original) {
-        return SUPERCHUNK$ENABLED ? superchunk$checkPos.get() : original.call();
+        return SUPERCHUNK$ELLIPSOID_ENABLED ? superchunk$checkPos.get() : original.call();
     }
 
     @WrapOperation(
@@ -68,7 +68,7 @@ public abstract class MixinWorldCarverEllipsoidScratch {
             at = @At(value = "NEW", target = "(Z)Lorg/apache/commons/lang3/mutable/MutableBoolean;"),
             require = 0)
     private MutableBoolean superchunk$reuseReachedSurface(boolean initial, Operation<MutableBoolean> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$ELLIPSOID_ENABLED) {
             return original.call(initial);
         }
         MutableBoolean b = superchunk$reachedSurface.get();

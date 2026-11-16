@@ -3,6 +3,7 @@ package dev.superchunk.com.ishland.flowsched.scheduler;
 import dev.superchunk.com.ishland.flowsched.executor.ExecutorManager;
 import dev.superchunk.com.ishland.flowsched.executor.LockToken;
 import dev.superchunk.com.ishland.flowsched.executor.Task;
+import dev.superchunk.com.ishland.flowsched.structs.DynamicPriorityQueue;
 import dev.superchunk.com.ishland.flowsched.structs.OneTaskAtATimeExecutor;
 import io.reactivex.rxjava3.core.Completable;
 
@@ -33,6 +34,10 @@ public final class SchedulerRegressionTest {
         checkSerialExecutor();
         checkWorkerLocks();
         checkDeferredReleasesAndFailures();
+        checkStarvationFloor();
+        checkSettledTicketTicks();
+        checkTicketChurn();
+        checkDependencySlots();
         System.out.println("Scheduler regression checks passed");
     }
 
@@ -487,6 +492,359 @@ public final class SchedulerRegressionTest {
         };
     }
 
+    /**
+     * Priorities at or above the starvation floor get every 16th dequeue even while higher
+     * priorities keep the queue busy; priorities below the floor keep strict order.
+     */
+    private static void checkStarvationFloor() {
+        DynamicPriorityQueue<Integer> strict = new DynamicPriorityQueue<>(8);
+        for (int i = 0; i < 100; i++) strict.enqueue(10_000 + i, 7);
+        for (int i = 0; i < 1000; i++) strict.enqueue(i, 1);
+        for (int i = 0; i < 1000; i++) {
+            require(strict.dequeue() == i, "without a floor the order is strict");
+        }
+
+        DynamicPriorityQueue<Integer> queue = new DynamicPriorityQueue<>(8);
+        queue.setStarvationFloor(7);
+        for (int i = 0; i < 100; i++) queue.enqueue(10_000 + i, 7);
+        for (int i = 0; i < 50; i++) queue.enqueue(20_000 + i, 6);
+        for (int i = 0; i < 1000; i++) queue.enqueue(i, 1);
+        int nextHigh = 0;
+        int nextLow = 10_000;
+        for (int n = 1; n <= 960; n++) {
+            int got = queue.dequeue();
+            if (n % 16 == 0) {
+                require(got == nextLow++, "every 16th dequeue serves the starved priority, oldest first");
+            } else {
+                require(got == nextHigh++, "other dequeues keep strict priority order");
+            }
+        }
+        require(nextLow == 10_060 && nextHigh == 900, "60 starved and 900 urgent tasks served");
+        // the remaining 100 urgent tasks, then priority 6 (below the floor, never served early), then the rest
+        int served6 = 0;
+        int served7 = 0;
+        Integer got;
+        boolean six = false;
+        while ((got = queue.dequeue()) != null) {
+            if (got >= 20_000) {
+                six = true;
+                require(nextHigh == 1000, "priority 6 waits for all urgent tasks");
+                served6++;
+            } else if (got >= 10_000) {
+                served7++;
+            } else {
+                require(!six, "urgent tasks come before priority 6");
+                nextHigh++;
+            }
+        }
+        require(nextHigh == 1000 && served6 == 50 && served7 == 40 && queue.size() == 0, "queue drains completely");
+    }
+
+    private static StatusAdvancingScheduler<Integer, Object, Object, Object> plainScheduler(Executor background) {
+        return new StatusAdvancingScheduler<>() {
+            @Override protected Executor getBackgroundExecutor() { return background; }
+            @Override protected Status getUnloadedStatus() { return Status.ALL[0]; }
+            @Override protected Object makeContext(ItemHolder<Integer, Object, Object, Object> holder,
+                    ItemStatus<Integer, Object, Object> nextStatus,
+                    KeyStatusPair<Integer, Object, Object>[] dependencies, boolean isUpgrade) {
+                return new Object();
+            }
+            @Override protected ExceptionHandlingAction handleTransactionException(
+                    ItemHolder<Integer, Object, Object, Object> holder,
+                    ItemStatus<Integer, Object, Object> nextStatus, boolean isUpgrade, Throwable throwable) {
+                throw new AssertionError("unexpected scheduler failure", throwable);
+            }
+        };
+    }
+
+    private static void drain(ArrayDeque<Runnable> work) {
+        int tasks = 0;
+        while (!work.isEmpty()) {
+            require(++tasks < 100_000, "scheduler never stopped scheduling work");
+            work.removeFirst().run();
+        }
+    }
+
+    private static void checkSettledTicketTicks() {
+        // A ticket change on an item that is at its target and keeps it queues no tick; its callback
+        // still runs, and every change of the target is still acted on, down to unloading.
+        ArrayDeque<Runnable> work = new ArrayDeque<>();
+        StatusAdvancingScheduler<Integer, Object, Object, Object> scheduler = plainScheduler(work::addLast);
+        Object a = new Object(), b = new Object(), c = new Object(), d = new Object();
+        AtomicInteger fired = new AtomicInteger();
+        ItemHolder<Integer, Object, Object, Object> holder =
+                scheduler.addTicket(7, a, Status.ALL[5], fired::incrementAndGet);
+        drain(work);
+        require(holder.getStatus() == Status.ALL[5] && fired.get() == 1, "first ticket reaches its status");
+
+        scheduler.addTicket(7, b, Status.ALL[3], fired::incrementAndGet); // below the target
+        require(fired.get() == 2, "a ticket for a reached status runs its callback at once");
+        scheduler.addTicket(7, c, Status.ALL[5], fired::incrementAndGet); // at the target
+        require(fired.get() == 3, "a ticket at the target runs its callback at once");
+        if (StatusAdvancingScheduler.SKIP_SETTLED_TICKS) {
+            require(work.isEmpty(), "settled ticket adds queue no tick");
+        }
+        drain(work);
+        scheduler.removeTicket(7, ItemTicket.TicketType.EXTERNAL, b, Status.ALL[3]);
+        scheduler.removeTicket(7, ItemTicket.TicketType.EXTERNAL, c, Status.ALL[5]);
+        if (StatusAdvancingScheduler.SKIP_SETTLED_TICKS) {
+            require(work.isEmpty(), "settled ticket removes queue no tick");
+        }
+        drain(work);
+        require(holder.getStatus() == Status.ALL[5], "item keeps its status while a ticket holds it");
+
+        scheduler.addTicket(7, d, Status.ALL[9], fired::incrementAndGet); // raises the target
+        require(!work.isEmpty(), "raising the target queues a tick");
+        drain(work);
+        require(holder.getStatus() == Status.ALL[9] && fired.get() == 4, "raised target is reached");
+        scheduler.removeTicket(7, ItemTicket.TicketType.EXTERNAL, d, Status.ALL[9]); // lowers it again
+        require(!work.isEmpty(), "lowering the target queues a tick");
+        drain(work);
+        require(holder.getStatus() == Status.ALL[5], "item returns to the remaining ticket's status");
+        scheduler.removeTicket(7, ItemTicket.TicketType.EXTERNAL, a, Status.ALL[5]);
+        drain(work);
+        require(scheduler.itemCount() == 0, "item unloads once its last ticket is gone");
+
+        // The same while an upgrade is in flight: the item is parked in its upgrade to status 12.
+        io.reactivex.rxjava3.subjects.CompletableSubject gate = io.reactivex.rxjava3.subjects.CompletableSubject.create();
+        Status.upgradeGate = gate;
+        try {
+            AtomicInteger top = new AtomicInteger();
+            AtomicInteger low = new AtomicInteger();
+            holder = scheduler.addTicket(8, a, Status.ALL[12], top::incrementAndGet);
+            drain(work);
+            require(holder.getStatus() == Status.ALL[11] && top.get() == 0, "item waits in its upgrade to 12");
+            scheduler.addTicket(8, b, Status.ALL[5], low::incrementAndGet);  // reached already
+            require(low.get() == 1, "a ticket for a reached status runs its callback during an upgrade");
+            scheduler.addTicket(8, c, Status.ALL[12], top::incrementAndGet); // the status being upgraded to
+            require(top.get() == 0, "a ticket for the status in flight waits for it");
+            if (StatusAdvancingScheduler.SKIP_SETTLED_TICKS) {
+                require(work.isEmpty(), "ticket adds during an upgrade queue no tick");
+            }
+            drain(work);
+            scheduler.removeTicket(8, ItemTicket.TicketType.EXTERNAL, b, Status.ALL[5]);
+            if (StatusAdvancingScheduler.SKIP_SETTLED_TICKS) {
+                require(work.isEmpty(), "ticket removes during an upgrade queue no tick");
+            }
+            drain(work);
+            gate.onComplete();
+            drain(work);
+            require(holder.getStatus() == Status.ALL[12] && top.get() == 2, "both tickets at 12 get their callback");
+            Status.upgradeGate = null;
+            scheduler.removeTicket(8, ItemTicket.TicketType.EXTERNAL, c, Status.ALL[12]);
+            scheduler.removeTicket(8, ItemTicket.TicketType.EXTERNAL, a, Status.ALL[12]);
+            drain(work);
+            require(scheduler.itemCount() == 0, "item unloads after an upgrade that tickets were changed during");
+
+            // A target lowered while the upgrade is parked still queues its tick, and the item
+            // ends at the remaining ticket's status.
+            io.reactivex.rxjava3.subjects.CompletableSubject gate2 = io.reactivex.rxjava3.subjects.CompletableSubject.create();
+            Status.upgradeGate = gate2;
+            holder = scheduler.addTicket(9, a, Status.ALL[12], NO_CALLBACK);
+            drain(work);
+            scheduler.addTicket(9, b, Status.ALL[4], NO_CALLBACK);
+            drain(work);
+            scheduler.removeTicket(9, ItemTicket.TicketType.EXTERNAL, a, Status.ALL[12]); // target 12 -> 4
+            require(!work.isEmpty(), "lowering the target during an upgrade queues a tick");
+            drain(work);
+            gate2.onComplete();
+            drain(work);
+            require(holder.getStatus() == Status.ALL[4], "item settles at the remaining ticket after the parked upgrade");
+            scheduler.removeTicket(9, ItemTicket.TicketType.EXTERNAL, b, Status.ALL[4]);
+            drain(work);
+            require(scheduler.itemCount() == 0, "item unloads after a cancelled upgrade");
+        } finally {
+            Status.upgradeGate = null;
+        }
+    }
+
+    private static final Runnable NO_CALLBACK = () -> { };
+
+    private static void checkTicketChurn() throws Exception {
+        // Threads add and remove tickets of random statuses on a few items while a pool runs the
+        // ticks. A tick left out wrongly shows as a callback that never runs or an item that never unloads.
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            StatusAdvancingScheduler<Integer, Object, Object, Object> scheduler = plainScheduler(pool);
+            final int threads = 6;
+            final int keys = 12;
+            AtomicInteger pendingCallbacks = new AtomicInteger();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(threads);
+            for (int t = 0; t < threads; t++) {
+                final long seed = 0x7ea5L + t;
+                Thread thread = new Thread(() -> {
+                    try {
+                        Random random = new Random(seed);
+                        ArrayList<Object[]> held = new ArrayList<>();
+                        for (int step = 0; step < 15_000; step++) {
+                            if (held.size() < 6 && random.nextInt(3) != 0) {
+                                int key = random.nextInt(keys);
+                                int status = 1 + random.nextInt(9);
+                                Object source = new Object();
+                                CountDownLatch reached = new CountDownLatch(1);
+                                pendingCallbacks.incrementAndGet();
+                                scheduler.addTicket(key, source, Status.ALL[status], () -> {
+                                    pendingCallbacks.decrementAndGet();
+                                    reached.countDown();
+                                });
+                                held.add(new Object[] {key, status, source, reached});
+                            } else if (!held.isEmpty()) {
+                                Object[] ticket = held.remove(random.nextInt(held.size()));
+                                // a held ticket's status must be reached, so its callback must run
+                                require(((CountDownLatch) ticket[3]).await(20, TimeUnit.SECONDS),
+                                        "a held ticket's callback never ran");
+                                scheduler.removeTicket((Integer) ticket[0], ItemTicket.TicketType.EXTERNAL, ticket[2],
+                                        Status.ALL[(Integer) ticket[1]]);
+                            }
+                        }
+                        for (Object[] ticket : held) {
+                            require(((CountDownLatch) ticket[3]).await(20, TimeUnit.SECONDS),
+                                    "a held ticket's callback never ran");
+                            scheduler.removeTicket((Integer) ticket[0], ItemTicket.TicketType.EXTERNAL, ticket[2],
+                                    Status.ALL[(Integer) ticket[1]]);
+                        }
+                    } catch (Throwable e) {
+                        failure.compareAndSet(null, e);
+                    } finally {
+                        done.countDown();
+                    }
+                }, "ticket-churn-" + t);
+                thread.setDaemon(true);
+                thread.start();
+            }
+            require(done.await(120, TimeUnit.SECONDS), "ticket churn did not finish");
+            if (failure.get() != null) {
+                throw new AssertionError("ticket churn failed", failure.get());
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (scheduler.itemCount() != 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            require(scheduler.itemCount() == 0, "items never unloaded after their tickets were removed: " + scheduler.itemCount());
+            require(pendingCallbacks.get() == 0, "ticket callbacks left pending: " + pendingCallbacks.get());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private static void checkDependencySlots() throws Exception {
+        // Items in a row with worldgen-like dependency rings, generated from several threads, then
+        // released. Run with the dependency slots off and on: every item must reach its status
+        // with its dependencies in place, the slot table must name the registered items, and
+        // everything must unload afterwards.
+        for (boolean slots : new boolean[] {false, true}) {
+            ExecutorService pool = Executors.newFixedThreadPool(4);
+            try {
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                StatusAdvancingScheduler<Integer, Object, Object, Object> scheduler = new StatusAdvancingScheduler<>() {
+                    @Override protected Executor getBackgroundExecutor() { return pool; }
+                    @Override protected RingStatus getUnloadedStatus() { return RingStatus.ALL[0]; }
+                    @Override protected int dependencySlot(Integer item, Integer dependency) {
+                        int d = dependency - item + 3;
+                        return slots && d >= 0 && d < 7 ? d : -1;
+                    }
+                    @Override protected int dependencySlotCount() { return 7; }
+                    @Override protected Object makeContext(ItemHolder<Integer, Object, Object, Object> holder,
+                            ItemStatus<Integer, Object, Object> nextStatus,
+                            KeyStatusPair<Integer, Object, Object>[] dependencies, boolean isUpgrade) {
+                        try {
+                            ItemHolder<Integer, Object, Object, ?>[] held = holder.dependencyHoldersBySlot();
+                            for (KeyStatusPair<Integer, Object, Object> dependency : dependencies) {
+                                ItemHolder<Integer, Object, Object, Object> registered = this.getHolder(dependency.key());
+                                require(registered != null && registered.getStatus().ordinal() >= dependency.status().ordinal(),
+                                        "a dependency is not in place when its dependent upgrades");
+                                int slot = this.dependencySlot(holder.getKey(), dependency.key());
+                                if (slot >= 0) {
+                                    require(held != null && held[slot] == registered, "the slot table names another item");
+                                }
+                            }
+                        } catch (Throwable t) {
+                            failure.compareAndSet(null, t);
+                        }
+                        return new Object();
+                    }
+                    @Override protected ExceptionHandlingAction handleTransactionException(
+                            ItemHolder<Integer, Object, Object, Object> holder,
+                            ItemStatus<Integer, Object, Object> nextStatus, boolean isUpgrade, Throwable throwable) {
+                        failure.compareAndSet(null, throwable);
+                        return ExceptionHandlingAction.MARK_BROKEN;
+                    }
+                };
+                final int items = 160;
+                final int threads = 4;
+                CountDownLatch reached = new CountDownLatch(items);
+                CountDownLatch requested = new CountDownLatch(threads);
+                for (int t = 0; t < threads; t++) {
+                    final int offset = t;
+                    Thread thread = new Thread(() -> {
+                        for (int key = offset; key < items; key += threads) {
+                            scheduler.addTicket(key, RingStatus.ALL[9], reached::countDown);
+                        }
+                        requested.countDown();
+                    }, "ring-request-" + t);
+                    thread.setDaemon(true);
+                    thread.start();
+                }
+                require(requested.await(30, TimeUnit.SECONDS), "requests did not finish");
+                require(reached.await(60, TimeUnit.SECONDS), "items never reached their status (slots " + slots + "): "
+                        + reached.getCount() + " left");
+                if (failure.get() != null) {
+                    throw new AssertionError("dependency ring failed (slots " + slots + ")", failure.get());
+                }
+                for (int key = 0; key < items; key++) {
+                    scheduler.removeTicket(key, RingStatus.ALL[9]);
+                }
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                while (scheduler.itemCount() != 0 && System.nanoTime() < deadline) {
+                    Thread.sleep(5);
+                }
+                require(scheduler.itemCount() == 0, "items never unloaded (slots " + slots + "): " + scheduler.itemCount());
+                if (failure.get() != null) {
+                    throw new AssertionError("dependency ring failed while unloading (slots " + slots + ")", failure.get());
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+        }
+    }
+
+    /**
+     * Like {@link Status}, with dependencies shaped like worldgen's: until an item has reached
+     * status 5 that status needs the items within 2 at status 3, and status 8 needs the items
+     * within 3 at status 6 and one far item at status 2. Once reached, a status needs nothing, so
+     * the scheduler drops the ring after the upgrade as it does for a generated chunk.
+     */
+    private record RingStatus(int ordinal) implements ItemStatus<Integer, Object, Object> {
+        private static final RingStatus[] ALL = new RingStatus[16];
+        static {
+            for (int i = 0; i < ALL.length; i++) ALL[i] = new RingStatus(i);
+        }
+        @Override public RingStatus[] getAllStatuses() { return ALL; }
+        @Override public Completable upgradeToThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        @Override public Completable postUpgradeToThis(Object context) { return Completable.complete(); }
+        @Override public Completable preDowngradeFromThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        @Override public Completable downgradeFromThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        @SuppressWarnings("unchecked")
+        @Override public KeyStatusPair<Integer, Object, Object>[] getDependencies(ItemHolder<Integer, Object, Object, ?> holder) {
+            if (holder.getStatus().ordinal() >= this.ordinal) {
+                return EMPTY_DEPENDENCIES;
+            }
+            int key = holder.getKey();
+            if (this.ordinal == 5) {
+                return new KeyStatusPair[] {new KeyStatusPair<>(key - 2, ALL[3]), new KeyStatusPair<>(key - 1, ALL[3]),
+                        new KeyStatusPair<>(key + 1, ALL[3]), new KeyStatusPair<>(key + 2, ALL[3])};
+            }
+            if (this.ordinal == 8) {
+                return new KeyStatusPair[] {new KeyStatusPair<>(key - 3, ALL[6]), new KeyStatusPair<>(key - 2, ALL[6]),
+                        new KeyStatusPair<>(key - 1, ALL[6]), new KeyStatusPair<>(key + 1, ALL[6]),
+                        new KeyStatusPair<>(key + 2, ALL[6]), new KeyStatusPair<>(key + 3, ALL[6]),
+                        new KeyStatusPair<>(key + 1000, ALL[2])};
+            }
+            return EMPTY_DEPENDENCIES;
+        }
+    }
+
     private static void workerBarrier(ExecutorManager manager) throws InterruptedException {
         CountDownLatch barrier = new CountDownLatch(1);
         manager.schedule(barrier::countDown, 0);
@@ -512,7 +870,12 @@ public final class SchedulerRegressionTest {
             for (int i = 0; i < ALL.length; i++) ALL[i] = new Status(i);
         }
         @Override public Status[] getAllStatuses() { return ALL; }
-        @Override public Completable upgradeToThis(Object context, Cancellable cancellable) { return Completable.complete(); }
+        /** When set, the upgrade to status 12 waits for it (checkSettledTicketTicks). */
+        private static volatile Completable upgradeGate;
+        @Override public Completable upgradeToThis(Object context, Cancellable cancellable) {
+            final Completable gate = upgradeGate;
+            return this.ordinal == 12 && gate != null ? gate : Completable.complete();
+        }
         @Override public Completable postUpgradeToThis(Object context) { return Completable.complete(); }
         @Override public Completable preDowngradeFromThis(Object context, Cancellable cancellable) { return Completable.complete(); }
         @Override public Completable downgradeFromThis(Object context, Cancellable cancellable) { return Completable.complete(); }

@@ -65,6 +65,12 @@ public final class AirCells {
         void superchunk$setSolidCell(boolean solid);
 
         boolean superchunk$solidCell();
+
+        /**
+         * {@code doFill}'s per-block loops were skipped for the current cell ({@link WholeCells}):
+         * leaves the in-cell position and the per-block counter where those loops leave them.
+         */
+        void superchunk$cellLoopSkipped();
     }
 
     private static final AtomicLong CELLS = new AtomicLong();

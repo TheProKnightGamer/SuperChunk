@@ -66,7 +66,7 @@ import org.spongepowered.asm.mixin.injection.At;
 public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worldgen.BiomeCellLookup {
 
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$QUART_CACHE_ENABLED =
             !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.biomeQuartCache", "true"));
 
     @Unique
@@ -86,7 +86,7 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
             && !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.biomeCellPath", "true"));
 
     @Unique
-    private static final boolean SUPERCHUNK$UNIFORM_CELLS = SUPERCHUNK$ENABLED
+    private static final boolean SUPERCHUNK$UNIFORM_CELLS = SUPERCHUNK$QUART_CACHE_ENABLED
             && !"false".equalsIgnoreCase(System.getProperty("superchunk.worldgen.biomeUniformCells", "true"));
 
     /** 0 = not yet checked, 1 = only SuperChunk mixins target BiomeManager, -1 = another mod's do. */
@@ -150,9 +150,9 @@ public abstract class MixinBiomeManagerQuartCache implements dev.superchunk.worl
         // change biomes under one manager (33 verify mismatches before this gate).
         Class<?> sourceClass = this.noiseBiomeSource == null ? null : this.noiseBiomeSource.getClass();
         boolean dhRegion = this.noiseBiomeSource instanceof WorldGenRegion && superchunk$isDhRegion(sourceClass);
-        if ((SUPERCHUNK$ENABLED || SUPERCHUNK$FIDDLE_CACHE) && (sourceClass == WorldGenRegion.class || dhRegion)) {
+        if ((SUPERCHUNK$QUART_CACHE_ENABLED || SUPERCHUNK$FIDDLE_CACHE) && (sourceClass == WorldGenRegion.class || dhRegion)) {
             superchunk$settling = dhRegion;
-            if (SUPERCHUNK$ENABLED) {
+            if (SUPERCHUNK$QUART_CACHE_ENABLED) {
                 superchunk$cache = BiomeQuartCache.local();
                 superchunk$generation = superchunk$cache.claimGeneration();
             }

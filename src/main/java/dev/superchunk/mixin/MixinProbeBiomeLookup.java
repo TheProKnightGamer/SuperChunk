@@ -10,6 +10,8 @@ import org.spongepowered.asm.mixin.Mixin;
  */
 @Mixin(targets = {
         "net.minecraft.world.level.biome.BiomeManager",
+        // the decoration biome shortcut hands the filter a stand-in biome (DecorationBiomes)
+        "net.minecraft.world.level.levelgen.placement.BiomeFilter",
         "net.minecraft.world.level.biome.Climate$ParameterList",
         "net.minecraft.world.level.biome.Climate$RTree",
         "net.minecraft.world.level.biome.Climate$RTree$Node",
@@ -29,6 +31,9 @@ import org.spongepowered.asm.mixin.Mixin;
         "net.minecraft.server.level.WorldGenRegion",
         "net.minecraft.world.level.chunk.ChunkAccess",
         "net.minecraft.world.level.chunk.ProtoChunk",
+        // world chunks read by runs for Distant Horizons (DhLiveChunks)
+        "net.minecraft.world.level.chunk.LevelChunk",
+        "net.minecraft.world.level.chunk.ImposterProtoChunk",
         "net.minecraft.world.level.chunk.LevelChunkSection",
         "net.minecraft.world.level.levelgen.structure.templatesystem.TagMatchTest",
         "net.minecraft.world.level.levelgen.structure.templatesystem.BlockMatchTest",

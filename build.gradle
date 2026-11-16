@@ -386,6 +386,8 @@ tasks.named('test') { failOnNoDiscoveredTests = false }
     mixinTargetScanRegressionTest: 'dev.superchunk.MixinTargetScanTest',
     skeinCompatRegressionTest: 'dev.superchunk.compat.SkeinCompatTest',
     mixinSquaredBridgeRegressionTest: 'dev.superchunk.compat.MixinSquaredBridgeTest',
+    foreignCodeRegressionTest: 'dev.superchunk.compat.ForeignCodeTest',
+    mixinMemberClashRegressionTest: 'dev.superchunk.MixinMemberClashTest',
     featureRegionReadsRegressionTest: 'dev.superchunk.worldgen.FeatureRegionReadsTest',
     oreRunsRegressionTest: 'dev.superchunk.worldgen.OreRunsTest'
 ].each { taskName, testMain ->

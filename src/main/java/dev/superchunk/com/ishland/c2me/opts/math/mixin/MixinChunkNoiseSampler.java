@@ -57,6 +57,22 @@ public class MixinChunkNoiseSampler implements dev.superchunk.worldgen.AirCells.
         return this.superchunk$solidCell;
     }
 
+    @Shadow int inCellX;
+    @Shadow int inCellY;
+    @Shadow int inCellZ;
+    @Shadow long interpolationCounter;
+    @Shadow @Final int cellWidth;
+    @Shadow @Final int cellHeight;
+
+    @Override
+    public void superchunk$cellLoopSkipped() {
+        // The loops end on the cell's last block (bottom layer, last x, last z), one count per block.
+        this.inCellY = 0;
+        this.inCellX = this.cellWidth - 1;
+        this.inCellZ = this.cellWidth - 1;
+        this.interpolationCounter += (long) this.cellWidth * this.cellWidth * this.cellHeight;
+    }
+
     @Inject(method = "<init>", at = @At("RETURN"))
     private void postInit(CallbackInfo ci) {
         this.interpolators = new ObjectArrayList<>(this.interpolators);

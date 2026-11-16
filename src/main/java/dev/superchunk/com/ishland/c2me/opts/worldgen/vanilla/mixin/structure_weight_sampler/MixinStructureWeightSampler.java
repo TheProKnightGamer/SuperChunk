@@ -63,6 +63,223 @@ public abstract class MixinStructureWeightSampler implements dev.superchunk.gpu.
     @Unique private boolean c2me$censusPublished;
     @Unique private boolean c2me$boundsComputed;
 
+    // SuperChunk beard reach: one exact influence box per term (pieces in order, then junctions),
+    // {minX, minY, minZ, maxX, maxY, maxZ} inclusive. Outside its box a term is exactly 0.0 (see
+    // superchunk$computeReach), and the sum is never -0.0, so leaving the term out changes nothing.
+    // compute() visits only the terms whose box meets the block's 4x4x4 bucket, in the original
+    // order, and the cell sign skip asks whether any box meets a cell.
+    // Kill switch -Dsuperchunk.worldgen.beardReach=false; verify -Dsuperchunk.worldgen.beardReach.verify=true
+    // sums every term as well and compares the bits.
+    @Unique private static final boolean SC_BEARD_REACH = Boolean.parseBoolean(System.getProperty("superchunk.worldgen.beardReach", "true"));
+    @Unique private static final boolean SC_BEARD_REACH_VERIFY = Boolean.getBoolean("superchunk.worldgen.beardReach.verify");
+    @Unique private static final AtomicLong scReachChecked = new AtomicLong();
+    @Unique private static final AtomicLong scReachBugs = new AtomicLong();
+    @Unique private static final AtomicLong scReachNextLog = new AtomicLong(2_000_000L);
+    @Unique private int[] superchunk$reach;
+    // Per term, for the sign of its value: Integer.MAX_VALUE = never negative (the bury kernels),
+    // Integer.MIN_VALUE = unknown, anything else = the base height o of a beard kernel term, whose
+    // value is <= 0 at and above o and >= 0 below it (see superchunk$beardSigns).
+    @Unique private int[] superchunk$signBase;
+    @Unique private int[] superchunk$near;      // term indices meeting the current bucket, ascending
+    @Unique private int superchunk$nearCount;
+    @Unique private boolean superchunk$bucketKnown;
+    @Unique private int superchunk$bucketX, superchunk$bucketY, superchunk$bucketZ;
+
+    /**
+     * The influence boxes. Each bound is where the term's own code returns 0.0:
+     * BURY {@code getBuryContribution(m, p / 2, n)} is 0 for m or n over 6 (its early return) and
+     * for |p| over 12 (distance at least 6.5); BEARD_THIN and junctions use
+     * {@code getBeardContribution}, 0 unless each offset is in [-12, 11], and m, n are never
+     * negative; BEARD_BOX the same with its clamped height offset in [0, 11]; ENCAPSULATE halves all
+     * three distances, so 0 once any is over 12. A terrain adjustment this code does not know gets
+     * an unbounded box and is always visited.
+     */
+    @Unique
+    private void superchunk$computeReach() {
+        final Beardifier.Rigid[] pieces = this.c2me$pieceArray;
+        final JigsawJunction[] junctions = this.c2me$junctionArray;
+        final int[] r = new int[(pieces.length + junctions.length) * 6];
+        final int[] base = new int[pieces.length + junctions.length];
+        int w = 0;
+        for (Beardifier.Rigid piece : pieces) {
+            final BoundingBox b = piece.box();
+            final int o = b.minY() + piece.groundLevelDelta();
+            int minX, minY, minZ, maxX, maxY, maxZ;
+            switch (piece.terrainAdjustment()) {
+                case NONE -> {
+                    minX = minY = minZ = 1;
+                    maxX = maxY = maxZ = 0; // empty
+                }
+                case BURY -> {
+                    minX = b.minX() - 6; maxX = b.maxX() + 6;
+                    minZ = b.minZ() - 6; maxZ = b.maxZ() + 6;
+                    minY = o - 12; maxY = o + 12;
+                }
+                case BEARD_THIN -> {
+                    minX = b.minX() - 11; maxX = b.maxX() + 11;
+                    minZ = b.minZ() - 11; maxZ = b.maxZ() + 11;
+                    minY = o - 12; maxY = o + 11;
+                }
+                case BEARD_BOX -> {
+                    minX = b.minX() - 11; maxX = b.maxX() + 11;
+                    minZ = b.minZ() - 11; maxZ = b.maxZ() + 11;
+                    minY = o - 11; maxY = b.maxY() + 11;
+                }
+                case ENCAPSULATE -> {
+                    minX = b.minX() - 12; maxX = b.maxX() + 12;
+                    minZ = b.minZ() - 12; maxZ = b.maxZ() + 12;
+                    minY = b.minY() - 12; maxY = b.maxY() + 12;
+                }
+                default -> {
+                    minX = minY = minZ = Integer.MIN_VALUE;
+                    maxX = maxY = maxZ = Integer.MAX_VALUE;
+                }
+            }
+            base[w / 6] = switch (piece.terrainAdjustment()) {
+                case BEARD_THIN, BEARD_BOX -> o;
+                case NONE, BURY, ENCAPSULATE -> Integer.MAX_VALUE;
+                default -> Integer.MIN_VALUE;
+            };
+            r[w++] = minX; r[w++] = minY; r[w++] = minZ;
+            r[w++] = maxX; r[w++] = maxY; r[w++] = maxZ;
+        }
+        for (JigsawJunction jj : junctions) {
+            base[w / 6] = jj.getSourceGroundY();
+            r[w++] = jj.getSourceX() - 12; r[w++] = jj.getSourceGroundY() - 12; r[w++] = jj.getSourceZ() - 12;
+            r[w++] = jj.getSourceX() + 11; r[w++] = jj.getSourceGroundY() + 11; r[w++] = jj.getSourceZ() + 11;
+        }
+        this.superchunk$signBase = base;
+        this.superchunk$near = new int[pieces.length + junctions.length];
+        this.superchunk$reach = r;
+    }
+
+    /**
+     * Which way the beardifier can move the density anywhere in the block box (inclusive bounds):
+     * 0 when every term is exactly 0.0 there, else {@code BEARD_MAY_RAISE} and/or
+     * {@code BEARD_MAY_LOWER}. The bury kernels return {@code 1 - d / 6} for d up to 6 and 0.0
+     * beyond, never negative. A beard kernel term is
+     * {@code -(height + 0.5) * fastInvSqrt(..) / 2 * BEARD_KERNEL[..]} times 0.8 or 0.4, with a
+     * positive inverse square root and positive kernel entries ({@code e^-x}), or 0.0 out of the
+     * kernel's range: never positive for height >= 0 (at and above the base), never negative for
+     * height <= -1.
+     */
+    @Override
+    public int superchunk$beardSigns(int x0, int y0, int z0, int x1, int y1, int z1) {
+        if (this.c2me$pieceArray == null || this.c2me$junctionArray == null) {
+            this.c2me$initArrays();
+        }
+        if (!this.c2me$boundsComputed) {
+            this.c2me$computeBeardBounds();
+        }
+        if (!this.c2me$hasBeard || x1 < this.c2me$bMinX || x0 > this.c2me$bMaxX || y1 < this.c2me$bMinY
+                || y0 > this.c2me$bMaxY || z1 < this.c2me$bMinZ || z0 > this.c2me$bMaxZ) {
+            return 0;
+        }
+        if (!SC_BEARD_REACH || (dev.superchunk.diag.StageAb.BEARD_REACH && dev.superchunk.diag.StageAb.off())) {
+            return BEARD_MAY_RAISE | BEARD_MAY_LOWER;
+        }
+        int[] r = this.superchunk$reach;
+        if (r == null) {
+            superchunk$computeReach();
+            r = this.superchunk$reach;
+        }
+        final int[] base = this.superchunk$signBase;
+        int signs = 0;
+        for (int t = 0, at = 0; at < r.length; t++, at += 6) {
+            if (x1 >= r[at] && x0 <= r[at + 3] && y1 >= r[at + 1] && y0 <= r[at + 4]
+                    && z1 >= r[at + 2] && z0 <= r[at + 5]) {
+                final int o = base[t];
+                if (o == Integer.MAX_VALUE) {
+                    signs |= BEARD_MAY_RAISE;
+                } else if (o == Integer.MIN_VALUE) {
+                    return BEARD_MAY_RAISE | BEARD_MAY_LOWER;
+                } else if (y0 >= o) {
+                    signs |= BEARD_MAY_LOWER;
+                } else if (y1 < o) {
+                    signs |= BEARD_MAY_RAISE;
+                } else {
+                    return BEARD_MAY_RAISE | BEARD_MAY_LOWER;
+                }
+            }
+        }
+        return signs;
+    }
+
+    /** The terms whose box meets the 4x4x4 bucket of blocks at (bx, by, bz) << 2. */
+    @Unique
+    private void superchunk$selectBucket(int bx, int by, int bz) {
+        int[] r = this.superchunk$reach;
+        if (r == null) {
+            superchunk$computeReach();
+            r = this.superchunk$reach;
+        }
+        final int x0 = bx << 2, y0 = by << 2, z0 = bz << 2;
+        final int x1 = x0 + 3, y1 = y0 + 3, z1 = z0 + 3;
+        final int[] near = this.superchunk$near;
+        int n = 0;
+        for (int t = 0, at = 0; at < r.length; t++, at += 6) {
+            if (x1 >= r[at] && x0 <= r[at + 3] && y1 >= r[at + 1] && y0 <= r[at + 4]
+                    && z1 >= r[at + 2] && z0 <= r[at + 5]) {
+                near[n++] = t;
+            }
+        }
+        this.superchunk$nearCount = n;
+        this.superchunk$bucketX = bx;
+        this.superchunk$bucketY = by;
+        this.superchunk$bucketZ = bz;
+        this.superchunk$bucketKnown = true;
+    }
+
+    /** {@code compute()}'s sum over the terms that can reach block (i, j, k), in its order. */
+    @Unique
+    private double superchunk$sumNear(int i, int j, int k) {
+        final int bx = i >> 2, by = j >> 2, bz = k >> 2;
+        if (!this.superchunk$bucketKnown || bx != this.superchunk$bucketX || by != this.superchunk$bucketY
+                || bz != this.superchunk$bucketZ) {
+            superchunk$selectBucket(bx, by, bz);
+        }
+        final int[] near = this.superchunk$near;
+        final int[] r = this.superchunk$reach;
+        final Beardifier.Rigid[] pieces = this.c2me$pieceArray;
+        final int count = this.superchunk$nearCount;
+        double d = 0.0;
+        for (int c = 0; c < count; c++) {
+            final int t = near[c];
+            final int at = t * 6;
+            if (i < r[at] || i > r[at + 3] || j < r[at + 1] || j > r[at + 4] || k < r[at + 2] || k > r[at + 5]) {
+                continue; // exactly 0.0 here
+            }
+            if (t < pieces.length) {
+                d += superchunk$pieceTerm(pieces[t], i, j, k);
+            } else {
+                final JigsawJunction jigsawJunction = this.c2me$junctionArray[t - pieces.length];
+                final int rx = i - jigsawJunction.getSourceX();
+                final int l = j - jigsawJunction.getSourceGroundY();
+                final int m = k - jigsawJunction.getSourceZ();
+                d += getBeardContribution(rx, l, m, l) * 0.4;
+            }
+        }
+        return d;
+    }
+
+    /** One piece's term, as {@code compute()} adds it. */
+    @Unique
+    private static double superchunk$pieceTerm(Beardifier.Rigid piece, int i, int j, int k) {
+        BoundingBox blockBox = piece.box();
+        int l = piece.groundLevelDelta();
+        int m = Math.max(0, Math.max(blockBox.minX() - i, i - blockBox.maxX()));
+        int n = Math.max(0, Math.max(blockBox.minZ() - k, k - blockBox.maxZ()));
+        int o = blockBox.minY() + l;
+        int p = j - o;
+        return switch (piece.terrainAdjustment()) { // 2 switch statement merged
+            case NONE -> 0.0;
+            case BURY -> getBuryContribution(m, (double)p / 2.0, n);
+            case BEARD_THIN -> getBeardContribution(m, p, n, p) * 0.8;
+            case BEARD_BOX -> getBeardContribution(m, Math.max(0, Math.max(o - j, j - blockBox.maxY())), n, p) * 0.8;
+            case ENCAPSULATE -> getBuryContribution((double)m / 2.0, (double)Math.max(0, Math.max(blockBox.minY() - j, j - blockBox.maxY())) / 2.0, (double)n / 2.0) * 0.8;
+        };
+    }
+
     @Unique
     private void c2me$initArrays() {
         this.c2me$pieceArray = Iterators.toArray(this.pieceIterator, Beardifier.Rigid.class);
@@ -250,23 +467,15 @@ public abstract class MixinStructureWeightSampler implements dev.superchunk.gpu.
             return 0.0;
         }
 
+        if (SC_BEARD_REACH && !SC_BEARD_VERIFY && !SC_BEARD_REACH_VERIFY
+                && !(dev.superchunk.diag.StageAb.BEARD_REACH && dev.superchunk.diag.StageAb.off())) {
+            return superchunk$sumNear(i, j, k);
+        }
+
         double d = 0.0;
 
         for (Beardifier.Rigid piece : this.c2me$pieceArray) {
-            BoundingBox blockBox = piece.box();
-            int l = piece.groundLevelDelta();
-            int m = Math.max(0, Math.max(blockBox.minX() - i, i - blockBox.maxX()));
-            int n = Math.max(0, Math.max(blockBox.minZ() - k, k - blockBox.maxZ()));
-            int o = blockBox.minY() + l;
-            int p = j - o;
-
-            d += switch (piece.terrainAdjustment()) { // 2 switch statement merged
-                case NONE -> 0.0;
-                case BURY -> getBuryContribution(m, (double)p / 2.0, n);
-                case BEARD_THIN -> getBeardContribution(m, p, n, p) * 0.8;
-                case BEARD_BOX -> getBeardContribution(m, Math.max(0, Math.max(o - j, j - blockBox.maxY())), n, p) * 0.8;
-                case ENCAPSULATE -> getBuryContribution((double)m / 2.0, (double)Math.max(0, Math.max(blockBox.minY() - j, j - blockBox.maxY())) / 2.0, (double)n / 2.0) * 0.8;
-            };
+            d += superchunk$pieceTerm(piece, i, j, k);
         }
 
         for (JigsawJunction jigsawJunction : this.c2me$junctionArray) {
@@ -274,6 +483,18 @@ public abstract class MixinStructureWeightSampler implements dev.superchunk.gpu.
             int l = j - jigsawJunction.getSourceGroundY();
             int m = k - jigsawJunction.getSourceZ();
             d += getBeardContribution(r, l, m, l) * 0.4;
+        }
+
+        if (SC_BEARD_REACH_VERIFY) {
+            double near = superchunk$sumNear(i, j, k);
+            long n = scReachChecked.incrementAndGet();
+            if (Double.doubleToRawLongBits(near) != Double.doubleToRawLongBits(d) && scReachBugs.incrementAndGet() <= 20) {
+                SC_BEARD_LOG.error("[beard-reach] MISMATCH at {} {} {}: near {} full {}", i, j, k, near, d);
+            }
+            long la = scReachNextLog.get();
+            if (n >= la && scReachNextLog.compareAndSet(la, la + 2_000_000L)) {
+                SC_BEARD_LOG.info("[beard-reach] checked={} MISMATCHES={}", n, scReachBugs.get());
+            }
         }
 
         // verify: prove the AABB never excludes a nonzero block (BUGS must be 0)

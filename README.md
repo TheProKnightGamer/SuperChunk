@@ -67,11 +67,14 @@ provable rather than tuned:
    Chunky caps in-flight chunks with a semaphore whose size defaults to **50** —
    sized for vanilla's synchronous chunk pipeline, so it hard-caps throughput at
    `50 / per-chunk latency` no matter how fast generation is. SuperChunk now sets
-   it from `pregen.chunkyWorkingCount` (default `auto` = 192 per GB of heap,
-   clamped 256–3072). An explicit `-D` still wins; `default` opts out. It is
-   worth nothing on its own and everything in combination: raising it alone is
-   −0.5%, the round-10 kernel work alone is −1.4% (a faster kernel drains the GPU
-   batcher and shrinks its batches), and together they are **+6.3%**.
+   it from `pregen.chunkyWorkingCount` (default `auto` = 12 per CPU thread, at
+   least 256, never more than 128 per GB of heap). An explicit `-D` still wins;
+   `default` opts out. More is not better: each chunk in flight keeps about 30
+   neighbours loaded and the garbage collector pays for them (1024 instead of
+   256 cost 12–16% more CPU per chunk on an 8 GB heap, with or without the
+   GPU). If the heap fills up anyway (heavy world generation mods),
+   `pregen.memoryGate` slows Chunky down and logs a warning instead of letting
+   the server stall.
 5. SuperChunk is quiet by default: it logs only warnings and errors. Set
    `logging.verbose=true` in `config/superchunk.properties` to also see its
    startup summaries and any diagnostics you enable — do that before

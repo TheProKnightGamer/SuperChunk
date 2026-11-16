@@ -59,13 +59,39 @@ public class ReadFromDisk extends NewChunkStatus {
         return finalizeLoading(context, single);
     }
 
+    /**
+     * SuperChunk: thrown inside a load that the scheduler cancelled because no ticket reaches the
+     * chunk any more. The scheduler treats a {@link CancellationException} from a cancelled upgrade
+     * as "leave the item at its previous status", which for a load means "still not loaded".
+     */
+    protected static final class AbandonedLoad extends CancellationException {
+        @Override
+        public synchronized Throwable fillInStackTrace() {
+            return this;
+        }
+    }
+
+    protected static boolean isAbandoned(Cancellable cancellable, Throwable throwable) {
+        return cancellable != null && cancellable.isCancelled() && throwable instanceof AbandonedLoad;
+    }
+
     protected Completable finalizeLoading(ChunkLoadingContext context, Single<ProtoChunk> single) {
+        return finalizeLoading(context, single, null);
+    }
+
+    protected Completable finalizeLoading(ChunkLoadingContext context, Single<ProtoChunk> single, Cancellable cancellable) {
         return single
                 .doOnError(throwable -> {
+                    if (isAbandoned(cancellable, throwable)) {
+                        return;
+                    }
                     MinecraftServer server = ((IThreadedAnvilChunkStorage) context.tacs()).getWorld().getServer();
                     server.execute(() -> server.reportChunkLoadFailure(throwable, ((IVersionedChunkStorage) context.tacs()).invokeGetStorageKey(), context.holder().getKey()));
                 })
                 .onErrorResumeNext(throwable -> {
+                    if (isAbandoned(cancellable, throwable)) {
+                        return Single.error(throwable);
+                    }
                     try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(context, this, true))) {
                         if (Config.recoverFromErrors) {
                             return Single.just(createEmptyProtoChunk(context));

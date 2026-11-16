@@ -29,7 +29,13 @@ public abstract class MixinDhDataInputStream {
             + "Lcom/seibel/distanthorizons/core/util/objects/pooling/PhantomArrayList/PhantomArrayListCheckout;)"
             + "Lcom/seibel/distanthorizons/core/util/objects/dataStreams/DhDataInputStream;";
 
-    @Redirect(method = SUPERCHUNK$CREATE, at = @At(value = "NEW", target = "([BII)Ljava/io/ByteArrayInputStream;"))
+    /** The same method before DH 3.2.0, when the checkout class was one package up. */
+    @org.spongepowered.asm.mixin.Unique
+    private static final String SUPERCHUNK$CREATE_OLD = "create([BLcom/seibel/distanthorizons/api/enums/config/EDhApiDataCompressionMode;"
+            + "Lcom/seibel/distanthorizons/core/util/objects/pooling/PhantomArrayListCheckout;)"
+            + "Lcom/seibel/distanthorizons/core/util/objects/dataStreams/DhDataInputStream;";
+
+    @Redirect(method = {SUPERCHUNK$CREATE, SUPERCHUNK$CREATE_OLD}, at = @At(value = "NEW", target = "([BII)Ljava/io/ByteArrayInputStream;"))
     private static ByteArrayInputStream superchunk$unsyncSlice(byte[] buf, int offset, int length) {
         return new UnsyncByteArrayInputStream(buf, offset, length);
     }
@@ -37,7 +43,7 @@ public abstract class MixinDhDataInputStream {
     // ordinal = 1 (the second `new ByteArrayInputStream`): Mixin 0.8.5 (Forge) pairs a NEW with ANY later
     // matching constructor call, so without it this redirect also claims the first NEW and logs
     // "@Redirect conflict. Skipping superchunk$unsync". The fingerprint gate keeps the order fixed.
-    @Redirect(method = SUPERCHUNK$CREATE, at = @At(value = "NEW", target = "([B)Ljava/io/ByteArrayInputStream;", ordinal = 1))
+    @Redirect(method = {SUPERCHUNK$CREATE, SUPERCHUNK$CREATE_OLD}, at = @At(value = "NEW", target = "([B)Ljava/io/ByteArrayInputStream;", ordinal = 1))
     private static ByteArrayInputStream superchunk$unsync(byte[] buf) {
         return new UnsyncByteArrayInputStream(buf);
     }

@@ -65,6 +65,63 @@ public final class ForeignBytecode {
         return found == null ? null : hash(found);
     }
 
+    /** The method of that name (and descriptor, when given), or {@code null} when there is none or more than one. */
+    static MethodNode find(byte[] classBytes, String methodName, String desc) {
+        ClassNode node = new ClassNode();
+        new ClassReader(classBytes).accept(node, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        MethodNode found = null;
+        for (MethodNode method : node.methods) {
+            if (method.name.equals(methodName) && (desc == null || method.desc.equals(desc))) {
+                if (found != null) {
+                    return null;
+                }
+                found = method;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Hash of what a method can do outside itself: the methods it calls (other than the JDK's), the
+     * fields it writes, and whether it takes a monitor. Two versions of a method with the same
+     * effects hash differ only in how they compute: their order, conditions, constants, locals, or
+     * a compiler's choice of string concatenation. A patch that can compare its result with the
+     * method's own uses this to tell "computed differently" (checkable at run time) from "does
+     * something new" (not checkable, so the patch stays out).
+     */
+    static String effects(MethodNode method) {
+        java.util.TreeSet<String> effects = new java.util.TreeSet<>();
+        effects.add("D " + (method.access & org.objectweb.asm.Opcodes.ACC_STATIC) + " " + method.desc);
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode m) {
+                // getClass() is Object's (final), whatever type a compiler names as its owner.
+                if (!m.owner.startsWith("java/") && !(m.name.equals("getClass") && m.desc.equals("()Ljava/lang/Class;"))) {
+                    effects.add("C " + m.owner + "." + m.name + m.desc);
+                }
+            } else if (insn instanceof FieldInsnNode f) {
+                if (f.getOpcode() == org.objectweb.asm.Opcodes.PUTFIELD || f.getOpcode() == org.objectweb.asm.Opcodes.PUTSTATIC) {
+                    effects.add("W " + f.owner + "." + f.name);
+                }
+            } else if (insn instanceof InvokeDynamicInsnNode d) {
+                if (d.bsm.getOwner().equals("java/lang/invoke/StringConcatFactory")) {
+                    continue;
+                }
+                boolean lambda = d.bsm.getOwner().equals("java/lang/invoke/LambdaMetafactory");
+                for (Object arg : d.bsmArgs) {
+                    if (arg instanceof Handle h && !h.getOwner().startsWith("java/")) {
+                        effects.add("C " + h.getOwner() + "." + h.getName() + h.getDesc());
+                    }
+                }
+                if (!lambda) {
+                    effects.add("I " + d.name + d.desc + " " + handle(d.bsm));
+                }
+            } else if (insn.getOpcode() == org.objectweb.asm.Opcodes.MONITORENTER) {
+                effects.add("LOCK");
+            }
+        }
+        return digest(String.join("\n", effects));
+    }
+
     static String hash(MethodNode method) {
         StringBuilder text = new StringBuilder(4096);
         text.append(method.access).append(' ').append(method.desc).append('\n');
@@ -120,8 +177,12 @@ public final class ForeignBytecode {
             text.append("try L").append(labels.get(block.start)).append(" L").append(labels.get(block.end))
                     .append(" L").append(labels.get(block.handler)).append(' ').append(block.type).append('\n');
         }
+        return digest(text.toString());
+    }
+
+    private static String digest(String text) {
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(text.toString().getBytes(StandardCharsets.UTF_8));
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder(16);
             for (byte b : Arrays.copyOf(digest, 8)) {
                 hex.append(Character.forDigit((b >> 4) & 15, 16)).append(Character.forDigit(b & 15, 16));

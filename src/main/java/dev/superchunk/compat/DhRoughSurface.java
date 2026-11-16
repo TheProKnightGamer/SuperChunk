@@ -35,6 +35,9 @@ public final class DhRoughSurface {
     private static final LongAdder MISMATCHES = new LongAdder();
     private static final AtomicInteger REPORTED = new AtomicInteger();
 
+    /** Not null when the patch runs under self-check on the installed DH. */
+    private static final DhSelfCheck CHECK = DhFastPaths.selfCheck("MixinDhRoughSurfaceDensity", "density evaluations");
+
     /** The benchmark's switch: false evaluates DH's own function. */
     private static volatile boolean memo = true;
 
@@ -45,6 +48,10 @@ public final class DhRoughSurface {
     public static double evaluate(DensityFunction density, DensityFunction.FunctionContext context) {
         if (!memo) {
             return density.compute(context);
+        }
+        DhSelfCheck check = CHECK;
+        if (check != null) {
+            return selfChecked(check, density, context);
         }
         double value = ColumnMemoDensity.forThisThread(density).compute(context);
         if (VERIFY) {
@@ -60,6 +67,34 @@ public final class DhRoughSurface {
             return own;
         }
         return value;
+    }
+
+    /**
+     * The patch on a DH version it was not checked against (see {@link DhFastPathTable}): sampled
+     * evaluations are also made by DH's own function, whose value is the one returned; the first
+     * that differs turns the memo off.
+     */
+    private static double selfChecked(DhSelfCheck check, DensityFunction density, DensityFunction.FunctionContext context) {
+        if (check.failed()) {
+            return density.compute(context);
+        }
+        double value;
+        try {
+            value = ColumnMemoDensity.forThisThread(density).compute(context);
+        } catch (Throwable t) {
+            check.fail("its code threw " + t, t);
+            return density.compute(context);
+        }
+        if (!check.sampleLoose()) {
+            return value;
+        }
+        double own = density.compute(context);
+        if (Double.doubleToRawLongBits(own) == Double.doubleToRawLongBits(value)) {
+            check.passed();
+        } else {
+            check.fail("density at (" + context.blockX() + ", " + context.blockY() + ", " + context.blockZ() + "): DH " + own + " vs " + value, null);
+        }
+        return own;
     }
 
     public static void reportVerify() {
