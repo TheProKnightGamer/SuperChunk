@@ -240,6 +240,10 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
      * after {@code /save-all flush} lost ~25% of recently generated chunks (vanilla: none). The later
      * unload save then finds nothing unsaved, as it does after any vanilla save.
      *
+     * <p>Only chunks that reached FULL are written (see the guard below). To check a change here:
+     * open an existing world, force-load a few chunks, flush and stop, then every block that
+     * carries a block entity (chest, spawner, ...) must still have one in the region files.
+     *
      * @return how many chunks were written
      */
     public int saveFullChunksOutsideHolderMap() {
@@ -254,9 +258,13 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
             }
             final ChunkState state = holder.getItem().get();
             if (state == null || state.reachedStatus() == null || !state.reachedStatus().isOrAfter(ChunkStatus.FULL)) {
-                // A chunk below FULL has already had its block entities dropped or is still being
-                // downgraded. Saving it here would write an empty block_entities list over the last
-                // good copy, so mirror ReadFromDisk.downgradeFromThis and leave it to the unload step.
+                // Only a chunk that reached FULL here has its block entities attached. A full chunk
+                // read from disk as a neighbour's dependency sits below FULL with them still packed
+                // in its post-load step, and ChunkSerializer.read leaves it flagged unsaved. Saving
+                // it wrote an empty block_entities list over the good copy: a flush or a stop
+                // emptied the containers in every such chunk around the loaded area. Vanilla never
+                // saves these (ImposterProtoChunk.isUnsaved() is false) and
+                // ReadFromDisk.downgradeFromThis has the same guard. Found and fixed by JacyKu (#33).
                 continue;
             }
             net.minecraft.world.level.chunk.ChunkAccess chunk = state.chunk();
