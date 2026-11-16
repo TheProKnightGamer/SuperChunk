@@ -38,7 +38,7 @@ import java.util.function.Consumer;
 public abstract class MixinPalettedContainerGetAll<T> {
 
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$GET_ALL_ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.paletteGetAll", "true"));
 
     /** Stand down when another mod hooks the replaced method ({@link dev.superchunk.worldgen.ForeignHooks}). */
@@ -64,7 +64,7 @@ public abstract class MixinPalettedContainerGetAll<T> {
     // touch PalettedContainer siblings; a cancel-fight here would be silent feature loss).
     @WrapMethod(method = "getAll", require = 0)
     private void superchunk$fastGetAll(Consumer<T> consumer, Operation<Void> original) {
-        if (!SUPERCHUNK$ENABLED || !superchunk$unhooked()) {
+        if (!SUPERCHUNK$GET_ALL_ENABLED || !superchunk$unhooked()) {
             original.call(consumer);
             return;
         }

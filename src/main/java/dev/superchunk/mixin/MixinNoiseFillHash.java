@@ -37,6 +37,28 @@ public abstract class MixinNoiseFillHash {
     @Unique
     private static final String SUPERCHUNK$PATH = System.getProperty("superchunk.debug.noiseFillHash");
 
+    /** {@link dev.superchunk.diag.StageAb}: the fill's CPU time per chunk, switches on against off. */
+    @Inject(method = "doFill", at = @At("HEAD"))
+    private void superchunk$abBegin(Blender blender, StructureManager structureManager, RandomState randomState,
+                                    ChunkAccess chunk, int minCellY, int cellCountY,
+                                    CallbackInfoReturnable<ChunkAccess> cir) {
+        if (dev.superchunk.diag.StageAb.FILL) {
+            dev.superchunk.diag.StageAb.begin(chunk.getPos().x, chunk.getPos().z);
+        }
+    }
+
+    @Inject(method = "doFill", at = @At("RETURN"))
+    private void superchunk$abEnd(Blender blender, StructureManager structureManager, RandomState randomState,
+                                  ChunkAccess chunk, int minCellY, int cellCountY,
+                                  CallbackInfoReturnable<ChunkAccess> cir,
+                                  @com.llamalad7.mixinextras.sugar.Local net.minecraft.world.level.levelgen.NoiseChunk noiseChunk) {
+        if (dev.superchunk.diag.StageAb.FILL) {
+            boolean beard = ((dev.superchunk.com.ishland.c2me.base.mixin.access.IChunkNoiseSampler) noiseChunk).getBeardifier()
+                    instanceof dev.superchunk.gpu.dfc.ScBeardBoxAccess box && box.superchunk$beardBox(new int[6]);
+            dev.superchunk.diag.StageAb.end("fill", beard);
+        }
+    }
+
     @Inject(method = "doFill", at = @At("RETURN"))
     private void superchunk$hashFill(Blender blender, StructureManager structureManager, RandomState randomState,
                                      ChunkAccess chunk, int minCellY, int cellCountY,
@@ -70,6 +92,12 @@ public abstract class MixinNoiseFillHash {
             for (long word : chunk.getOrCreateHeightmapUnprimed(type).getRawData()) {
                 h = superchunk$mix(h, word);
             }
+        }
+        // The section counters the fill maintains next to the direct palette writes.
+        for (LevelChunkSection section : chunk.getSections()) {
+            h = superchunk$mix(h, section.nonEmptyBlockCount);
+            h = superchunk$mix(h, section.tickingBlockCount);
+            h = superchunk$mix(h, section.tickingFluidCount);
         }
         // Structure terrain adaptation: flag chunks whose fill also ran the beardifier, so a
         // comparison can tell which code a mismatch went through.

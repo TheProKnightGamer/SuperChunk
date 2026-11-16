@@ -16,6 +16,16 @@ public class DynamicPriorityQueue<E> {
     private final ConcurrentLinkedQueue<E>[] priorities;
     private final ConcurrentHashMap<E, Integer> priorityMap = new ConcurrentHashMap<>();
 
+    /**
+     * SuperChunk: strict priority order starves the lowest priorities for as long as higher ones
+     * keep arriving, and a queued task keeps everything it captured alive. Priorities at or above
+     * this floor are therefore also served first on every {@link #STARVATION_PERIOD}th dequeue.
+     * {@code Integer.MAX_VALUE} (the default) turns that off.
+     */
+    private volatile int starvationFloor = Integer.MAX_VALUE;
+    private static final int STARVATION_PERIOD = 16; // power of two
+    private final AtomicInteger dequeueCounter = new AtomicInteger();
+
     public DynamicPriorityQueue(int priorityCount) {
         this.taskCount = new AtomicIntegerArray(priorityCount);
         //noinspection unchecked
@@ -33,6 +43,7 @@ public class DynamicPriorityQueue<E> {
 
         this.priorities[priority].add(element);
         this.taskCount.incrementAndGet(priority);
+        if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.ENQUEUE);
     }
 
     // behavior is undefined when changing priority for one item concurrently
@@ -59,7 +70,24 @@ public class DynamicPriorityQueue<E> {
         return true;
     }
 
+    public void setStarvationFloor(int starvationFloor) {
+        this.starvationFloor = starvationFloor;
+    }
+
     public E dequeue() {
+        final int floor = this.starvationFloor;
+        if (floor < this.priorities.length
+                && (this.dequeueCounter.incrementAndGet() & (STARVATION_PERIOD - 1)) == 0) {
+            for (int i = this.priorities.length - 1; i >= floor; i --) {
+                if (this.taskCount.get(i) == 0) continue;
+                E element = priorities[i].poll();
+                if (element != null) {
+                    this.taskCount.decrementAndGet(i);
+                    this.priorityMap.remove(element);
+                    return element;
+                }
+            }
+        }
         for (int i = 0; i < this.priorities.length; i ++) {
             if (this.taskCount.get(i) == 0) continue;
             E element = priorities[i].poll();

@@ -20,6 +20,15 @@ public class SchedulingManager {
     private static final AtomicInteger COUNTER = new AtomicInteger(0);
 
     public static final int MAX_LEVEL = ChunkLevel.MAX_LEVEL + 1;
+
+    static {
+        // SuperChunk: a task whose chunk no ticket reaches any more gets priority MAX_LEVEL, behind
+        // all wanted work. During a pre-generation there is always wanted work, so those tasks never
+        // ran: about one abandoned chunk load per ten generated chunks stayed queued, each holding
+        // the chunk's complete NBT (roughly 240 KB), until the heap was full. Give that priority a
+        // regular turn; ReadFromDiskAsync then drops a load nobody wants instead of parsing it.
+        GlobalExecutors.prioritizedScheduler.setStarvationFloor(MAX_LEVEL);
+    }
     private final ConcurrentMap<Long, FreeableTaskList> pos2Tasks = new ConcurrentHashMap<>();
     private final Long2IntOpenHashMap prioritiesFromLevel = new Long2IntOpenHashMap() {
         @Override

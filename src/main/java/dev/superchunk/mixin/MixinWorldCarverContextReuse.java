@@ -42,7 +42,7 @@ import org.spongepowered.asm.mixin.injection.At;
 public abstract class MixinWorldCarverContextReuse {
 
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$CONTEXT_REUSE_ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.carverContextReuse", "true"));
 
     @Unique
@@ -56,7 +56,7 @@ public abstract class MixinWorldCarverContextReuse {
             require = 0)
     private DensityFunction.SinglePointContext superchunk$stashCarveCtx(
             int x, int y, int z, Operation<DensityFunction.SinglePointContext> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$CONTEXT_REUSE_ENABLED) {
             return original.call(x, y, z);
         }
         superchunk$carveCtx.get().set(x, y, z);
@@ -72,7 +72,7 @@ public abstract class MixinWorldCarverContextReuse {
             require = 1)
     private BlockState superchunk$reuseCarveCtx(
             Aquifer aquifer, DensityFunction.FunctionContext ctx, double density, Operation<BlockState> original) {
-        if (!SUPERCHUNK$ENABLED) {
+        if (!SUPERCHUNK$CONTEXT_REUSE_ENABLED) {
             return original.call(aquifer, ctx, density);
         }
         // ctx == null iff the NEW wrap fired (allocation skipped) -> supply the reused context;

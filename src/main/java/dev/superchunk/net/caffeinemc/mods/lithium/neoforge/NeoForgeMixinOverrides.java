@@ -48,7 +48,7 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
         List<MixinOverride> list = new ArrayList<>();
 
         for (ModInfo meta : FMLLoader.getLoadingModList().getMods()) {
-            if (VOXY_COMPAT && "voxy".equals(meta.getModId())) {
+            if (VOXY_COMPAT && isVoxy(meta)) {
                 list.add(new MixinOverride(meta.getModId(), "mixin.chunk.palette", false));
             }
             if (COPYCAT_PATHING_COMPAT && ("copycats".equals(meta.getModId()) || "create_connected".equals(meta.getModId()))) {
@@ -63,6 +63,22 @@ public class NeoForgeMixinOverrides implements PlatformMixinOverrides {
         }
 
         return list;
+    }
+
+    /**
+     * Whether a mod is Voxy, under any id: the mod id {@code voxy} (Voxy itself, and what Roxy and
+     * Sinytra Connector register it as), or a mod file that carries Voxy's classes (a port or fork
+     * that renamed the mod but ships the same voxelizer, with the same list of palettes it accepts).
+     */
+    private static boolean isVoxy(ModInfo meta) {
+        if ("voxy".equals(meta.getModId())) {
+            return true;
+        }
+        try {
+            return java.nio.file.Files.isDirectory(meta.getOwningFile().getFile().findResource("me/cortex/voxy/common/voxelization"));
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private static void addOverrides(List<MixinOverride> list, ModInfo meta, Object override) {

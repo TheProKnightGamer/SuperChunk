@@ -21,6 +21,18 @@ public interface ScBeardBoxAccess {
      */
     boolean superchunk$beardBox(int[] out6);
 
+    int BEARD_MAY_RAISE = 1;
+    int BEARD_MAY_LOWER = 2;
+
+    /**
+     * Which way the beardifier can move the density in the block box (inclusive bounds): 0 when it
+     * is exactly 0.0 for every block (no piece's or junction's own reach meets the box), else
+     * {@link #BEARD_MAY_RAISE} (some reaching term can be positive) and/or
+     * {@link #BEARD_MAY_LOWER} (some can be negative). Finer than the union box of
+     * {@link #superchunk$beardBox}, which a village fills mostly with blocks nothing reaches.
+     */
+    int superchunk$beardSigns(int x0, int y0, int z0, int x1, int y1, int z1);
+
     /**
      * The chunk's beard terms for the decide kernel to sum ({@code sc_beard}, decide.cl), or
      * {@code null} when they cannot be shipped (a terrain adjustment this code does not know, or

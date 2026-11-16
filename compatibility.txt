@@ -33,6 +33,9 @@ SUMMARY
                                           Distant Horizons 3.3.3: DH's own code faster, two
                                           parity fixes (one for all worlds), server lag while
                                           DH generates — see INTEGRATED, FIXED;
+                                          Distant Horizons 3.0.0 to 3.3.3 all covered, existing
+                                          worlds import faster, and the patches check themselves
+                                          on a DH version they do not know — see INTEGRATED;
                                           Skein parallel tick phases — FIXED;
                                           YUNG's Better Caves — CLEARED;
                                           Better Chunk Loading — INCOMPATIBLE, by design;
@@ -589,7 +592,7 @@ FIXED  (was incompatible; SuperChunk changed to support it)
     NOTE: Radium is REDUNDANT with SuperChunk (SuperChunk already bundles Lithium). It no longer
     crashes, but installing it adds nothing — SuperChunk's Lithium simply steps aside for it.
 
-  voxy .................. Voxy 0.2.16-beta (via Roxy 0.3.3) ........ PASS (after fix)  [client]
+  voxy .................. Voxy 0.2.16-beta (via Roxy 0.3.3, 0.4.1) . PASS (after fix)  [client]
 
     GitHub issue #8 (2026-09-20): with Roxy (Voxy on NeoForge) the game launched, but Voxy ingested
     no chunks and logged "Unknown palette type: dev.superchunk.net.caffeinemc.mods.lithium.common.
@@ -620,6 +623,46 @@ FIXED  (was incompatible; SuperChunk changed to support it)
         'mixin.chunk.palette' (added by mods [voxy])", zero ingest exceptions, Voxy's store 8.8 MB.
     A dedicated-server boot with a stub "voxy" mod also showed the override applying only with
     the mod present and not with the kill switch.
+
+    2026-11-14: ROXY 0.4.1, VOXY UNDER ANOTHER MOD ID, AND THE VOXY ADD-ONS.
+    Voxy is Fabric-only and has no 1.21.1 release. On NeoForge 1.21.1 it runs through Roxy (which
+    loads the original Voxy jar; every Roxy from 0.1.0 to 0.4.1 registers it under the mod id
+    "voxy"), through Sinytra Connector, or as a community port. The override above looked for that
+    mod id. It now also applies when any mod file carries Voxy's voxelizer classes
+    (me/cortex/voxy/common/voxelization), so a port that renames the mod gets it too.
+    RETESTED in a real client (NeoForge 21.1.248, Roxy 0.4.1, Voxy 0.2.16-beta+1.21.11, Sodium
+    0.8.12, Forgified Fabric API 0.116.14; Xvfb + Mesa llvmpipe; singleplayer on a world Chunky
+    had generated; a normal quit each time):
+      - default: 150 s and 120 s in the world, no "Unknown palette type", no ingest exception.
+      - -Dsuperchunk.compat.voxy=false: 1,712 ingest exceptions in 75 s, as in September. The
+        override is still what lets Voxy ingest, and the test does exercise ingest.
+    THE ADD-ONS that generate or serve Voxy LODs on NeoForge 1.21.1. Each was booted on a dedicated
+    server with SuperChunk and a Chunky pregen was run ("errors" are ERROR lines, "mixin" failed
+    or skipped injections of either mod):
+      Voxy Server Side 0.21.0 (lss) .............. errors 0, mixin 0. It reads sections through
+          vanilla's palette interface, not a list of palette classes, so the Lithium palette is
+          fine for it. Its fast disk reads use vanilla's IOWorker and fall back to plain reads
+          when that is replaced (its own message names C2ME); not exercised here, it needs a
+          client that asks for LODs.
+      Voxy World Gen V2 2.4.2 (voxyworldgenv2) ... errors 0, mixin 0, and in the client above
+          with Voxy: 120 s, no error, Voxy's store grew to 200 MB (5 MB without the add-on). It
+          asks the server for FULL chunks through ServerChunkCache.getChunkFutureMainThread,
+          which the chunk system serves. Its rate is set by its own maxActiveTasks (6 on a first
+          run, up to 128 in config/voxyworldgenv2.json); the rate with and without SuperChunk
+          was not measured (the test bot is refused by a server with it installed).
+      Voxy Auto LOD 1.1.4 (voxy_server_lod) ...... errors 0 (it has no mixins).
+      Voxy SeedGen 0.3.1 (voxyseedgen) ........... errors 0 on the server, where it only shares
+          the seed. In the client its fill ran ("the fill has written 96 chunks"). SeedGen
+          rebuilds terrain from the level's density functions and stops with "C2ME has compiled
+          this world's density functions" when it finds compiled ones it cannot unwrap. It asks
+          NoiseRouter for c2me$getOriginalNoiseRouter() first; SuperChunk now answers that with
+          the router as vanilla built it (opts/dfc MixinNoiseRouterOriginal) rather than leave
+          SeedGen to dig the fallback out of SuperChunk's compiled classes by reflection.
+          Not SuperChunk's: SeedGen 0.3.1 with Voxy 0.2.16 through Roxy 0.4.1 crashes the client a
+          few seconds after joining (NoSuchFieldError: VoxyConfig.sectionRenderDistance, in
+          SeedGen's RenderReach). It does the same without SuperChunk.
+    No Voxy build for Forge 1.20.1 was found (SeedGen ships a Forge 1.20.1 jar, which needs one).
+    The Forge tree has the same override and accessor, untested there.
 
 =============================================================
 INVESTIGATED AND CLEARED  (suspected, proven not to be the cause)
@@ -943,6 +986,150 @@ INTEGRATED  (compatible already; SuperChunk added interop to make it FASTER)
     Forge's verify: 0 differences in 1,436,398 overworld evaluations. Surface heights identical in
     every round, on both loaders. What remains per searched column: about 60 us of
     surface search and 32 us of biome lookups (DH reads the biome at all four data columns).
+
+    2026-11-14: EVERY DH 3.x RELEASE, EXISTING WORLDS, AND WHAT HAPPENS WHEN DH UPDATES.
+    Until now the patches of DH's own code ran on DH 3.3.3 only: on any other version every one
+    whose DH methods hashed differently was left out. That is safe, and it also meant that 3.3.2
+    lost the LOD builder and height-map patches over a one-line change they do not depend on, and
+    that the next DH release would lose them all until SuperChunk caught up.
+
+    VERSIONS. The table (compat/DhFastPathTable, with the reason beside each hash) now lists the
+    hashes of every release from 3.0.0 to 3.3.3, each difference read against the patch that
+    relies on the method and then run with the patch's verify mode:
+                         3.0.0  3.0.1/2  3.0.3  3.1.0-3.2.0  3.3.0   3.3.1-3.3.3
+      region chunk lock ...  -      -       -        yes     Forge       yes
+      id-map remap ........ yes    yes     yes       yes      yes        yes
+      LOD builder biome ... yes    yes     yes       yes     Forge       yes
+      LOD builder by runs . yes     -      yes       yes     Forge       yes
+      height maps by runs . yes     -      yes       yes     Forge       yes
+      culler opacity table  yes    yes     yes       yes      yes        yes
+      data stream ......... yes    yes     yes       yes      yes        yes
+      saved block states .. yes    yes     yes       yes      yes        yes     (new, below)
+      saved light ......... yes    yes     yes       yes     Forge       yes     (new, below)
+      rough surface .......  (DH has no rough surface generator before 3.3)       yes
+    What differs between releases, and why it does not matter to the patch: 3.1.x is the same
+    source built for Java 21 (string concatenation compiles differently); createDhHeightMaps before
+    3.3.3 has its off-thread warning's test inverted, so it never logged (the patch now does as the
+    installed DH does); fromBlockState compared with == before 3.3.3 and Objects.equals since;
+    3.2.0 moved one class and 3.3 renamed another. What does matter: DH 3.0.1 and 3.0.2 made a new
+    block wrapper (and fired DH's wrapper-created API event) on every lookup instead of keeping one
+    per block state, so the two patches that read a block through DH once per palette entry stay
+    out there; DH 3.0.x has no dhHasChunk/dhGetChunk for the region patch to answer from; and the
+    NeoForge build of 3.3.0 (replaced by 3.3.1 a day later) names its interfaces differently, so
+    the patches that take those types stay out. DH 2.x (2.3.6, 2.4.5) gets none of these patches;
+    the generation-step seam and everything else in this section apply to it as before.
+
+    TESTED (2026-11-14, headless NeoForge 21.1.248 and Forge 47.3.0, "/dh pregen" on a fresh area
+    and, from 3.0.0 up, over a world Chunky had generated; -Dsuperchunk.dh.lodVerify=true and
+    -Dsuperchunk.io.fastPaletteRead.verify=true, so DH's own code ran beside every patch and each
+    result was compared):
+      NeoForge  3.0.0-b, 3.0.3-b, 3.1.2-b, 3.2.0-b, 3.3.1, 3.3.2, 3.3.3: on each, 8,192 generated
+                chunks' LODs and 16,384 height maps equal to DH's own; over the existing world
+                8,192 chunks' LODs, 16,384 height maps, 8,192 chunks' saved light and 240,000
+                sections' block states equal. 3.0.1-b, 3.3.0 and 2.4.5-b: both runs complete with
+                the patches their column shows (3.0.1-b: 4,096 chunks' saved light equal).
+      Forge     3.0.0-b, 3.0.3-b, 3.1.2-b, 3.2.0-b, 3.3.0, 3.3.2, 3.3.3: the same counts, all
+                equal (260,000 sections). 3.0.1-b and 2.4.5-b: both runs complete.
+    No run logged an error that DH alone does not also produce (see FOUND ON THE WAY).
+
+    WHEN DH UPDATES. A hash says "this is the code that was checked"; it cannot say "this change is
+    harmless". So a patch now has three states on the installed DH, decided when the mixins load:
+      checked ...... every DH method it relies on is byte for byte one of the checked versions.
+      self-check ... a method differs, but only in how it computes: it calls the same methods of
+                     DH and Minecraft and writes the same fields (ForeignBytecode.effects; calls
+                     into the JDK and a compiler's string concatenation are not counted). The
+                     patch runs, and DH's own code runs beside it, for the first 2,048 calls and
+                     then one call in 64. The first result that differs from DH's own, or anything
+                     thrown by the patch, turns the patch off for the session with one warning;
+                     the result used for that call is DH's. Only patches that can make that
+                     comparison qualify: the LOD builder (by runs, and its biome reuse), the height
+                     maps, the saved block states, the saved light and the rough-surface density.
+                     The other four change locking or bookkeeping with nothing to compare, and
+                     stay out unless the hashes match.
+      out .......... a method is gone, has another signature, calls or writes something new, or
+                     the patch cannot check itself. DH runs its own code, as without SuperChunk.
+    Before any of that, every reference the patch's own bytecode makes to a DH class, method or
+    field is resolved against the installed DH the way the JVM would (ForeignLinks: the member
+    exists with that descriptor in the class or a supertype, a static call meets a static method,
+    an interface call an interface, @Shadow members exist in the target). A patch with one that
+    does not resolve is left out, so a renamed DH method cannot become a NoSuchMethodError inside
+    DH's code.
+    One line at boot says where the install stands. On a checked version it is an INFO line. On a
+    version newer than 3.3.3, or when any patch is under self-check, it is a WARN line that is
+    shown at any log level: how many patches apply, which run under self-check, which are out.
+    Switches: -Dsuperchunk.dh.selfCheck=false (hash matches only, as before),
+    -Dsuperchunk.dh.fastPaths.off=<names> (leave the named patches out, by the names the log
+    uses), -Dsuperchunk.dh.fastPaths=false (all out).
+    Tried against pretend releases made from 3.3.3 (version set to 3.4.0, in the server):
+      the patched methods changed without changing what they do (a NOP) ..... four patches under
+          self-check, "the first 2048 chunks equal Distant Horizons' own", all stay on
+      DH's own LOD builder changed to start columns at sky light 14 ........ the LOD builder patch
+          turned itself off at the first chunk ("its result differs from DH's own ... column 0"),
+          DH's data source was used, the pregen finished
+      a new call added to the LOD builder and the height maps ............. those three out at boot
+      a field only the patch's comparison reads renamed .................... that patch out at boot
+          ("it uses Distant Horizons' field FullDataSourceV2.columnWorldCompressionMode, which
+          this version does not have")
+    To look at a real new release before installing it: run compat.DhFastPathTable with DH jars as
+    arguments (it needs only the compiled classes, ASM and slf4j on the classpath). It prints the
+    state of every patch per jar; -v adds the reason, --hashes the hash of every method the table
+    names, grouped by jar, which is what a new version's entries are written from.
+
+    EXISTING WORLDS AND THE SERVER'S OWN CHUNKS. The LOD builder and height-map patches handled
+    only the ProtoChunks DH's own generator makes. DH builds LODs from two other kinds of chunk,
+    both LevelChunks: the ones it reads from the region files of a world that already exists, and
+    the server's (its INTERNAL_SERVER mode, the client's default before DH 3.3, and every loaded
+    chunk that changes). Both patches now take those too. A LevelChunk can change under the server thread
+    while DH reads it, as it can under DH's own reads, so a wrapper is remembered for a palette
+    entry only when it wraps that entry's block state, and forgotten when the section's palette
+    object is replaced; a comparison with DH's own result is repeated before it counts as a
+    difference. Not for other mods' chunk classes, the empty chunk or the debug world, and not
+    while another mod hooks LevelChunk.getBlockState. Switch: -Dsuperchunk.dh.levelChunks=false.
+    A profile of importing a world then showed where the rest of the time went, and two more
+    patches of DH's ChunkCompoundTagParser followed:
+      MixinDhChunkTagLight ....... readLight copied a chunk's saved light into DH's storage with two
+                                   set calls per block, about 200,000 per chunk, each taking and
+                                   releasing the section's concurrency-check lock: 43% of the
+                                   import's CPU, all on the one thread the chunk reads complete on.
+                                   The state a section ends in depends only on its 4,096 values
+                                   (256 packed columns and a count per level, or one constant), so
+                                   it is written at once. Sections outside the plain case go
+                                   through DH's own calls.
+      MixinDhChunkTagPalette ..... DH decodes each saved section's block states with the codec
+                                   vanilla's chunk loader uses; the direct read SuperChunk gives
+                                   vanilla's loads (chunkio/FastChunkPaletteRead) now stands in for
+                                   it, with DH's codec for anything it does not understand.
+    MEASURED (2026-11-14, NeoForge, DH 3.3.3 FEATURES mode, "/dh pregen" r96 = 37,249 chunks over
+    a world Chunky had generated, alternating, box load 14-18; before = the three import changes
+    off):
+      before ......  1,156 / 1,233 / 1,233 chunks/s    9.48 / 9.39 / 9.39 ms CPU per chunk
+      now .........  2,047 / 2,298 / 2,296 chunks/s    6.63 / 6.26 / 6.45 ms CPU per chunk
+    About 83% more chunks per second and 31% less CPU per chunk. Forge 1.20.1, the same test, two
+    pairs: 1,233 / 1,233 -> 2,299 / 2,301 chunks/s and 9.23 / 9.38 -> 6.14 / 6.01 ms CPU per chunk.
+    What is left is DH's merge of each chunk into its section (38% of the samples), the LOD loop
+    itself (21%) and DH's light bake (15%).
+    Verify, same world: 16,384 chunks' LODs, height maps and both light storages equal to DH's own;
+    400,000 sections decoded both ways with no difference. INTERNAL_SERVER mode: 4,096 server
+    chunks' LODs equal.
+
+    ONE FAULT OF OUR OWN, FOUND BY THE PRETEND RELEASES ON FORGE: two mixins into the same class
+    that each add a field of the same name share one field under Forge 1.20.1's Mixin 0.8.5 (it
+    prepares every mixin against the class as it was and sees no clash; NeoForge's Mixin renames
+    the second). The LOD builder patch and its biome patch both called theirs SUPERCHUNK$CHECK, so
+    on Forge one self-check state served both. The tree already had the same fault in three pairs
+    of kill switches named SUPERCHUNK$ENABLED (BiomeManager: fiddle and quart cache;
+    PalettedContainer: getAll and pack; three WorldCarver mixins): on Forge, one switch of a pair
+    could switch both or neither. Every added field now has a name of its own, and
+    MixinMemberClashTest fails the build on a new clash (both trees).
+
+    FOUND ON THE WAY (not SuperChunk's, stated so nobody chases them here):
+      - DH 3.1.0-b does not start on a dedicated server, with or without SuperChunk: its startup
+        check calls a client-only crash handler (NullPointerException in Initializer.preConfigInit).
+        3.1.1 fixed it.
+      - DH 3.3.3 with Chunky on a new world: DH's Chunky hook runs on the first chunk load, before
+        Chunky has loaded, and throws "Chunky is not loaded". Without SuperChunk that exception
+        crashes the server at startup ("Exception chunk generation/loading"). With SuperChunk the
+        chunk system logs it as one error and carries on.
 
 =============================================================
 DATAPACKS  (worldgen datapacks)

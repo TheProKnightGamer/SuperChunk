@@ -11,12 +11,12 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 @Mixin(BiomeManager.class)
 public abstract class MixinBiomeManagerFiddle {
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$FIDDLE_ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.worldgen.biomeFiddle", "true"));
 
     @Redirect(method = "getFiddle", at = @At(value = "INVOKE", target = "Ljava/lang/Math;floorMod(JI)I"), require = 0)
     private static int superchunk$powerOfTwoModulus(long value, int divisor) {
-        return SUPERCHUNK$ENABLED && divisor == 1024
+        return SUPERCHUNK$FIDDLE_ENABLED && divisor == 1024
                 ? BiomeFiddleMath.floorMod1024(value) : Math.floorMod(value, divisor);
     }
 }

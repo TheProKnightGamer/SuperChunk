@@ -90,8 +90,46 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
             Assertions.assertTrue((radius * 2 + 1) * (radius * 2 + 1) == actualDependencies);
         }
 
-        return new ChunkLoadingContext(holder, this.tacs, this.schedulingManager, StaticCache2D.create(holder.getKey().x, holder.getKey().z, radius,
-                (x, z) -> this.getHolder(new ChunkPos(x, z)).getUserData().get()), dependencies);
+        // SuperChunk: the neighbours are this item's dependencies, which it holds by slot
+        // (dependencySlot): no position object and table lookup per neighbour. The centre, a
+        // neighbour beyond the slots or one not found there is looked up as before.
+        final int centerX = holder.getKey().x;
+        final int centerZ = holder.getKey().z;
+        final ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, ?>[] held =
+                DEPENDENCY_SLOTS && radius > 0 && radius <= DEPENDENCY_SLOT_RADIUS ? holder.dependencyHoldersBySlot() : null;
+        return new ChunkLoadingContext(holder, this.tacs, this.schedulingManager, StaticCache2D.create(centerX, centerZ, radius,
+                (x, z) -> {
+                    if (held != null && (x != centerX || z != centerZ)) {
+                        final ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, ?> neighbour =
+                                held[(z - centerZ + DEPENDENCY_SLOT_RADIUS) * DEPENDENCY_SLOT_SIDE + (x - centerX + DEPENDENCY_SLOT_RADIUS)];
+                        if (neighbour != null) {
+                            return (NewChunkHolderVanillaInterface) neighbour.getUserData().get();
+                        }
+                    }
+                    return this.getHolder(new ChunkPos(x, z)).getUserData().get();
+                }), dependencies);
+    }
+
+    /** SuperChunk: kill switch for the dependency slots ({@code -Dsuperchunk.scheduler.dependencySlots=false}). */
+    private static final boolean DEPENDENCY_SLOTS =
+            !"false".equalsIgnoreCase(System.getProperty("superchunk.scheduler.dependencySlots", "true"));
+    /** Vanilla's widest dependency is structure starts within 8 chunks. */
+    private static final int DEPENDENCY_SLOT_RADIUS = 8;
+    private static final int DEPENDENCY_SLOT_SIDE = 2 * DEPENDENCY_SLOT_RADIUS + 1;
+
+    @Override
+    protected int dependencySlot(ChunkPos item, ChunkPos dependency) {
+        if (!DEPENDENCY_SLOTS) {
+            return -1;
+        }
+        final int dx = dependency.x - item.x + DEPENDENCY_SLOT_RADIUS;
+        final int dz = dependency.z - item.z + DEPENDENCY_SLOT_RADIUS;
+        return dx >= 0 && dx < DEPENDENCY_SLOT_SIDE && dz >= 0 && dz < DEPENDENCY_SLOT_SIDE ? dz * DEPENDENCY_SLOT_SIDE + dx : -1;
+    }
+
+    @Override
+    protected int dependencySlotCount() {
+        return DEPENDENCY_SLOT_SIDE * DEPENDENCY_SLOT_SIDE;
     }
 
     @Override

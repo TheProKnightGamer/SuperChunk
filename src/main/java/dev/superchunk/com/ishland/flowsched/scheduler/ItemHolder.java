@@ -29,6 +29,8 @@ import java.util.function.Function;
 public class ItemHolder<K, V, Ctx, UserData> {
 
     private static final VarHandle FUTURES_HANDLE = MethodHandles.arrayElementVarHandle(CompletableFuture[].class);
+    private static final AtomicIntegerFieldUpdater<ItemHolder> ACTIONS_IN_FLIGHT_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(ItemHolder.class, "actionsInFlight");
     private static final AtomicIntegerFieldUpdater<ItemHolder> SCHEDULED_DIRTY_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(ItemHolder.class, "scheduledDirty");
 
@@ -63,6 +65,8 @@ public class ItemHolder<K, V, Ctx, UserData> {
     private final CompletableFuture<Void>[] futures;
     private final AtomicInteger flags = new AtomicInteger(0);
     private volatile int scheduledDirty = 0; // meant to be used as a boolean
+    /** SuperChunk: upgrades and downgrades subscribed and not finished ({@link #subscribeOp}); above zero the item is busy. */
+    private volatile int actionsInFlight = 0;
     private final OneTaskAtATimeExecutor criticalSectionExecutor;
     private final Scheduler criticalSectionScheduler;
     private final Object2ReferenceLinkedOpenHashMap<K, DependencyInfo> dependencyInfos = new Object2ReferenceLinkedOpenHashMap<>() {
@@ -74,6 +78,13 @@ public class ItemHolder<K, V, Ctx, UserData> {
         }
     };
     private boolean dependencyDirty = false;
+    /**
+     * SuperChunk: the entries of {@link #dependencyInfos} again, by the slot the scheduler gives a
+     * dependency's key ({@link StatusAdvancingScheduler#dependencySlot}); null until the first
+     * slotted dependency. Guarded by {@code dependencyInfos}. Only a shortcut to the same objects:
+     * a key without a slot, or a slot not filled yet, goes through the map.
+     */
+    private DependencyInfo[] dependencySlots;
 
     ItemHolder(ItemStatus<K, V, Ctx> initialStatus, K key, ObjectFactory objectFactory, Executor backgroundExecutor) {
         this.unloadedStatus = Objects.requireNonNull(initialStatus);
@@ -148,7 +159,14 @@ public class ItemHolder<K, V, Ctx, UserData> {
         return this.tickets.getTicketsForStatus(status);
     }
 
-    public void addTicket(ItemTicket<K, V, Ctx> ticket) {
+    /**
+     * Adds a ticket.
+     *
+     * @return whether this item needs a tick for it. SuperChunk: it does not when the change left
+     * the target status where it was and the item either is at that status already or is in the
+     * middle of an upgrade or downgrade (see {@link StatusAdvancingScheduler#SKIP_SETTLED_TICKS}).
+     */
+    public boolean addTicket(ItemTicket<K, V, Ctx> ticket) {
         assertOpen();
         final boolean add = this.tickets.checkAdd(ticket);
         if (!add) {
@@ -156,27 +174,43 @@ public class ItemHolder<K, V, Ctx, UserData> {
         }
 
         boolean needConsumption;
+        final boolean settled;
         synchronized (this) {
+            final ItemStatus<K, V, Ctx> targetBefore = this.tickets.getTargetStatus();
             this.tickets.addUnchecked(ticket);
             createFutures();
-            needConsumption = ticket.getTargetStatus().ordinal() <= this.getStatus().ordinal();
+            final ItemStatus<K, V, Ctx> status = this.getStatus();
+            needConsumption = ticket.getTargetStatus().ordinal() <= status.ordinal();
+            settled = this.tickets.getTargetStatus() == targetBefore
+                    && (status == targetBefore || this.actionsInFlight > 0);
         }
 
         if (needConsumption) {
             ticket.consumeCallback();
         }
         this.validateRequestedFutures(ticket.getTargetStatus());
+        return !settled || (this.getFlags() & FLAG_BROKEN) != 0;
     }
 
-    public void removeTicket(ItemTicket<K, V, Ctx> ticket) {
+    /**
+     * Removes a ticket.
+     *
+     * @return whether this item needs a tick for it (see {@link #addTicket}).
+     */
+    public boolean removeTicket(ItemTicket<K, V, Ctx> ticket) {
         assertOpen();
         final boolean remove = this.tickets.checkRemove(ticket);
         if (!remove) {
             throw new IllegalStateException("Ticket does not exist");
         }
+        final boolean settled;
         synchronized (this) {
+            final ItemStatus<K, V, Ctx> targetBefore = this.tickets.getTargetStatus();
             this.tickets.removeUnchecked(ticket);
+            settled = this.tickets.getTargetStatus() == targetBefore
+                    && (this.getStatus() == targetBefore || this.actionsInFlight > 0);
         }
+        return !settled || (this.getFlags() & FLAG_BROKEN) != 0;
     }
 
     public void submitOp(CompletionStage<Void> op) {
@@ -189,8 +223,14 @@ public class ItemHolder<K, V, Ctx, UserData> {
 
     public void subscribeOp(Completable op) {
         assertOpen();
+        ACTIONS_IN_FLIGHT_UPDATER.incrementAndGet(this);
         this.busyRefCounter.incrementRefCount();
-        op.onErrorComplete().subscribe(this.busyRefCounter::decrementRefCount);
+        op.onErrorComplete().subscribe(() -> {
+            // counted down before the item stops being busy: while it is above zero a tick finds
+            // the item busy and re-arms itself (StatusAdvancingScheduler#tickHandleBusy0)
+            ACTIONS_IN_FLIGHT_UPDATER.decrementAndGet(this);
+            this.busyRefCounter.decrementRefCount();
+        });
     }
 
     BusyRefCounter busyRefCounter() {
@@ -266,7 +306,9 @@ public class ItemHolder<K, V, Ctx, UserData> {
     }
 
     private void markDirty0(StatusAdvancingScheduler<K, V, Ctx, UserData> scheduler) {
+        if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.MARK_DIRTY);
         if (SCHEDULED_DIRTY_UPDATER.compareAndSet(this, 0, 1)) {
+            if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.MARK_DIRTY_SCHEDULED);
             this.criticalSectionExecutor.execute(() -> {
                 SCHEDULED_DIRTY_UPDATER.set(this, 0);
                 scheduler.tickHolder0(this);
@@ -551,13 +593,14 @@ public class ItemHolder<K, V, Ctx, UserData> {
     }
 
     public void addDependencyTicket(StatusAdvancingScheduler<K, V, Ctx, ?> scheduler, K key, ItemStatus<K, V, Ctx> status, Runnable callback) {
+        if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.DEP_ADD);
         synchronized (this.dependencyInfos) {
-            final DependencyInfo info = this.dependencyInfos.computeIfAbsent(key, k -> new DependencyInfo(status.getAllStatuses().length));
+            final DependencyInfo info = this.dependencyInfo(scheduler, key, status);
             final int ordinal = status.ordinal();
             if (info.refCnt[ordinal] == -1) {
                 info.refCnt[ordinal] = 0;
                 info.callbacks[ordinal] = new ObjectArrayList<>();
-                scheduler.addTicket(key, ItemTicket.TicketType.DEPENDENCY, this.getKey(), status, () -> {
+                info.holder = scheduler.addTicket(key, ItemTicket.TicketType.DEPENDENCY, this.getKey(), status, () -> {
                     final ObjectArrayList<Runnable> list;
                     synchronized (this.dependencyInfos) {
                         list = info.callbacks[ordinal];
@@ -586,9 +629,61 @@ public class ItemHolder<K, V, Ctx, UserData> {
         }
     }
 
-    public void removeDependencyTicket(K key, ItemStatus<K, V, Ctx> status) {
+    /** The entry for {@code key}, created if absent; by slot when the key has one. Call under the lock. */
+    private DependencyInfo dependencyInfo(StatusAdvancingScheduler<K, V, Ctx, ?> scheduler, K key, ItemStatus<K, V, Ctx> status) {
+        final int slot = scheduler.dependencySlot(this.key, key);
+        if (slot < 0) {
+            return this.dependencyInfos.computeIfAbsent(key, k -> new DependencyInfo(status.getAllStatuses().length));
+        }
+        DependencyInfo[] slots = this.dependencySlots;
+        if (slots == null) {
+            slots = this.dependencySlots = new DependencyInfo[scheduler.dependencySlotCount()];
+        }
+        DependencyInfo info = slots[slot];
+        if (info == null) {
+            info = this.dependencyInfos.computeIfAbsent(key, k -> new DependencyInfo(status.getAllStatuses().length));
+            slots[slot] = info;
+        }
+        return info;
+    }
+
+    /**
+     * SuperChunk: the items this one holds a dependency ticket on, by slot (a copy; entries without
+     * a ticket are null), or null when it holds none by slot. A ticket keeps its item from being
+     * removed, so each is the item currently registered for that key.
+     */
+    public ItemHolder<K, V, Ctx, ?>[] dependencyHoldersBySlot() {
         synchronized (this.dependencyInfos) {
-            final DependencyInfo info = this.dependencyInfos.get(key);
+            final DependencyInfo[] slots = this.dependencySlots;
+            if (slots == null) {
+                return null;
+            }
+            @SuppressWarnings("unchecked")
+            final ItemHolder<K, V, Ctx, ?>[] out = new ItemHolder[slots.length];
+            for (int i = 0; i < slots.length; i++) {
+                final DependencyInfo info = slots[i];
+                if (info != null) {
+                    out[i] = (ItemHolder<K, V, Ctx, ?>) info.holder;
+                }
+            }
+            return out;
+        }
+    }
+
+    public void removeDependencyTicket(StatusAdvancingScheduler<K, V, Ctx, ?> scheduler, K key, ItemStatus<K, V, Ctx> status) {
+        if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.DEP_REMOVE);
+        synchronized (this.dependencyInfos) {
+            DependencyInfo info = null;
+            final DependencyInfo[] slots = this.dependencySlots;
+            if (slots != null) {
+                final int slot = scheduler.dependencySlot(this.key, key);
+                if (slot >= 0) {
+                    info = slots[slot];
+                }
+            }
+            if (info == null) {
+                info = this.dependencyInfos.get(key);
+            }
             Assertions.assertTrue(info != null);
             final int old = info.refCnt[status.ordinal()]--;
             Assertions.assertTrue(old > 0);
@@ -635,8 +730,20 @@ public class ItemHolder<K, V, Ctx, UserData> {
                     }
                     if (refCnt[ordinal] != -1) isEmpty = false;
                 }
-                if (isEmpty)
+                if (isEmpty) {
                     iterator.remove();
+                    info.holder = null;
+                    final DependencyInfo[] slots = this.dependencySlots;
+                    if (slots != null) {
+                        final int slot = scheduler.dependencySlot(this.key, key);
+                        if (slot >= 0) {
+                            slots[slot] = null;
+                        }
+                    }
+                }
+            }
+            if (this.dependencyInfos.isEmpty()) {
+                this.dependencySlots = null;
             }
             dependencyDirty = false;
         }
@@ -653,6 +760,8 @@ public class ItemHolder<K, V, Ctx, UserData> {
     private static class DependencyInfo {
         private final int[] refCnt;
         private final ObjectArrayList<Runnable>[] callbacks;
+        /** SuperChunk: the item the dependency tickets are on (set with the first ticket). */
+        private ItemHolder<?, ?, ?, ?> holder;
 
         private DependencyInfo(int statuses) {
             this.refCnt = new int[statuses];
