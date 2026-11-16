@@ -22,6 +22,7 @@ import net.minecraft.server.level.ChunkMap;
 import net.minecraft.util.StaticCache2D;
 import net.minecraft.util.thread.BlockableEventLoop;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -214,7 +215,13 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
                 continue; // in the holder map: vanilla's own flush loop saved it
             }
             final ChunkState state = holder.getItem().get();
-            net.minecraft.world.level.chunk.ChunkAccess chunk = state != null ? state.chunk() : null;
+            if (state == null || state.reachedStatus() == null || !state.reachedStatus().isOrAfter(ChunkStatus.FULL)) {
+                // A chunk below FULL has already had its block entities dropped or is still being
+                // downgraded. Saving it here would write an empty block_entities list over the last
+                // good copy, so mirror ReadFromDisk.downgradeFromThis and leave it to the unload step.
+                continue;
+            }
+            net.minecraft.world.level.chunk.ChunkAccess chunk = state.chunk();
             // ImposterProtoChunk.isUnsaved() is always false: save the full chunk it wraps, as the unload step does
             if (chunk instanceof net.minecraft.world.level.chunk.ImposterProtoChunk imposter) {
                 chunk = imposter.getWrapped();
