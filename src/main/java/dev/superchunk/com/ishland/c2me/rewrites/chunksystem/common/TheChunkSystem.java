@@ -20,6 +20,7 @@ import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.util.thread.BlockableEventLoop;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.ChunkStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -262,7 +263,17 @@ public class TheChunkSystem extends StatusAdvancingScheduler<ChunkPos, ChunkStat
                 continue; // in the holder map: vanilla's own flush loop saved it
             }
             final ChunkState state = holder.getItem().get();
-            net.minecraft.world.level.chunk.ChunkAccess chunk = state != null ? state.chunk() : null;
+            if (state == null || state.reachedStatus() == null || !state.reachedStatus().isOrAfter(ChunkStatus.FULL)) {
+                // Only a chunk that reached FULL here has its block entities attached. A full chunk
+                // read from disk as a neighbour's dependency sits below FULL with them still packed
+                // in its post-load step, and ChunkSerializer.read leaves it flagged unsaved. Saving
+                // it wrote an empty block_entities list over the good copy: a flush or a stop
+                // emptied the containers in every such chunk around the loaded area. Vanilla never
+                // saves these (ImposterProtoChunk.isUnsaved() is false) and
+                // ReadFromDisk.downgradeFromThis has the same guard. Found and fixed by JacyKu (#33).
+                continue;
+            }
+            net.minecraft.world.level.chunk.ChunkAccess chunk = state.chunk();
             // ImposterProtoChunk.isUnsaved() is always false: save the full chunk it wraps, as the unload step does
             if (chunk instanceof net.minecraft.world.level.chunk.ImposterProtoChunk imposter) {
                 chunk = imposter.getWrapped();

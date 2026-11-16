@@ -1,6 +1,25 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
-## DISTANT HORIZONS 3.0.0-3.3.3, SELF-CHECK, EXISTING WORLDS; VOXY (2026-11-14, latest) — neo's compatibility.txt has the full write-up
+## FLUSH SAVES EMPTIED BLOCK ENTITIES (GitHub #33, 2026-11-16, latest) — same fix as neo
+
+Found and fixed on neo by JacyKu (PR #33); the same guard here.
+
+- **What happened.** `TheChunkSystem.saveFullChunksOutsideHolderMap()` (the 2026-10-07 flush fix
+  below) saved every full chunk outside the holder map. A full chunk read from disk as a
+  neighbour's dependency sits below FULL: its block entities are still packed in the chunk's
+  post-load step, but `ChunkSerializer.read` leaves it flagged unsaved. So every flushing save
+  (`/save-all flush`, a server stop, leaving a world) wrote an empty `block_entities` list for the
+  whole ring of such chunks around a loaded area. The blocks stayed; chests, furnaces, spawners
+  and signs lost their data. Every build since 2026-10-07 did this.
+- **Fix.** The function skips a chunk whose `reachedStatus` is below FULL, as
+  `ReadFromDisk.downgradeFromThis` already does. Vanilla never saves these chunks either.
+- **Measured** on a world generated without SuperChunk (4,225 chunks, 532 blocks with a block
+  entity), reloaded with 16 chunks force-loaded, flushed and stopped: before, 189 chunks came back
+  with no block entities (458 lost); after, none. A pregen with a flush every 2 s: every block that
+  carries a block entity has one on disk. Kill right after a flush: 4,225 of 4,225 chunks saved, so
+  the flush fix still holds.
+
+## DISTANT HORIZONS 3.0.0-3.3.3, SELF-CHECK, EXISTING WORLDS; VOXY (2026-11-14) — neo's compatibility.txt has the full write-up
 
 Ported from neo the same day (section "2026-11-14: EVERY DH 3.x RELEASE ..." under INTEGRATED).
 
