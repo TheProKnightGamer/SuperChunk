@@ -8,4 +8,12 @@ public abstract class ChunkWrapper_forge implements IChunkWrapper {
     public ChunkAccess getChunk() {
         throw new UnsupportedOperationException();
     }
+
+    public static int getInclusiveMinBuildHeight(ChunkAccess chunk) {
+        throw new UnsupportedOperationException();
+    }
+
+    public static int getExclusiveMaxBuildHeight(ChunkAccess chunk) {
+        throw new UnsupportedOperationException();
+    }
 }

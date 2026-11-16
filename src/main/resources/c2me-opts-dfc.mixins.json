@@ -17,6 +17,7 @@
     "MixinDFTBinaryOperation",
     "MixinDFTWrapping",
     "MixinNoiseConfig",
+    "MixinNoiseRouterOriginal",
     "MixinSplineImplementation"
   ]
 }

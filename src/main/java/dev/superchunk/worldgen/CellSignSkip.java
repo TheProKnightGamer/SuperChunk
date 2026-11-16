@@ -49,10 +49,19 @@ import java.util.concurrent.atomic.AtomicLong;
  *       branch, which does not read the value either. The air-cell skip then answers the cell.</li>
  * </ul>
  * In both cases the cell cache is filled with the bound (a value of the proven sign) and the
- * per-block evaluation is skipped. Every block comes out as before; mixed cells, cells that may
- * touch a structure's beard box, blending and any expression node this class does not know take
- * the original fill. GPU routing may stay on: a cell's fill is never served by the GPU (see
- * {@link #bind}), and the compact-ids hybrid fill's CPU cells all touch the beard box.
+ * per-block evaluation is skipped. Every block comes out as before; mixed cells, blending and any
+ * expression node this class does not know take the original fill.
+ *
+ * <p>Structure terrain (the beardifier) is added to the bounded expression. A cell no piece or
+ * junction reaches gets exactly 0.0 from it. A cell they do reach is still decided when every
+ * reaching term can only push the density the way the bound already points: terms that are never
+ * negative under a proven-positive cell, terms that are never positive over a proven-non-positive
+ * one ({@code ScBeardBoxAccess.superchunk$beardSigns}). Cells where structure terrain could flip
+ * the sign take the original fill.
+ *
+ * <p>GPU routing may stay on: a cell's fill is never served by the GPU (see {@link #bind}). The
+ * compact-ids hybrid fill runs the per-block rules on its CPU cells, which only read the sign of a
+ * decided cell's values, as the ordinary fill does.
  *
  * <p>Kill switch {@code -Dsuperchunk.worldgen.cellSignSkip=false}. Verify
  * {@code -Dsuperchunk.worldgen.cellSignSkip.verify=true} skips nothing and checks every decided
@@ -307,7 +316,11 @@ public final class CellSignSkip {
          * a value of the proven sign (the bound itself).
          */
         int classify(int x0, int y0, int z0, int w, int h) {
-            if (this.beard != null && !beardFree(x0, y0, z0, w, h)) {
+            // The beardifier is added to the bounded expression. Where structure terrain can only
+            // raise the density a positive bound still holds, and where it can only lower it a
+            // non-positive one does (a sum of numbers of one sign has that sign).
+            final int beardSigns = this.beard == null ? 0 : beardSigns(x0, y0, z0, w, h);
+            if (beardSigns == (ScBeardBoxAccess.BEARD_MAY_RAISE | ScBeardBoxAccess.BEARD_MAY_LOWER)) {
                 return UNDECIDED;
             }
             if (!evaluate(y0, h)) {
@@ -315,11 +328,11 @@ public final class CellSignSkip {
             }
             double l = this.lo[this.lo.length - 1];
             double u = this.hi[this.hi.length - 1];
-            if (l > 0.0 && l < Double.POSITIVE_INFINITY) {
+            if (l > 0.0 && l < Double.POSITIVE_INFINITY && (beardSigns & ScBeardBoxAccess.BEARD_MAY_LOWER) == 0) {
                 this.bound = l;
                 return SOLID;
             }
-            if (u <= 0.0 && u > Double.NEGATIVE_INFINITY) {
+            if (u <= 0.0 && u > Double.NEGATIVE_INFINITY && (beardSigns & ScBeardBoxAccess.BEARD_MAY_RAISE) == 0) {
                 this.bound = u;
                 return NON_POSITIVE;
             }
@@ -471,19 +484,22 @@ public final class CellSignSkip {
             return true;
         }
 
-        /** Whether the beardifier is provably 0 for every block of the cell (outside its beard box). */
-        private boolean beardFree(int x0, int y0, int z0, int w, int h) {
+        /** {@link ScBeardBoxAccess#superchunk$beardSigns} for the cell. */
+        private int beardSigns(int x0, int y0, int z0, int w, int h) {
             if (!this.beardKnown) {
                 this.hasBeard = this.beard.superchunk$beardBox(this.beardBox);
                 this.beardKnown = true;
             }
             if (!this.hasBeard) {
-                return true;
+                return 0;
             }
             int[] b = this.beardBox;
-            return x0 + w - 1 < b[0] || x0 > b[3]
+            if (x0 + w - 1 < b[0] || x0 > b[3]
                     || y0 + h - 1 < b[1] || y0 > b[4]
-                    || z0 + w - 1 < b[2] || z0 > b[5];
+                    || z0 + w - 1 < b[2] || z0 > b[5]) {
+                return 0;
+            }
+            return this.beard.superchunk$beardSigns(x0, y0, z0, x0 + w - 1, y0 + h - 1, z0 + w - 1);
         }
     }
 

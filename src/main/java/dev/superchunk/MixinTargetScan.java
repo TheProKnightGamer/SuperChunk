@@ -192,6 +192,8 @@ public final class MixinTargetScan {
             Map.entry("net.minecraft.world.level.levelgen.Heightmap#getFirstAvailable", "m_64242_"),
             Map.entry("net.minecraft.world.level.levelgen.Heightmap#getRawData", "m_64239_"),
             Map.entry("net.minecraft.world.level.chunk.ProtoChunk#getBlockState", "m_8055_"),
+            Map.entry("net.minecraft.world.level.chunk.LevelChunk#getBlockState", "m_8055_"),
+            Map.entry("net.minecraft.world.level.chunk.ImposterProtoChunk#getBlockState", "m_8055_"),
             Map.entry("net.minecraft.world.level.chunk.ChunkAccess#getSection", "m_183278_"),
             Map.entry("net.minecraft.world.level.chunk.LevelChunkSection#hasOnlyAir", "m_188008_"),
             Map.entry("net.minecraft.world.level.levelgen.SurfaceRules$Context#updateY", "m_189576_"),

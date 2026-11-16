@@ -7,19 +7,21 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Gate for the patches that speed up Distant Horizons' own code ({@code mixin.compat.MixinDh*}
- * other than the generation-step seam).
+ * other than the generation-step seam): reads the installed DH's class files and asks
+ * {@link DhFastPathTable} for each patch whether it runs, runs under self-check, or stays out.
  *
- * <p>Each patch replaces a DH method, or skips work only because of what DH's code does today. So
- * each one lists the DH methods it relies on with their {@link ForeignBytecode} hashes in the DH
- * versions it was checked against, and applies only when every one of them matches. A DH update
- * that changes any of those methods leaves the patch out (one INFO line names it) and DH runs its
- * own code, as without SuperChunk. Kill switch: {@code -Dsuperchunk.dh.fastPaths=false}.
+ * <p>Kill switches: {@code -Dsuperchunk.dh.fastPaths=false} leaves every patch out;
+ * {@code -Dsuperchunk.dh.fastPaths.off=<names>} leaves out the named ones (the names the log
+ * uses, comma-separated); {@code -Dsuperchunk.dh.selfCheck=false} leaves out the ones that would
+ * run under self-check (only patches whose DH methods are byte for byte a checked version then run).
  */
 public final class DhFastPaths {
 
@@ -28,157 +30,179 @@ public final class DhFastPaths {
     public static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.dh.fastPaths", "true"));
 
-    private static final String REGION =
-            "com.seibel.distanthorizons.common.wrappers.worldGeneration.mimicObject.DhLitWorldGenRegion_forge";
-    private static final String CHUNK_WRAPPER = "com.seibel.distanthorizons.common.wrappers.chunk.ChunkWrapper_forge";
-    private static final String DATA_SOURCE = "com.seibel.distanthorizons.core.dataObjects.fullData.sources.FullDataSourceV2";
-    private static final String ID_MAP = "com.seibel.distanthorizons.core.dataObjects.fullData.FullDataPointIdMap";
-    private static final String LOD_BUILDER = "com.seibel.distanthorizons.core.dataObjects.transformers.LodDataBuilder";
-    private static final String BIOME_WRAPPER = "com.seibel.distanthorizons.common.wrappers.block.BiomeWrapper_forge";
-    private static final String DATA_INPUT = "com.seibel.distanthorizons.core.util.objects.dataStreams.DhDataInputStream";
-    private static final String BLOCK_WRAPPER = "com.seibel.distanthorizons.common.wrappers.block.BlockStateWrapper_forge";
-    private static final String LIGHT_STORAGE = "com.seibel.distanthorizons.core.wrapperInterfaces.chunk.ChunkLightStorage";
-    private static final String ROUGH_SURFACE = "com.seibel.distanthorizons.common.wrappers.worldGeneration.DhRoughSurfaceGenerator_forge";
-    private static final String CULLER = "com.seibel.distanthorizons.core.dataObjects.transformers.FullDataOcclusionCuller";
+    private static final boolean SELF_CHECK_ALLOWED =
+            Boolean.parseBoolean(System.getProperty("superchunk.dh.selfCheck", "true"));
 
-    private static final String CHUNK_ACCESS = "Lnet/minecraft/world/level/chunk/ChunkAccess;";
-    private static final String CHUNK_STATUS = "Lnet/minecraft/world/level/chunk/ChunkStatus;";
-    private static final String BLOCK_STATE = "Lnet/minecraft/world/level/block/state/BlockState;";
-    private static final String DH_BLOCK = "Lcom/seibel/distanthorizons/core/wrapperInterfaces/block/IBlockStateWrapper;";
-    private static final String DH_LEVEL = "Lcom/seibel/distanthorizons/core/wrapperInterfaces/world/ILevelWrapper;";
-    private static final String DH_BLOCK_IMPL = "Lcom/seibel/distanthorizons/common/wrappers/block/BlockStateWrapper_forge;";
+    /** {@code -Dsuperchunk.dh.fastPaths.off=DhLodBuilderRuns,DhChunkTagLight}: patches to leave out, by the names the log uses. */
+    private static final java.util.Set<String> OFF = offList();
 
-    /** A DH method a patch depends on, and its hash in each checked DH version. */
-    private record Requirement(String owner, String name, String desc, List<String> hashes) {
+    private static java.util.Set<String> offList() {
+        java.util.Set<String> off = new java.util.HashSet<>();
+        for (String name : System.getProperty("superchunk.dh.fastPaths.off", "").split(",")) {
+            if (!name.isBlank()) {
+                off.add(name.trim().replace("Mixin", ""));
+            }
+        }
+        return off;
     }
 
-    private static Requirement req(String owner, String name, String desc, String... hashes) {
-        return new Requirement(owner, name, desc, List.of(hashes));
-    }
-
-    /** The culler's opacity table: the id map does not change once culling starts in a merge. Same on both loaders. */
-    private static final List<Requirement> CULL_TABLE = List.of(
-            req(CULLER, "isTranslucent", null, "bb424f5ae1bd1ca7"),
-            req(CULLER, "cullHiddenDatapointsInColumn", null, "ba2fee5e493ea567"),
-            req(CULLER, "checkOcclusion", null, "6239188834e3be3b"),
-            req(DATA_SOURCE, "updateFromDataSource", null, "71e2220ffb454618"),
-            req(ID_MAP, "getBlockStateWrapper", null, "5d005b239ef242fa"),
-            req(ID_MAP, "getEntry", null, "1548f370ea903aef"));
-
-    /**
-     * Mixin simple name -> what it relies on. Hashes: DH 3.3.3 (Forge 1.20.1). Its Forge classes keep
-     * Minecraft's SRG names for the methods they override ({@code m_6325_} is {@code getChunk(int, int)}).
-     */
-    private static final Map<String, List<Requirement>> REQUIREMENTS = Map.of(
-            "MixinDhRegionFastChunk", List.of(
-                    req(REGION, "m_6325_", "(II)" + CHUNK_ACCESS, "3e360bfb026b3ab5"),
-                    req(REGION, "m_46819_", "(II" + CHUNK_STATUS + ")" + CHUNK_ACCESS, "d591e581879af093"),
-                    req(REGION, "m_6522_", "(II" + CHUNK_STATUS + "Z)" + CHUNK_ACCESS, "08e973dc21edaf67"),
-                    req(REGION, "getChunkAccess", null, "1a83f3e1025ddc70"),
-                    req(REGION, "dhHasChunk", null, "0a98438f5bd2cf33"),
-                    req(REGION, "dhGetChunk", null, "bd0c2ae845a3c77f"),
-                    req(CHUNK_WRAPPER, "getStatus", "(" + CHUNK_ACCESS + ")" + CHUNK_STATUS, "c4e206aa511f6d3d")),
-            "MixinDhFullDataSourceRemap", List.of(
-                    req(DATA_SOURCE, "removeUnusedIdsAndRemap", null, "f39390aae6c717c0"),
-                    req(DATA_SOURCE, "relativePosToIndex", null, "3ad6a18b60a86870"),
-                    req(ID_MAP, "addIfNotPresentAndGetId",
-                            "(Lcom/seibel/distanthorizons/core/wrapperInterfaces/world/IBiomeWrapper;"
-                                    + "Lcom/seibel/distanthorizons/core/wrapperInterfaces/block/IBlockStateWrapper;)I",
-                            "5d9cada962a1264f"),
-                    req(ID_MAP, "addIfNotPresentAndGetId", "(Lcom/seibel/distanthorizons/core/dataObjects/BlockBiomeWrapperPair;)I",
-                            "743b1ebbb5196e35"),
-                    req(ID_MAP, "getBiomeWrapper", null, "076560c51606abcc"),
-                    req(ID_MAP, "getBlockStateWrapper", null, "5d005b239ef242fa"),
-                    req(ID_MAP, "getEntry", null, "1548f370ea903aef")),
-            "MixinDhLodBuilderBiome", List.of(
-                    req(LOD_BUILDER, "createFromChunk", null, "bda1d18aeb564b06"),
-                    req(CHUNK_WRAPPER, "getBiome", "(III)Lcom/seibel/distanthorizons/core/wrapperInterfaces/world/IBiomeWrapper;",
-                            "4a631e41c7312886"),
-                    req(BIOME_WRAPPER, "getBiomeWrapper", null, "8dacfbb7c4c3d60d")),
-            "MixinDhLodBuilderRuns", List.of(
-                    req(LOD_BUILDER, "createFromChunk", null, "bda1d18aeb564b06"),
-                    req(LOD_BUILDER, "getXOrZSectionPosFromChunkPos", null, "dcacfaea83844a2e"),
-                    // A block's wrapper depends on its block state alone, and is the guess when the state is the guess's.
-                    req(CHUNK_WRAPPER, "getBlockState",
-                            "(IIILcom/seibel/distanthorizons/core/wrapperInterfaces/misc/IMutableBlockPosWrapper;" + DH_BLOCK + ")" + DH_BLOCK,
-                            "0d0a5b5b1812d6b7"),
-                    req(CHUNK_WRAPPER, "getChunk", null, "cc4e8614beb3338a"),
-                    req(BLOCK_WRAPPER, "fromBlockState", "(" + BLOCK_STATE + DH_LEVEL + DH_BLOCK + ")" + DH_BLOCK_IMPL, "b5e66f4e8569f344"),
-                    req(BLOCK_WRAPPER, "fromBlockState", "(" + BLOCK_STATE + DH_LEVEL + ")" + DH_BLOCK_IMPL, "7b41062de9837eed"),
-                    req(BLOCK_WRAPPER, "isAir", "(" + BLOCK_STATE + ")Z", "cd573a3c997c5472"),
-                    // The biome depends on the 4-block cell alone.
-                    req(CHUNK_WRAPPER, "getBiome", "(III)Lcom/seibel/distanthorizons/core/wrapperInterfaces/world/IBiomeWrapper;",
-                            "4a631e41c7312886"),
-                    req(BIOME_WRAPPER, "getBiomeWrapper", null, "8dacfbb7c4c3d60d"),
-                    // Light reads only read (after the storage is created on the first one).
-                    req(CHUNK_WRAPPER, "getDhBlockLight", null, "87bde9cb8940212e"),
-                    req(CHUNK_WRAPPER, "getDhSkyLight", null, "ab4f3c08c4548f03"),
-                    req(CHUNK_WRAPPER, "getBlockLightStorage", null, "91d607cbb0a264f8"),
-                    req(CHUNK_WRAPPER, "getSkyLightStorage", null, "834dfdc360823b57"),
-                    req(LIGHT_STORAGE, "get", null, "d65b8ddeee057462"),
-                    // Both equals start with this == obj.
-                    req(BLOCK_WRAPPER, "equals", null, "5870348c193507a1"),
-                    req(BIOME_WRAPPER, "equals", null, "f503ff6b051ed28f")),
-            "MixinDhChunkHeightMaps", List.of(
-                    req(CHUNK_WRAPPER, "createDhHeightMaps", null, "f30231ef7d64812e"),
-                    req(CHUNK_WRAPPER, "getBlockState", "(III)" + DH_BLOCK, "b3881b57e192f016"),
-                    req(BLOCK_WRAPPER, "fromBlockState", "(" + BLOCK_STATE + DH_LEVEL + ")" + DH_BLOCK_IMPL, "7b41062de9837eed"),
-                    req(BLOCK_WRAPPER, "isAir", "(" + BLOCK_STATE + ")Z", "cd573a3c997c5472"),
-                    // Plain getters, asked once per run.
-                    req(BLOCK_WRAPPER, "isSolid", null, "99c4374e5c4b3d77"),
-                    req(BLOCK_WRAPPER, "getOpacity", null, "6339635929eb9813")),
-            "MixinDhCullScope", CULL_TABLE,
-            "MixinDhOcclusionCuller", CULL_TABLE,
-            "MixinDhDataInputStream", List.of(
-                    req(DATA_INPUT, "create", "([BLcom/seibel/distanthorizons/api/enums/config/EDhApiDataCompressionMode;"
-                                    + "Lcom/seibel/distanthorizons/core/util/objects/pooling/PhantomArrayList/PhantomArrayListCheckout;)"
-                                    + "Lcom/seibel/distanthorizons/core/util/objects/dataStreams/DhDataInputStream;",
-                            "c087b67801ee3773")),
-            // Only the one call it redirects: the density stays DH's, evaluated through a per-thread copy.
-            "MixinDhRoughSurfaceDensity", List.of(
-                    req(ROUGH_SURFACE, "isNoiseSolidAtBlockPos", null, "e6df7990f00fdf5b")));
+    /** The newest DH version the table was checked against. */
+    private static final int[] NEWEST_CHECKED = {3, 3, 3};
 
     private static final Map<String, byte[]> CLASS_BYTES = new ConcurrentHashMap<>();
+    private static final Map<String, DhSelfCheck> SELF_CHECKS = new ConcurrentHashMap<>();
+    private static volatile Map<String, DhFastPathTable.Verdict> verdicts;
 
     private DhFastPaths() {
     }
 
     /** Whether the named mixin is one of these patches. */
     public static boolean governs(String mixinClassName) {
-        return REQUIREMENTS.containsKey(simpleName(mixinClassName));
+        return DhFastPathTable.governs(simpleName(mixinClassName));
     }
 
-    /** Whether the named patch should apply to the installed DH. Logs the reason when it does not. */
+    /** Whether the named patch should apply to the installed DH. */
     public static boolean allows(String mixinClassName) {
-        String patch = simpleName(mixinClassName);
         if (!ENABLED || !DistantHorizonsCompat.active()) {
             return false;
         }
-        for (Requirement r : REQUIREMENTS.get(patch)) {
-            String hash = hashOf(r);
-            if (hash == null || !r.hashes().contains(hash)) {
-                LOGGER.info("[SuperChunk-Compat] [dh] {} left out: Distant Horizons' {}.{} is not the code it was "
-                                + "checked against (hash {}). DH runs its own code there.",
-                        patch, r.owner().substring(r.owner().lastIndexOf('.') + 1), r.name(), hash);
-                return false;
+        DhFastPathTable.Verdict verdict = verdicts().get(simpleName(mixinClassName));
+        return verdict != null && verdict.trust() != DhFastPathTable.Trust.OUT;
+    }
+
+    /**
+     * The self-check state of a patch that runs under self-check on the installed DH, or
+     * {@code null} for a patch on a checked version (which then compares nothing).
+     */
+    public static DhSelfCheck selfCheck(String mixinSimpleName, String unit) {
+        if (!ENABLED || !DistantHorizonsCompat.active()) {
+            return null; // asked by a helper class on an install without Distant Horizons
+        }
+        try {
+            DhFastPathTable.Verdict verdict = verdicts().get(mixinSimpleName);
+            if (verdict == null || verdict.trust() != DhFastPathTable.Trust.SELF_CHECK) {
+                return null;
+            }
+            return SELF_CHECKS.computeIfAbsent(mixinSimpleName, name -> new DhSelfCheck(name.replace("Mixin", ""), unit));
+        } catch (Throwable t) {
+            // Cannot tell: compare everything rather than nothing.
+            return SELF_CHECKS.computeIfAbsent(mixinSimpleName, name -> new DhSelfCheck(name.replace("Mixin", ""), unit));
+        }
+    }
+
+    /**
+     * Whether the installed DH logs its "height maps created on non-DH thread" warning. Before
+     * 3.3.3 the test was inverted and it never did; the height-map patch does as the installed DH.
+     */
+    public static boolean heightMapsWarnOffThread() {
+        if (!DistantHorizonsCompat.active()) {
+            return true;
+        }
+        try {
+            String hash = DhFastPathTable.installedHash(DhFastPathTable.CHUNK_WRAPPER, "createDhHeightMaps", null, DhFastPaths::classBytes);
+            return !DhFastPathTable.HEIGHTMAPS_BEFORE_3_3_3.equals(hash);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private static Map<String, DhFastPathTable.Verdict> verdicts() {
+        Map<String, DhFastPathTable.Verdict> result = verdicts;
+        if (result == null) {
+            synchronized (DhFastPaths.class) {
+                result = verdicts;
+                if (result == null) {
+                    verdicts = result = decide();
+                    CLASS_BYTES.clear();
+                }
             }
         }
-        return true;
+        return result;
     }
 
-    private static String hashOf(Requirement r) {
+    private static Map<String, DhFastPathTable.Verdict> decide() {
+        Map<String, DhFastPathTable.Verdict> result = new LinkedHashMap<>();
+        List<String> selfChecking = new ArrayList<>();
+        List<String> out = new ArrayList<>();
+        for (String patch : DhFastPathTable.PATCHES.keySet()) {
+            DhFastPathTable.Verdict verdict;
+            try {
+                verdict = OFF.contains(patch.replace("Mixin", ""))
+                        ? new DhFastPathTable.Verdict(DhFastPathTable.Trust.OUT, "it is switched off (-Dsuperchunk.dh.fastPaths.off)")
+                        : DhFastPathTable.evaluate(patch, DhFastPaths::classBytes, SELF_CHECK_ALLOWED);
+            } catch (Throwable t) {
+                LOGGER.debug("[SuperChunk-Compat] [dh] could not check {}", patch, t);
+                verdict = new DhFastPathTable.Verdict(DhFastPathTable.Trust.OUT, "it could not be checked (" + t + ")");
+            }
+            result.put(patch, verdict);
+            String name = patch.replace("Mixin", "");
+            if (verdict.trust() == DhFastPathTable.Trust.SELF_CHECK) {
+                selfChecking.add(name);
+                LOGGER.info("[SuperChunk-Compat] [dh] {} runs under self-check: Distant Horizons' {} differs from the checked versions "
+                        + "only in how it computes. Its results are compared with DH's own.", name, verdict.reason());
+            } else if (verdict.trust() == DhFastPathTable.Trust.OUT) {
+                out.add(name);
+                LOGGER.info("[SuperChunk-Compat] [dh] {} left out: {}. DH runs its own code there.", name, verdict.reason());
+            }
+        }
+        String version = installedVersion();
+        int total = result.size();
+        if (selfChecking.isEmpty() && out.isEmpty()) {
+            LOGGER.info("[SuperChunk-Compat] [dh] Distant Horizons {}: all {} speed patches apply (a checked version).", version, total);
+        } else if (newerThanChecked(version) || !selfChecking.isEmpty()) {
+            // Shown at any log level: the install works, but is not at the speed it could be.
+            LOGGER.warn("[SuperChunk-Compat] [dh] Distant Horizons {} is not a version SuperChunk's DH speed patches were checked against "
+                            + "(3.0.0 to 3.3.3). Of {}: {} apply as checked, {} run under self-check {}, {} are left out {}. Nothing is broken: "
+                            + "where a patch is out, DH runs its own code. A newer SuperChunk restores full speed.",
+                    version, total, total - selfChecking.size() - out.size(), selfChecking.size(), selfChecking, out.size(), out);
+        } else {
+            LOGGER.info("[SuperChunk-Compat] [dh] Distant Horizons {}: {} of {} speed patches apply; left out for this DH version: {}.",
+                    version, total - out.size(), total, out);
+        }
+        return result;
+    }
+
+    private static String installedVersion() {
         try {
-            byte[] bytes = CLASS_BYTES.computeIfAbsent(r.owner(), DhFastPaths::readClass);
-            return bytes.length == 0 ? null : ForeignBytecode.hash(bytes, r.name(), r.desc());
+            return LoadingModList.get().getModFileById(DistantHorizonsCompat.MOD_ID).getMods().get(0).getVersion().toString();
         } catch (Throwable t) {
-            LOGGER.debug("[SuperChunk-Compat] [dh] could not hash {}.{}", r.owner(), r.name(), t);
-            return null;
+            return "(unknown version)";
         }
     }
 
-    /** The class file as shipped, searched in every mod file as {@link OptionalTargets} does (no class loading). */
-    private static byte[] readClass(String className) {
-        String resource = className.replace('.', '/') + ".class";
+    /** Whether a version string's leading numbers are above the newest checked version. Unreadable counts as newer. */
+    static boolean newerThanChecked(String version) {
+        String[] parts = version.split("[^0-9]+");
+        int at = 0;
+        for (String part : parts) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            if (at >= NEWEST_CHECKED.length) {
+                break;
+            }
+            int number;
+            try {
+                number = Integer.parseInt(part);
+            } catch (NumberFormatException e) {
+                return true;
+            }
+            if (number != NEWEST_CHECKED[at]) {
+                return number > NEWEST_CHECKED[at];
+            }
+            at++;
+        }
+        return at == 0;
+    }
+
+    /** DH's class file as shipped, by internal name; empty when no mod file has it. */
+    private static byte[] classBytes(String internalName) {
+        return CLASS_BYTES.computeIfAbsent(internalName, DhFastPaths::readClass);
+    }
+
+    /** Searched in every mod file as {@link OptionalTargets} does (no class loading). */
+    private static byte[] readClass(String internalName) {
+        String resource = internalName + ".class";
         try {
             for (ModFileInfo info : LoadingModList.get().getModFiles()) {
                 Path path = info.getFile().findResource(resource);
@@ -187,7 +211,7 @@ public final class DhFastPaths {
                 }
             }
         } catch (Throwable t) {
-            LOGGER.debug("[SuperChunk-Compat] [dh] could not read {}", className, t);
+            LOGGER.debug("[SuperChunk-Compat] [dh] could not read {}", internalName, t);
         }
         return new byte[0];
     }

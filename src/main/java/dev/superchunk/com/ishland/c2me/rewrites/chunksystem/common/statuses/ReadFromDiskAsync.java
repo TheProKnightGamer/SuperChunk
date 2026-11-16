@@ -75,29 +75,51 @@ public class ReadFromDiskAsync extends ReadFromDisk {
 
     @Override
     public Completable upgradeToThis(ChunkLoadingContext context, Cancellable cancellable) {
-        final Single<ProtoChunk> single = invokeAsyncLoad(context)
-                .retryWhen(RxJavaUtils.retryWithExponentialBackoff(3, 200))
+        final var backoff = RxJavaUtils.retryWithExponentialBackoff(3, 200);
+        final Single<ProtoChunk> single = invokeAsyncLoad(context, cancellable)
+                // SuperChunk: an abandoned load (see AbandonedLoad) is not a failure, so it must not
+                // be retried, read again on the main thread, or reported as a broken chunk
+                .retryWhen(errors -> backoff.apply(errors.map(error -> {
+                    if (isAbandoned(cancellable, error)) throw (AbandonedLoad) error;
+                    return error;
+                })))
                 .cache()
                 .onErrorResumeNext(throwable -> {
+                    if (isAbandoned(cancellable, throwable)) {
+                        return Single.error(throwable);
+                    }
                     LOGGER.error("Failed to load chunk {} asynchronously, falling back to sync loading", context.holder().getKey(), throwable);
                     return invokeSyncRead(context)
                             .retryWhen(RxJavaUtils.retryWithExponentialBackoff(3, 200, new RuntimeException("Failed to load asynchronously, falling back to sync loading", throwable)));
                 });
-        return finalizeLoading(context, single);
+        return finalizeLoading(context, single, cancellable);
     }
 
-    protected Single<ProtoChunk> invokeAsyncLoad(ChunkLoadingContext context) {
+    protected Single<ProtoChunk> invokeAsyncLoad(ChunkLoadingContext context, Cancellable cancellable) {
         return Single.defer(() -> Single.fromCompletionStage(((IThreadedAnvilChunkStorage) context.tacs()).invokeGetUpdatedChunkNbt(context.holder().getKey())))
-                .map(nbt -> nbt.filter(nbt2 -> {
-                    boolean bl = nbt2.contains("Status", Tag.TAG_STRING);
-                    if (!bl) {
-                        LOGGER.error("ChunkAccess file at {} is missing level data, skipping", context.holder().getKey());
+                .map(nbt -> {
+                    // SuperChunk: nobody wants this chunk any more (the scheduler cancelled the
+                    // upgrade). Drop the NBT here rather than queue it for a worker. Nothing has
+                    // been applied to the world yet, so there is nothing to undo.
+                    if (cancellable.isCancelled()) {
+                        throw new AbandonedLoad();
                     }
+                    return nbt.filter(nbt2 -> {
+                        boolean bl = nbt2.contains("Status", Tag.TAG_STRING);
+                        if (!bl) {
+                            LOGGER.error("ChunkAccess file at {} is missing level data, skipping", context.holder().getKey());
+                        }
 
-                    return bl;
-                }))
+                        return bl;
+                    });
+                })
                 .observeOn(Schedulers.from(((IVanillaChunkManager) context.tacs()).c2me$getSchedulingManager().positionedExecutor(context.holder().getKey().toLong())))
                 .map(nbt -> {
+                    // SuperChunk: same check once a worker gets to it. A load abandoned while it
+                    // was queued (it is then at the lowest priority) costs nothing to finish.
+                    if (cancellable.isCancelled()) {
+                        throw new AbandonedLoad();
+                    }
                     try (var ignored = ThreadInstrumentation.getCurrent().begin(new ChunkTaskWork(context, this, true))) {
                         final ReferenceArrayList<Runnable> mainThreadQueue = new ReferenceArrayList<>();
                         if (nbt.isPresent()) {

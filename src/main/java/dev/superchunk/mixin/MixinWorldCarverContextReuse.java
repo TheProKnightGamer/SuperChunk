@@ -42,7 +42,7 @@ import org.spongepowered.asm.mixin.injection.At;
 public abstract class MixinWorldCarverContextReuse {
 
     /**
-     * NOTE (port): deliberately NOT named {@code SUPERCHUNK$ENABLED} — see the same note on
+     * NOTE (port): deliberately NOT named {@code SUPERCHUNK$CONTEXT_REUSE_ENABLED} — see the same note on
      * {@code MixinWorldCarverEllipsoidScratch}. Three SuperChunk mixins target {@code WorldCarver}
      * and Mixin 0.8.5 silently merges identically-named {@code @Unique} fields contributed by
      * DIFFERENT mixins into one slot (the rename path in {@code attachFields} can only fire against

@@ -205,6 +205,30 @@ public final class FastChunkPaletteRead {
         maybeLog();
     }
 
+    /** Whether two decodes of a section agree: both failed, or both hold the same block at every position. */
+    public static boolean sameBlocks(DataResult<PalettedContainer<BlockState>> a, DataResult<PalettedContainer<BlockState>> b) {
+        Optional<PalettedContainer<BlockState>> first = a.result();
+        Optional<PalettedContainer<BlockState>> second = b.result();
+        if (first.isPresent() != second.isPresent()) {
+            return false;
+        }
+        if (first.isEmpty()) {
+            return true;
+        }
+        PalettedContainer<BlockState> f = first.get();
+        PalettedContainer<BlockState> s = second.get();
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    if (f.get(x, y, z) != s.get(x, y, z)) { // interned singletons
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     private static void maybeLog() {
         long total = READS.get() + FELLBACK.get();
         if (total == 1L || total % LOG_EVERY == 0L) {

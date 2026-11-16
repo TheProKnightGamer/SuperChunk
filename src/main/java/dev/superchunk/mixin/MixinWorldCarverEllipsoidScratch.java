@@ -32,7 +32,7 @@ import org.spongepowered.asm.mixin.injection.At;
 public abstract class MixinWorldCarverEllipsoidScratch {
 
     /**
-     * NOTE (port): the field name is deliberately NOT the usual {@code SUPERCHUNK$ENABLED}. Three
+     * NOTE (port): the field name is deliberately NOT the usual {@code SUPERCHUNK$ELLIPSOID_ENABLED}. Three
      * SuperChunk mixins now target {@code WorldCarver} ({@code MixinWorldCarverLavaState},
      * this one, {@code MixinWorldCarverContextReuse}) and Mixin 0.8.5 does <b>not</b> protect
      * {@code @Unique} members from colliding with ANOTHER MIXIN's identically-named member on the

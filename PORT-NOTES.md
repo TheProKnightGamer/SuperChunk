@@ -1,6 +1,56 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
-## ACCESS TRANSFORMER WIDENING CRASH (GitHub #31, 2026-11-04/05, latest) — neo has the write-up too
+## DISTANT HORIZONS 3.0.0-3.3.3, SELF-CHECK, EXISTING WORLDS; VOXY (2026-11-14, latest) — neo's compatibility.txt has the full write-up
+
+Ported from neo the same day (section "2026-11-14: EVERY DH 3.x RELEASE ..." under INTEGRATED).
+
+- **What it is.** The patches of DH's own code applied to DH 3.3.3 only. They now have a table of
+  every release from 3.0.0 to 3.3.3 (`compat/DhFastPathTable`, loader-free; `DhFastPaths` is the
+  loader side), a self-check mode for a DH version they do not know, a link check before any patch
+  is applied (`compat/ForeignLinks`), and three additions for existing worlds and the server's own
+  chunks: the LOD builder and height-map patches take `LevelChunk`s (`compat/DhLiveChunks`), and
+  two new patches of DH's `ChunkCompoundTagParser_forge` (`MixinDhChunkTagLight`,
+  `MixinDhChunkTagPalette`).
+- **Forge differences.**
+  - The table's hashes are Forge's own wherever a class names a `_forge` type or a Minecraft method
+    (SRG names inside DH's bytecode). They were produced by matching each approved NeoForge hash to
+    the Forge build of the same DH versions (`DhFastPathTable --hashes` on both sets of jars).
+    Forge's 3.3.0 is a normal build and gets everything 3.3.2 gets; NeoForge's 3.3.0 does not.
+    Forge has no 3.3.1.
+  - `readLight` has two hashes on Forge (to 3.3.2, and 3.3.3): the same source, with a pattern
+    match compiled as `Tag.getClass()` in one and `Object.getClass()` in the other. The effects
+    fingerprint ignores `getClass()` for that reason.
+  - `ForeignLinks` accepts a `@Shadow` method whose name is not in DH's class when DH has a method
+    with that descriptor and a runtime (`m_1234_`) name: the region patch shadows
+    `m_46819_`/`m_6325_` by those names already, so this only matters for a future shadow written
+    with the development name.
+  - New ForeignHooks targets need both the probe (`MixinProbeBiomeLookup`: `LevelChunk`,
+    `ImposterProtoChunk`) and `MixinTargetScan.SRG_NAMES` (`getBlockState` = `m_8055_`). Without
+    the probe the class counts as "not scanned" and the path never engages, silently.
+- **A Mixin 0.8.5 fault found here.** Two mixins into the same class that each add a field of the
+  same name share ONE field on Forge: Mixin 0.8.5 prepares every mixin against the class as it
+  was, sees no clash, and merges them. NeoForge's Mixin renames the second. It showed as the
+  biome patch's passes being counted on the LOD builder's self-check state (both had
+  `SUPERCHUNK$CHECK`). The same fault was already in the tree for three pairs of kill switches
+  named `SUPERCHUNK$ENABLED` (BiomeManager: fiddle and quart cache; PalettedContainer: getAll and
+  pack; WorldCarver on neo): on Forge, setting one of a pair's switches could switch both or
+  neither. Every added field now has its own name, and `MixinMemberClashTest`
+  (`mixinMemberClashRegressionTest`, both trees) fails the build on a new clash.
+- **Tested (Forge 47.3.0, DH's `/dh pregen`, verify modes on):** 3.0.0-b, 3.0.3-b, 3.1.2-b,
+  3.2.0-b, 3.3.0, 3.3.2, 3.3.3 on a fresh area and over a world Chunky had generated: 8,192 LODs,
+  16,384 height maps, 8,192 chunks' saved light and 260,000 sections' block states equal to DH's
+  own on each. 3.0.1-b and 2.4.5-b complete both runs. INTERNAL_SERVER mode on 3.3.3: 4,096 server
+  chunks' LODs equal. Pretend 3.4.0 releases: a harmless change keeps four patches on under
+  self-check; a changed result turns the LOD builder patch off at the first chunk.
+- **Measured (DH 3.3.3, existing world, r96 = 37,249 chunks, two pairs):** 1,233 / 1,233 ->
+  2,299 / 2,301 chunks/s, 9.23 / 9.38 -> 6.14 / 6.01 ms CPU per chunk.
+- **Voxy.** `ForgeMixinOverrides` now also treats a mod file that carries Voxy's classes
+  (`me/cortex/voxy/common/voxelization`) as Voxy, whatever its mod id. No Voxy build for Forge
+  1.20.1 was found to test with (Voxy SeedGen ships a Forge 1.20.1 jar; it needs a Voxy to draw
+  into). `NoiseRouter.c2me$getOriginalNoiseRouter()` (`MixinNoiseRouterOriginal`) hands out the
+  vanilla router the compiled one was made from, the accessor SeedGen looks for.
+
+## ACCESS TRANSFORMER WIDENING CRASH (GitHub #31, 2026-11-04/05) — neo has the write-up too
 
 GitHub #31: the world crashed on load with Collections Of Optimizations 5.8, `PROTECTED @Overwrite
 method m_63085_ in collections_of_optimizations.mixins.json:vanilla.MixinPalettedContainerUniform

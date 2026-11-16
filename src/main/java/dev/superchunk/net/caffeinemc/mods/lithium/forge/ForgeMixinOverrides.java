@@ -69,6 +69,22 @@ public class ForgeMixinOverrides implements PlatformMixinOverrides {
     private static final boolean NEWER_LITHIUM_OPT_OUTS_ON =
             Boolean.parseBoolean(System.getProperty("superchunk.compat.newerLithiumOptOuts", "true"));
 
+    /**
+     * Whether a mod is Voxy, under any id: the mod id {@code voxy}, or a mod file that carries Voxy's
+     * classes (a port or fork that renamed the mod but ships the same voxelizer, with the same list
+     * of palettes it accepts).
+     */
+    private static boolean isVoxy(ModInfo meta) {
+        if ("voxy".equals(meta.getModId())) {
+            return true;
+        }
+        try {
+            return java.nio.file.Files.isDirectory(meta.getOwningFile().getFile().findResource("me/cortex/voxy/common/voxelization"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @Override
     public void applyLithiumCompat(Map<String, Option> options) {
 
@@ -79,7 +95,7 @@ public class ForgeMixinOverrides implements PlatformMixinOverrides {
         List<MixinOverride> list = new ArrayList<>();
 
         for (ModInfo meta : FMLLoader.getLoadingModList().getMods()) {
-            if (VOXY_COMPAT && "voxy".equals(meta.getModId())) {
+            if (VOXY_COMPAT && isVoxy(meta)) {
                 list.add(new MixinOverride(meta.getModId(), "mixin.chunk.palette", false));
             }
             if (ECOPT_COMPAT && "ecopt".equals(meta.getModId())) {

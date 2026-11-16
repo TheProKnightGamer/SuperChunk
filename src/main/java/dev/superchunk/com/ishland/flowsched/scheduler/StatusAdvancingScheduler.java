@@ -33,6 +33,39 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
     public static final Runnable NO_OP = () -> {
     };
 
+    /**
+     * SuperChunk: a ticket change marks the item dirty only when a tick has something to do.
+     *
+     * <p>Every ticket added to or removed from an item used to schedule a tick of it. During
+     * worldgen nearly all of them are dependency tickets on neighbours that already sit at their
+     * target status and keep it: a generating chunk takes and returns a ticket on each of its 288
+     * neighbours within 8 chunks, and about 98% of those leave the neighbour's target status
+     * where it was. Counted per generated chunk: about 880 ticket changes and 635 ticks, 380 of
+     * them finding nothing to do and most of the rest arriving while the item was busy with
+     * another ticket change and re-queueing themselves.
+     *
+     * <p>A tick only acts on the item's status, its target status and its own pending work. So
+     * the tick is left out when, under the item's monitor, the change left the target status
+     * where it was and one of two things holds:
+     * <ul>
+     *   <li>The item's status already is that target. The ticket's own callback has been run by
+     *       {@code addTicket} (its status is reached), a status or target change that comes later
+     *       schedules its own tick, and work the item itself queued (dependency cleanup) was
+     *       marked by the code that queued it.</li>
+     *   <li>An upgrade or downgrade of the item is in flight. A tick now would find the item busy
+     *       and could only re-arm itself: with the target unchanged there is nothing to cancel.
+     *       The action marks the item dirty when it ends, and that tick comes after this change.
+     *       A ticket for a status not reached yet gets its callback from {@code setStatus}.</li>
+     * </ul>
+     * A broken item always gets its tick: that tick is what fails the futures of a new waiter. An
+     * item that is short of its target with nothing in flight is ticked as before, so a ticket
+     * change still restarts an item that some other path left behind.
+     *
+     * <p>Kill switch {@code -Dsuperchunk.scheduler.skipSettledTicks=false}.
+     */
+    static final boolean SKIP_SETTLED_TICKS =
+            !"false".equalsIgnoreCase(System.getProperty("superchunk.scheduler.skipSettledTicks", "true"));
+
     /** SuperChunk: kill switch for {@link #failWaitersBehind}. */
     public static final boolean FAIL_STUCK_WAITERS =
             !"false".equalsIgnoreCase(System.getProperty("superchunk.chunkSystem.failStuckWaiters", "true"));
@@ -65,6 +98,22 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
     }
 
     protected abstract ItemStatus<K, V, Ctx> getUnloadedStatus();
+
+    /**
+     * SuperChunk: a small index for {@code dependency} as seen from {@code item}, in
+     * {@code [0, dependencySlotCount())}, or -1. An item keeps its dependencies' bookkeeping by
+     * this index instead of hashing the key (see {@link ItemHolder#dependencyHoldersBySlot}). It
+     * must be a function of the two keys alone, with different dependencies of one item getting
+     * different indexes.
+     */
+    protected int dependencySlot(K item, K dependency) {
+        return -1;
+    }
+
+    /** SuperChunk: the number of indexes {@link #dependencySlot} hands out. */
+    protected int dependencySlotCount() {
+        return 0;
+    }
 
     protected abstract Ctx makeContext(ItemHolder<K, V, Ctx, UserData> holder, ItemStatus<K, V, Ctx> nextStatus, KeyStatusPair<K, V, Ctx>[] dependencies, boolean isUpgrade);
 
@@ -103,9 +152,14 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
 
     void tickHolder0(ItemHolder<K, V, Ctx, UserData> holder) {
         final K key = holder.getKey();
-        if (getHolder(key) != holder) return;
+        if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICK);
+        if (getHolder(key) != holder) {
+            if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICK_STALE);
+            return;
+        }
 //        holder.sanitizeSetStatus = Thread.currentThread();
         if (holder.isBusy()) {
+            if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICK_BUSY);
             tickHandleBusy0(holder);
             return;
         }
@@ -123,6 +177,7 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
             holder.validateCompletedFutures(current);
 //        holder.sanitizeSetStatus = null;
             if (nextStatus == current) {
+                if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(holder.isDependencyDirty() ? dev.superchunk.diag.SchedStats.TICK_CLEANUP : dev.superchunk.diag.SchedStats.TICK_IDLE);
                 holder.flushUnloadedStatus(current);
                 holder.validateAllFutures();
                 if (current.equals(getUnloadedStatus())) {
@@ -172,6 +227,7 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
             }
 //            holder.submitOp(CompletableFuture.runAsync(() -> advanceStatus0(holder, nextStatus, key), getBackgroundExecutor()));
             Assertions.assertTrue(holder.getStatus() == current);
+            if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICK_ADVANCE);
             holder.busyRefCounter().incrementRefCount();
             try {
                 advanceStatus0(holder, nextStatus, key);
@@ -179,6 +235,7 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
                 holder.busyRefCounter().decrementRefCount();
             }
         } else {
+            if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICK_DOWNGRADE);
             holder.busyRefCounter().incrementRefCount();
             try {
                 downgradeStatus0(holder, current, nextStatus, key);
@@ -421,7 +478,7 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
             holder.addDependencyTicket(this, pair.key(), pair.status(), NO_OP);
         }
         for (KeyStatusPair<K, V, Ctx> pair : toRemove) {
-            holder.removeDependencyTicket(pair.key(), pair.status());
+            holder.removeDependencyTicket(this, pair.key(), pair.status());
         }
     }
 
@@ -692,8 +749,14 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
                     holder.busyRefCounter().incrementRefCount();
                 }
                 try {
-                    holder.addTicket(ticket);
-                    holder.consolidateMarkDirty(this);
+                    if (dev.superchunk.diag.SchedStats.ENABLED) {
+                        dev.superchunk.diag.SchedStats.count(ticket.getType() == ItemTicket.TicketType.DEPENDENCY ? dev.superchunk.diag.SchedStats.TICKET_ADD_DEP : dev.superchunk.diag.SchedStats.TICKET_ADD_EXT);
+                    }
+                    if (holder.addTicket(ticket) || !SKIP_SETTLED_TICKS) {
+                        holder.consolidateMarkDirty(this);
+                    } else if (dev.superchunk.diag.SchedStats.ENABLED) {
+                        dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICKET_SAME_TARGET);
+                    }
                 } finally {
                     holder.busyRefCounter().decrementRefCount();
                 }
@@ -721,9 +784,13 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
         if (holder == null) {
             throw new IllegalStateException("No such item");
         }
-        holder.removeTicket(new ItemTicket<>(type, source, targetStatus, null));
-        // holder may have been removed at this point, only mark it dirty if it still exists
-        holder.tryMarkDirty(this);
+        if (dev.superchunk.diag.SchedStats.ENABLED) dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICKET_REMOVE);
+        if (holder.removeTicket(new ItemTicket<>(type, source, targetStatus, null)) || !SKIP_SETTLED_TICKS) {
+            // holder may have been removed at this point, only mark it dirty if it still exists
+            holder.tryMarkDirty(this);
+        } else if (dev.superchunk.diag.SchedStats.ENABLED) {
+            dev.superchunk.diag.SchedStats.count(dev.superchunk.diag.SchedStats.TICKET_SAME_TARGET);
+        }
     }
 
     private ItemStatus<K, V, Ctx> getNextStatus(ItemStatus<K, V, Ctx> current, ItemStatus<K, V, Ctx> target) {
@@ -761,7 +828,7 @@ public abstract class StatusAdvancingScheduler<K, V, Ctx, UserData> {
     private void releaseDependencies(ItemHolder<K, V, Ctx, UserData> holder, ItemStatus<K, V, Ctx> status) {
         final KeyStatusPair<K, V, Ctx>[] dependencies = holder.getDependencies(status);
         for (KeyStatusPair<K, V, Ctx> dependency : dependencies) {
-            holder.removeDependencyTicket(dependency.key(), dependency.status());
+            holder.removeDependencyTicket(this, dependency.key(), dependency.status());
         }
         holder.setDependencies(status, null);
     }

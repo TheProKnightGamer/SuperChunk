@@ -5,6 +5,12 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.superchunk.worldgen.AirCells;
 import dev.superchunk.worldgen.BlockFillHooks;
 import dev.superchunk.worldgen.CellSignSkip;
+import dev.superchunk.worldgen.WholeCells;
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IChunkNoiseSampler;
+import com.llamalad7.mixinextras.sugar.Local;
+import net.minecraft.SharedConstants;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
@@ -46,6 +52,40 @@ public abstract class MixinNoiseFillAirCells {
     private boolean superchunk$provenSolid(NoiseChunk nc) {
         return nc instanceof CellSignSkip.Chunk signed && signed.superchunk$provenSolid()
                 && this.settings.value().defaultBlock().getFluidState().isEmpty();
+    }
+
+    /**
+     * Whole decided cells ({@link WholeCells}): the store is the start value of the in-cell height
+     * loop that follows {@code selectCellYZ} ({@code for (y = cellHeight - 1; y >= 0; y--)}, local
+     * 24 in vanilla's {@code doFill}). For an air cell, and for a solid cell once it is written
+     * here, the loop starts at -1 and so does not run. Anything else, or a value that is not that
+     * loop's start, passes through, and the per-block answers below still apply.
+     */
+    @ModifyVariable(method = "doFill", at = @At("STORE"), index = 24, require = 0)
+    private int superchunk$wholeCell(int inCellY, @Local(argsOnly = true) ChunkAccess chunk, @Local NoiseChunk nc) {
+        if (!WholeCells.ENABLED || !(nc instanceof AirCells.Chunk cell)
+                || (dev.superchunk.diag.StageAb.WHOLE_CELLS && dev.superchunk.diag.StageAb.off())) {
+            return inCellY;
+        }
+        IChunkNoiseSampler at = (IChunkNoiseSampler) nc;
+        int h = at.getVerticalCellBlockCount();
+        if (inCellY != h - 1) {
+            return inCellY;
+        }
+        if (cell.superchunk$airCell()) {
+            if (AirCells.VERIFY) {
+                return inCellY;
+            }
+        } else if (cell.superchunk$solidCell()) {
+            if (!SharedConstants.debugVoidTerrain(chunk.getPos())) {
+                WholeCells.fillSolid(chunk, at.getStartBlockX(), at.getStartBlockY(), at.getStartBlockZ(),
+                        at.getHorizontalCellBlockCount(), h, this.settings.value().defaultBlock());
+            }
+        } else {
+            return inCellY;
+        }
+        cell.superchunk$cellLoopSkipped();
+        return -1;
     }
 
     @WrapOperation(method = "doFill", at = @At(value = "INVOKE",

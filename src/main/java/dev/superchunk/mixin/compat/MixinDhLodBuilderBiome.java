@@ -33,6 +33,11 @@ public abstract class MixinDhLodBuilderBiome {
     @Unique
     private static final String SUPERCHUNK$WRAPPER = "com.seibel.distanthorizons.common.wrappers.chunk.ChunkWrapper_forge";
 
+    /** Not null when this patch runs under self-check on the installed DH. */
+    @Unique
+    private static final dev.superchunk.compat.DhSelfCheck SUPERCHUNK$BIOME_CHECK =
+            dev.superchunk.compat.DhFastPaths.selfCheck("MixinDhLodBuilderBiome", "biome lookups");
+
     /** DH's wrapper class, once seen; avoids a name compare per block. */
     @Unique
     private static volatile Class<?> superchunk$wrapperClass;
@@ -44,6 +49,10 @@ public abstract class MixinDhLodBuilderBiome {
     private static IBiomeWrapper superchunk$cellBiome(IChunkWrapper chunk, int relX, int y, int relZ,
                                                       @Share("superchunk$cell") LocalIntRef cell,
                                                       @Share("superchunk$biome") LocalRef<IBiomeWrapper> biome) {
+        dev.superchunk.compat.DhSelfCheck check = SUPERCHUNK$BIOME_CHECK;
+        if (check != null && check.failed()) {
+            return chunk.getBiome(relX, y, relZ);
+        }
         Class<?> type = chunk.getClass();
         if (type != superchunk$wrapperClass) {
             if (!type.getName().equals(SUPERCHUNK$WRAPPER)) {
@@ -54,7 +63,18 @@ public abstract class MixinDhLodBuilderBiome {
         // Bit 30 marks a filled memo; x and z cells are 0..3, the y cell is masked to 16 bits.
         int key = 1 << 30 | (relX >> 2) << 24 | (relZ >> 2) << 16 | ((y >> 2) & 0xFFFF);
         if (cell.get() == key) {
-            return biome.get();
+            IBiomeWrapper remembered = biome.get();
+            if (check != null && check.sampleLoose()) {
+                // Under self-check: DH's own answer for this block, and it is the one returned.
+                IBiomeWrapper own = chunk.getBiome(relX, y, relZ);
+                if (java.util.Objects.equals(own, remembered)) {
+                    check.passed();
+                } else {
+                    check.fail("biome at (" + relX + ", " + y + ", " + relZ + ") of chunk " + chunk.getChunkPos(), null);
+                }
+                return own;
+            }
+            return remembered;
         }
         IBiomeWrapper answer = chunk.getBiome(relX, y, relZ);
         cell.set(key);

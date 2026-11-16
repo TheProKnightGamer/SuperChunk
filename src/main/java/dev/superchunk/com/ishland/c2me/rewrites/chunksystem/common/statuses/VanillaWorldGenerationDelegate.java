@@ -122,6 +122,15 @@ public class VanillaWorldGenerationDelegate extends NewChunkStatus {
     private final KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] toRemove;
     @Nullable
     private final KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] toAdd;
+    /**
+     * SuperChunk: for each entry of {@link #toRemove}, its index in {@link #genDeps} (every entry is
+     * one of them), or null. The holder's current dependencies are {@code genDeps} made absolute in
+     * the same order, so the absolute entries to remove are already in that array.
+     */
+    @Nullable
+    private final int[] toRemoveInGenDeps;
+    private static final boolean REUSE_HELD_DEPENDENCIES =
+            !"false".equalsIgnoreCase(System.getProperty("superchunk.scheduler.reuseHeldDependencies", "true"));
 
     public VanillaWorldGenerationDelegate(int ordinal, ChunkStatus status) {
         super(ordinal, status);
@@ -149,6 +158,57 @@ public class VanillaWorldGenerationDelegate extends NewChunkStatus {
                 this.toAdd = null;
             }
         }
+        this.toRemoveInGenDeps = indexIn(this.toRemove, this.genDeps);
+    }
+
+    /** {@code subset[i] == all[result[i]]} for every i, or null when some entry is not in {@code all}. */
+    private static int[] indexIn(KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] subset,
+                                 KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] all) {
+        if (subset == null || subset.length == 0) {
+            return null;
+        }
+        final int[] index = new int[subset.length];
+        for (int i = 0; i < subset.length; i++) {
+            int found = -1;
+            for (int j = 0; j < all.length; j++) {
+                if (all[j] == subset[i]) {
+                    found = j;
+                    break;
+                }
+            }
+            if (found < 0) {
+                return null;
+            }
+            index[i] = found;
+        }
+        return index;
+    }
+
+    /**
+     * SuperChunk: {@code relativeToAbsoluteDependencies(holder, toRemove)} without new objects. Each
+     * result entry is the holder's own entry for that dependency, checked to be the same position
+     * and status; any difference falls back to building the array.
+     */
+    private KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] heldToRemove(
+            ItemHolder<ChunkPos, ChunkState, ChunkLoadingContext, ?> holder,
+            KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] held) {
+        final int[] index = this.toRemoveInGenDeps;
+        if (!REUSE_HELD_DEPENDENCIES || index == null || held.length != this.genDeps.length) {
+            return relativeToAbsoluteDependencies(holder, this.toRemove);
+        }
+        final int x = holder.getKey().x;
+        final int z = holder.getKey().z;
+        final KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext>[] out = new KeyStatusPair[index.length];
+        for (int i = 0; i < index.length; i++) {
+            final KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext> relative = this.toRemove[i];
+            final KeyStatusPair<ChunkPos, ChunkState, ChunkLoadingContext> pair = held[index[i]];
+            if (pair == null || pair.status() != relative.status()
+                    || pair.key().x != relative.key().x + x || pair.key().z != relative.key().z + z) {
+                return relativeToAbsoluteDependencies(holder, this.toRemove);
+            }
+            out[i] = pair;
+        }
+        return out;
     }
 
     @Override
@@ -248,7 +308,7 @@ public class VanillaWorldGenerationDelegate extends NewChunkStatus {
             final ChunkAccess chunk = holder.getItem().get().chunk();
             if (chunk == null) return EMPTY_DEPENDENCIES;
             if (!chunk.getStatus().isOrAfter(status)) return EMPTY_DEPENDENCIES;
-            return relativeToAbsoluteDependencies(holder, toRemove);
+            return heldToRemove(holder, curDep);
         }
         LOGGER.warn("Suspicious dependencies length for VanillaWorldGenerationDelegate with status {} on holder {}", this.status, holder.getKey());
         return super.getDependenciesToRemove(holder);

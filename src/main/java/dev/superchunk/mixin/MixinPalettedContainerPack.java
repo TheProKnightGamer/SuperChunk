@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.Unique;
 @Mixin(PalettedContainer.class)
 public abstract class MixinPalettedContainerPack<T> {
     @Unique
-    private static final boolean SUPERCHUNK$ENABLED =
+    private static final boolean SUPERCHUNK$PACK_ENABLED =
             Boolean.parseBoolean(System.getProperty("superchunk.io.fastPalettePack", "true"));
 
     @Shadow public volatile PalettedContainer.Data<T> data;
@@ -27,7 +27,7 @@ public abstract class MixinPalettedContainerPack<T> {
     @WrapMethod(method = "pack", require = 0)
     private PalettedContainerRO.PackedData<T> superchunk$pack(IdMap<T> registry,
             PalettedContainer.Strategy strategy, Operation<PalettedContainerRO.PackedData<T>> original) {
-        if (!SUPERCHUNK$ENABLED || !FastPalettePacking.supports(this.data, strategy)) {
+        if (!SUPERCHUNK$PACK_ENABLED || !FastPalettePacking.supports(this.data, strategy)) {
             return original.call(registry, strategy);
         }
         PalettedContainerRO.PackedData<T> packed;

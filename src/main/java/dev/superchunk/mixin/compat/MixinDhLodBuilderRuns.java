@@ -17,10 +17,13 @@ import com.seibel.distanthorizons.core.wrapperInterfaces.misc.IMutableBlockPosWr
 import com.seibel.distanthorizons.core.wrapperInterfaces.world.IBiomeWrapper;
 import com.seibel.distanthorizons.core.wrapperInterfaces.world.ILevelWrapper;
 import com.seibel.distanthorizons.coreapi.DependencyInjection.ApiEventInjector;
+import dev.superchunk.compat.DhFastPaths;
+import dev.superchunk.compat.DhSelfCheck;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import net.minecraft.util.BitStorage;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.Palette;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.ProtoChunk;
@@ -61,11 +64,16 @@ import java.util.concurrent.atomic.LongAdder;
  * would return true at once ({@code this == obj}), so the step is skipped. Every data point, id,
  * light value and chunk-processing event is DH's, in DH's order.
  *
- * <p>Only for vanilla {@code ProtoChunk}s (what DH's world generator builds), and only while no other
- * mod hooks the vanilla block reads it leaves out. Applied only when the DH methods this relies on
- * hash to the version it was checked against ({@link dev.superchunk.compat.DhFastPaths}). Kill
- * switch: {@code -Dsuperchunk.dh.fastPaths=false}; {@code -Dsuperchunk.dh.lodVerify=true} also runs
- * DH's own builder on every chunk and logs any difference.
+ * <p>For vanilla {@code ProtoChunk}s (what DH's world generator builds) and vanilla {@code LevelChunk}s
+ * (what DH reads from an existing world's region files, gets from the server in its
+ * INTERNAL_SERVER mode, and rebuilds when a loaded chunk changes), and only while no other mod
+ * hooks the vanilla block reads it leaves out. A {@code LevelChunk} may be changing under the
+ * server thread, as it may under DH's own reads: a wrapper is remembered for a palette id only when
+ * it is that palette entry's, and forgotten when the section's palette is replaced. Applied when the DH methods this relies on hash
+ * to a version it was checked against; on a DH version where they differ only in how they compute
+ * it runs under self-check, comparing its data source with DH's own
+ * ({@link dev.superchunk.compat.DhFastPathTable}). Kill switch: {@code -Dsuperchunk.dh.fastPaths=false};
+ * {@code -Dsuperchunk.dh.lodVerify=true} also runs DH's own builder on every chunk and logs any difference.
  */
 // @Pseudo: the target is a Distant Horizons class, absent from the compile classpath.
 @org.spongepowered.asm.mixin.Pseudo
@@ -111,12 +119,23 @@ public abstract class MixinDhLodBuilderRuns {
     @Unique
     private static volatile byte superchunk$hooks;
 
+    /** Marks a section whose remembered wrapper is the only-air one. */
+    @Unique
+    private static final Object SUPERCHUNK$ONLY_AIR = new Object();
+
+    /** Not null when this patch runs under self-check on the installed DH. */
+    @Unique
+    private static final DhSelfCheck SUPERCHUNK$RUNS_CHECK = DhFastPaths.selfCheck("MixinDhLodBuilderRuns", "chunks");
+
     /** Set while verify mode runs DH's own builder, which then must not take this path. */
     @Unique
     private static final ThreadLocal<Boolean> SUPERCHUNK$IN_DH = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     @Unique
     private static final LongAdder SUPERCHUNK$CHECKED = new LongAdder();
+
+    @Unique
+    private static final LongAdder SUPERCHUNK$CHECKED_LIVE = new LongAdder();
 
     @Unique
     private static final LongAdder SUPERCHUNK$MISMATCHES = new LongAdder();
@@ -127,31 +146,63 @@ public abstract class MixinDhLodBuilderRuns {
     @Inject(method = "createFromChunk", at = @At("HEAD"), cancellable = true)
     private static void superchunk$byRuns(ILevelWrapper levelWrapper, IChunkWrapper chunkWrapper,
                                           CallbackInfoReturnable<FullDataSourceV2> cir) {
+        DhSelfCheck check = SUPERCHUNK$RUNS_CHECK;
+        if (check != null && check.failed()) {
+            return;
+        }
         // DH asserts this first; its own code throws for an unlit chunk.
         if (!(chunkWrapper instanceof ChunkWrapper_forge wrapper) || !chunkWrapper.isDhBlockLightingCorrect()) {
             return;
         }
         ChunkAccess chunk = wrapper.getChunk();
-        if (chunk == null || chunk.getClass() != ProtoChunk.class || !superchunk$unhooked()) {
+        // A chunk of the world (or one DH read from a region file) rather than one DH is generating.
+        boolean live = chunk != null && chunk.getClass() != ProtoChunk.class;
+        if (live) {
+            chunk = dev.superchunk.compat.DhLiveChunks.levelChunk(chunk);
+        }
+        if (chunk == null || !(live ? dev.superchunk.compat.DhLiveChunks.unhooked() : superchunk$unhooked())) {
+            return;
+        }
+        if (check != null) {
+            superchunk$selfChecked(check, levelWrapper, chunkWrapper, chunk, live, cir);
             return;
         }
         if (!SUPERCHUNK$VERIFY) {
-            cir.setReturnValue(superchunk$build(levelWrapper, chunkWrapper, chunk));
+            cir.setReturnValue(superchunk$build(levelWrapper, chunkWrapper, chunk, live));
             return;
         }
         if (SUPERCHUNK$IN_DH.get()) {
             return;
         }
-        FullDataSourceV2 fast = superchunk$build(levelWrapper, chunkWrapper, chunk);
-        FullDataSourceV2 dh;
-        SUPERCHUNK$IN_DH.set(Boolean.TRUE);
-        try {
-            dh = createFromChunk(levelWrapper, chunkWrapper);
-        } finally {
-            SUPERCHUNK$IN_DH.set(Boolean.FALSE);
+        FullDataSourceV2 fast = null;
+        FullDataSourceV2 dh = null;
+        String difference = null;
+        // A chunk of the world can change between the two builds; a real difference repeats.
+        for (int attempt = 0; attempt < (live ? 3 : 1); attempt++) {
+            if (attempt > 0) {
+                if (fast != null) {
+                    fast.close();
+                }
+                if (dh != null) {
+                    dh.close();
+                }
+            }
+            fast = superchunk$build(levelWrapper, chunkWrapper, chunk, live);
+            SUPERCHUNK$IN_DH.set(Boolean.TRUE);
+            try {
+                dh = createFromChunk(levelWrapper, chunkWrapper);
+            } finally {
+                SUPERCHUNK$IN_DH.set(Boolean.FALSE);
+            }
+            difference = superchunk$difference(fast, dh);
+            if (difference == null) {
+                break;
+            }
         }
         SUPERCHUNK$CHECKED.increment();
-        String difference = superchunk$difference(fast, dh);
+        if (live) {
+            SUPERCHUNK$CHECKED_LIVE.increment();
+        }
         if (difference != null) {
             SUPERCHUNK$MISMATCHES.increment();
             if (SUPERCHUNK$REPORTED.getAndIncrement() < 10) {
@@ -160,13 +211,91 @@ public abstract class MixinDhLodBuilderRuns {
         }
         if (SUPERCHUNK$CHECKED.sum() % 4096 == 0) {
             long m = SUPERCHUNK$MISMATCHES.sum();
-            SUPERCHUNK$LOG.info("[SuperChunk-Compat] [dh] LOD runs VERIFY: checked={} mismatches={} -> {}",
-                    SUPERCHUNK$CHECKED.sum(), m, m == 0 ? "PASS" : "FAIL");
+            SUPERCHUNK$LOG.info("[SuperChunk-Compat] [dh] LOD runs VERIFY: checked={} (world chunks: {}) mismatches={} -> {}",
+                    SUPERCHUNK$CHECKED.sum(), SUPERCHUNK$CHECKED_LIVE.sum(), m, m == 0 ? "PASS" : "FAIL");
         }
         if (dh != null) {
             dh.close();
         }
         cir.setReturnValue(fast);
+    }
+
+    /**
+     * The patch on a DH version it was not checked against (see {@code DhFastPathTable}): on a
+     * sampled call DH's own builder runs too and its data source is the one returned unless both
+     * are equal; any difference, or anything thrown here, turns the patch off.
+     */
+    @Unique
+    private static void superchunk$selfChecked(DhSelfCheck check, ILevelWrapper levelWrapper, IChunkWrapper chunkWrapper,
+                                               ChunkAccess chunk, boolean live, CallbackInfoReturnable<FullDataSourceV2> cir) {
+        if (SUPERCHUNK$IN_DH.get()) {
+            return;
+        }
+        FullDataSourceV2 fast;
+        try {
+            fast = superchunk$build(levelWrapper, chunkWrapper, chunk, live);
+        } catch (Throwable t) {
+            check.fail("its code threw " + t, t);
+            return;
+        }
+        if (!check.sample()) {
+            cir.setReturnValue(fast);
+            return;
+        }
+        FullDataSourceV2 dh = null;
+        String difference = null;
+        // A chunk of the world can change between the two builds; a real difference repeats.
+        for (int attempt = 0; attempt < (live ? 3 : 1); attempt++) {
+            try {
+                if (attempt > 0) {
+                    if (fast != null) {
+                        fast.close();
+                    }
+                    if (dh != null) {
+                        dh.close();
+                    }
+                    fast = superchunk$build(levelWrapper, chunkWrapper, chunk, live);
+                }
+            } catch (Throwable t) {
+                check.fail("its code threw " + t, t);
+                return;
+            }
+            SUPERCHUNK$IN_DH.set(Boolean.TRUE);
+            try {
+                dh = createFromChunk(levelWrapper, chunkWrapper);
+            } finally {
+                SUPERCHUNK$IN_DH.set(Boolean.FALSE);
+            }
+            try {
+                difference = superchunk$difference(fast, dh);
+            } catch (Throwable t) {
+                difference = "comparing threw " + t;
+            }
+            if (difference == null) {
+                break;
+            }
+        }
+        if (difference == null) {
+            if (superchunk$hasTerrain(fast)) {
+                check.passed();
+            } else {
+                check.passedEmpty();
+            }
+            if (dh != null) {
+                dh.close();
+            }
+            cir.setReturnValue(fast);
+            return;
+        }
+        check.fail("chunk " + chunkWrapper.getChunkPos() + ": " + difference, null);
+        try {
+            if (fast != null) {
+                fast.close();
+            }
+        } catch (Throwable ignored) {
+            // DH's own data source is the one that matters.
+        }
+        cir.setReturnValue(dh);
     }
 
     @Unique
@@ -186,9 +315,33 @@ public abstract class MixinDhLodBuilderRuns {
         return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
     }
 
-    /** DH's {@code createFromChunk}, reading only what it does not already know (see the class comment). */
+    /**
+     * Whether DH's wrapper is the one for a palette entry (the only-air section when {@code palette}
+     * is null). A chunk of the world can change between the id read here and DH's own read of the
+     * block; its wrapper is then right for the block and wrong for the id, and is not remembered.
+     */
     @Unique
-    private static FullDataSourceV2 superchunk$build(ILevelWrapper levelWrapper, IChunkWrapper chunkWrapper, ChunkAccess chunk) {
+    private static boolean superchunk$isWrapperOf(IBlockStateWrapper wrapper, Palette<BlockState> palette, int id) {
+        try {
+            if (palette == null) {
+                return wrapper.isAir();
+            }
+            BlockState state = palette.valueFor(id);
+            return wrapper.isAir() ? state.isAir() : wrapper.getWrappedMcObject() == state;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * DH's {@code createFromChunk}, reading only what it does not already know (see the class comment).
+     *
+     * @param live the chunk is a {@code LevelChunk}, which the server thread may be changing: the
+     *             wrappers remembered for a section are dropped when its palette is replaced, and a
+     *             wrapper is remembered for an id only if it is that palette entry's
+     */
+    @Unique
+    private static FullDataSourceV2 superchunk$build(ILevelWrapper levelWrapper, IChunkWrapper chunkWrapper, ChunkAccess chunk, boolean live) {
         int chunkPosX = chunkWrapper.getChunkPos().getX();
         int chunkPosZ = chunkWrapper.getChunkPos().getZ();
         long pos = DhSectionPos.encode((byte) 6, getXOrZSectionPosFromChunkPos(chunkPosX), getXOrZSectionPosFromChunkPos(chunkPosZ));
@@ -214,6 +367,7 @@ public abstract class MixinDhLodBuilderRuns {
             int cellsY = (exclusiveMaxBuildHeight >> 2) - minCellY;
             IBiomeWrapper[] cellBiomes = new IBiomeWrapper[16 * Math.max(cellsY, 0)];
             IBlockStateWrapper[][] sectionWrappers = new IBlockStateWrapper[sections.length][];
+            Object[] sectionKeys = live ? new Object[sections.length] : null; // the palette data (or only-air mark) the wrappers are for
             IBiomeWrapper[] pairBiomes = new IBiomeWrapper[SUPERCHUNK$PAIRS];
             IBlockStateWrapper[] pairBlocks = new IBlockStateWrapper[SUPERCHUNK$PAIRS];
             int[] pairIds = new int[SUPERCHUNK$PAIRS];
@@ -267,6 +421,7 @@ public abstract class MixinDhLodBuilderRuns {
                     IBlockStateWrapper[] wrappers = null; // DH's wrapper per palette id in this section; null outside or for a large palette
                     BitStorage storage = null;
                     PalettedContainer.Strategy strategy = null;
+                    Palette<BlockState> palette = null;
                     boolean forceSingleBlock = false;
                     for (; y >= minBuildHeight; y--) {
                         if (y >> 2 != cellY) {
@@ -287,11 +442,16 @@ public abstract class MixinDhLodBuilderRuns {
                         if (s != section) {
                             section = s;
                             storage = null;
+                            palette = null;
                             wrappers = null;
                             if (s >= 0 && s < sections.length) {
                                 wrappers = sectionWrappers[s];
                                 LevelChunkSection levelSection = sections[s];
                                 if (levelSection.hasOnlyAir()) {
+                                    if (live && sectionKeys[s] != SUPERCHUNK$ONLY_AIR) {
+                                        sectionKeys[s] = SUPERCHUNK$ONLY_AIR;
+                                        wrappers = sectionWrappers[s] = null;
+                                    }
                                     if (wrappers == null) {
                                         wrappers = sectionWrappers[s] = new IBlockStateWrapper[1];
                                     }
@@ -300,6 +460,13 @@ public abstract class MixinDhLodBuilderRuns {
                                     PalettedContainer.Data<BlockState> data = states.data;
                                     storage = data.storage();
                                     strategy = states.strategy;
+                                    if (live) {
+                                        palette = data.palette();
+                                        if (sectionKeys[s] != data) {
+                                            sectionKeys[s] = data;
+                                            wrappers = sectionWrappers[s] = null;
+                                        }
+                                    }
                                     if (wrappers == null) {
                                         int size = data.palette().getSize();
                                         if (size <= SUPERCHUNK$MAX_PALETTE) {
@@ -315,7 +482,7 @@ public abstract class MixinDhLodBuilderRuns {
                             newBlockState = wrappers[id];
                         } else {
                             newBlockState = previousBlockState = chunkWrapper.getBlockState(relX, y, relZ, mcBlockPos, previousBlockState);
-                            if (wrappers != null && id < wrappers.length) {
+                            if (wrappers != null && id < wrappers.length && (!live || superchunk$isWrapperOf(newBlockState, palette, id))) {
                                 wrappers[id] = newBlockState;
                             }
                         }
@@ -384,6 +551,20 @@ public abstract class MixinDhLodBuilderRuns {
             LOGGER.error("Unable to convert chunk at pos [" + chunkWrapper.getChunkPos() + "] to an LOD. Error: " + e.getMessage(), e);
             return null;
         }
+    }
+
+    /** Whether a built data source has a column of more than one data point: anything but air (or one block) top to bottom. */
+    @Unique
+    private static boolean superchunk$hasTerrain(FullDataSourceV2 source) {
+        if (source == null) {
+            return false;
+        }
+        for (LongArrayList column : source.dataPoints) {
+            if (column != null && column.size() > 1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Where two built data sources differ, or null when they are the same. */

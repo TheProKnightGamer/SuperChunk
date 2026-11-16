@@ -140,6 +140,13 @@ public class ExecutorManager {
     }
 
     /**
+     * SuperChunk: see {@link DynamicPriorityQueue#setStarvationFloor(int)}.
+     */
+    public void setStarvationFloor(int priority) {
+        this.globalWorkQueue.setStarvationFloor(priority);
+    }
+
+    /**
      * SuperChunk player.latencyMetrics: weakly consistent per-priority depth snapshot of the
      * global work queue (index = priority), for the 1s [player-latency] queue-depth gauge.
      */

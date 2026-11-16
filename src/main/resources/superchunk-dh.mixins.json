@@ -20,6 +20,8 @@
     "MixinDhCullScope",
     "MixinDhOcclusionCuller",
     "MixinDhDataInputStream",
+    "MixinDhChunkTagPalette",
+    "MixinDhChunkTagLight",
     "MixinDhRoughSurfaceDensity"
   ],
   "client": [],
