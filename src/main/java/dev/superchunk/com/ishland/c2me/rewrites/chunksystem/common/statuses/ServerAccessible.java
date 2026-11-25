@@ -3,6 +3,7 @@ package dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.statuses;
 import com.google.common.base.Preconditions;
 import dev.superchunk.com.ishland.c2me.base.common.threadstate.ThreadInstrumentation;
 import dev.superchunk.com.ishland.c2me.base.common.config.LateModStatuses;
+import dev.superchunk.com.ishland.c2me.base.mixin.access.IChunkHolder;
 import dev.superchunk.com.ishland.c2me.base.mixin.access.IThreadedAnvilChunkStorage;
 import dev.superchunk.com.ishland.c2me.base.mixin.access.IWorldChunk;
 import dev.superchunk.com.ishland.c2me.rewrites.chunksystem.common.ChunkLoadingContext;
@@ -56,12 +57,23 @@ public class ServerAccessible extends NewChunkStatus {
                         if (!((IWorldChunk) worldChunk).isLoadedToWorld()) {
                             worldChunk.runPostLoad();
                             worldChunk.setLoaded(true);
-                            worldChunk.registerAllBlockEntitiesAfterLevelLoad();
-                            worldChunk.registerTickContainerInLevel(serverWorld);
-                            // Forge port: the invoker posts ChunkEvent.Load itself (the patched
-                            // vanilla post site in ChunkMap.protoChunkToFullChunk is bypassed by
-                            // this chunk system) — mirrors the neo port removing the fabric gate.
-                            LifecycleEventInvoker.invokeChunkLoaded(serverWorld, worldChunk, !(protoChunk instanceof ImposterProtoChunk));
+                            // SuperChunk: Forge's ChunkMap.protoChunkToFullChunk sets currentlyLoading
+                            // around these calls, and ServerChunkCache.getChunk returns it. Without
+                            // it, a block-entity load hook that reads its own chunk waits on the FULL
+                            // future this task completes: the server thread parks for good (GitHub
+                            // #36, seen with NTM: Decentralized on NeoForge).
+                            final IChunkHolder vanillaHolder = (IChunkHolder) context.holder().getUserData().get();
+                            try {
+                                vanillaHolder.superchunk$setCurrentlyLoading(worldChunk);
+                                worldChunk.registerAllBlockEntitiesAfterLevelLoad();
+                                worldChunk.registerTickContainerInLevel(serverWorld);
+                                // Forge port: the invoker posts ChunkEvent.Load itself (the patched
+                                // vanilla post site in ChunkMap.protoChunkToFullChunk is bypassed by
+                                // this chunk system) — mirrors the neo port removing the fabric gate.
+                                LifecycleEventInvoker.invokeChunkLoaded(serverWorld, worldChunk, !(protoChunk instanceof ImposterProtoChunk));
+                            } finally {
+                                vanillaHolder.superchunk$setCurrentlyLoading(null);
+                            }
                         }
 
                         if (LateModStatuses.fabric_lifecycle_events_v1_CHUNK_LEVEL_TYPE_CHANGE) {
