@@ -4,23 +4,25 @@
 performance mod for NeoForge 1.21.1. It merges C2ME, ScalableLux, Lithium,
 Noisium, and VMP into a single jar, adds its own exact worldgen optimizations
 (written up in `analysis/`), and offloads terrain generation to the GPU via OpenCL.
+A Forge 1.20.1 port lives on the
+[`forge-1.20.1`](https://github.com/TheProKnightGamer/SuperChunk/tree/forge-1.20.1) branch.
 
-## 11× vanilla
+## 16× vanilla
 
 Chunky pregen, radius 2048 (66,049 chunks), fresh worlds, RTX 3070 + i7-14700K, quiet box.
-Four configurations, each at its own best settings, run **interleaved** over two rounds
-(2026-08-08):
+Four configurations, each at its own best settings, run **interleaved** over two rounds (three
+for the GPU), with a SuperChunk 0.6.1 build of 2026-11-05:
 
-| Configuration | chunks/sec | Wall time | vs vanilla |
-|---|---|---|---|
-| Vanilla NeoForge 1.21.1 | 114.9 | 9 m 35 s | 1.0× |
-| The same upstream mods, separately | 626.0 | 1 m 45 s | 5.4× |
-| SuperChunk, CPU only | 836.1 | 1 m 19 s | 7.3× |
-| **SuperChunk + GPU offload** | **1,258.2** | **52 s** | **11.0×** |
+| Configuration | chunks/sec | Wall time | vs vanilla | CPU per chunk |
+|---|---|---|---|---|
+| Vanilla NeoForge 1.21.1 | 116.3 | 9 m 28 s | 1.0× | 43.4 ms |
+| The same upstream mods, separately | 600.5 | 1 m 50 s | 5.2× | 38.1 ms |
+| SuperChunk, CPU only | 1,362.0 | 48 s | 11.7× | 18.5 ms |
+| **SuperChunk + GPU offload** | **1,874.4** | **35 s** | **16.1×** | **13.6 ms** |
 
-Reproducibility across the two rounds: vanilla 114.1/115.7, upstream 623.1/629.0, CPU-only
-836.1/836.1, GPU 1246.2/1270.2. Measuring the steady state instead of the whole wall (excluding
-Chunky's ramp-up and tail) gives 120 / 644 / 852 / **1,341** cps.
+Reproducibility across the rounds: vanilla 115.9/116.7, upstream 595.0/606.0, CPU-only
+1376.0/1347.9, GPU 1942.6/1738.1/1942.6. Measuring the steady state instead of the whole wall
+(excluding Chunky's ramp-up and tail) gives 122 / 621 / 1,443 / **2,050** cps.
 
 Every configuration got the same 16 GB heap, the same Generational ZGC, 22 C2ME workers where
 applicable, and the same raised Chunky in-flight chunk limit — so this compares the mods, not who
@@ -29,25 +31,17 @@ remembered the flags. The upstream row is **C2ME 0.4.0-alpha.0.115 + Lithium 0.1
 has no NeoForge build, and its SuperChunk port is player-watching work that does nothing in a
 pregen with no players.
 
-So: merging the upstream mods and tuning them is worth **+34%** over running them separately, and
-the GPU offload is worth a further **+50%** on top of that.
+So: merging the upstream mods and tuning them is worth **2.3×** over running them separately, and
+the GPU offload is worth a further **+38%** on top of that.
 
 No faults, crashes, or OOMs in any run. Generation is checked against vanilla over
 hundreds of millions of blocks. The default fp32 compact-ID mode can produce rare
 block differences; see **Parity** below.
 
-Round 10 (2026-08-07) adds **+12.6%** on top of that, measured head-to-head at radius 3072
-(148,225 chunks) with each build at its own best settings — 1,090 → 1,228 chunks/sec steady-state,
-two interleaved pairs, the new build winning both. It comes from four changes that are individually
-provable rather than tuned:
-
-- fewer fp64 operations in the OpenCL noise chain, by exact IEEE identities (bit-identical output,
-  verified by hash in fp32 *and* fp64, and by the boot parity gate on every build);
-- raising Chunky's in-flight chunk limit, which is worth nothing on its own and only pays *because*
-  the kernel got faster (see the note under Install);
-- a memo of the per-block biome lookup that was 10.5% of all worldgen CPU, verified against the
-  code it replaces over 359 million lookups with zero mismatches;
-- the same `wrap` identity applied to the CPU noise path.
+The same benchmark on 2026-08-08 gave 836 chunks/sec on the CPU and 1,258 with the GPU (11.0×).
+The gain since then is exact work on both paths: cheaper ores, surfaces, lighting, noise fill and
+chunk saves on the CPU, and on the GPU the corner hoist, the Beardifier in the decide kernel and
+small-batch work-groups (each written up in `analysis/`).
 
 ## Install
 
@@ -94,6 +88,24 @@ stays off. Reloads preserve these rules. Command blocks and command minecarts
 wait for cell and dimension barriers within the same server tick, preserving
 selectors and conditional command chains. See [compatibility.txt](compatibility.txt)
 for the tested versions and limitations.
+
+## Compatibility
+
+SuperChunk is boot-tested alongside the most-downloaded NeoForge 1.21.1 optimization mods, and
+its mixins are checked against the 989 most-downloaded NeoForge 1.21.1 mods.
+[compatibility.txt](compatibility.txt) lists what was tested, what was fixed, and the few known
+incompatibilities. Where another mod changes the same vanilla code as one of SuperChunk's
+optimizations, SuperChunk wraps that code instead of replacing it and steps aside while the other
+mod's change is present, so both load.
+
+Fixed since 0.6.1:
+- world-creation crashes with Collections of Optimizations, Bye Pregen, and Villager Guard
+  Gunners ([#35](https://github.com/TheProKnightGamer/SuperChunk/issues/35)). Bye Pregen's own
+  lighting option (YA light) stays off, since SuperChunk already bundles a lighting engine;
+- a server freeze with NTM: Decentralized
+  ([#36](https://github.com/TheProKnightGamer/SuperChunk/issues/36)).
+
+Not compatible: **Better Chunk Loading**, which replaces the same chunk system SuperChunk does.
 
 ## What's inside
 
@@ -200,7 +212,8 @@ away: `-Dsuperchunk.gpu.compactIds=off`.
 An additional seed tested on 2026-09-21 found one stone/air difference in
 143,200,256 compared blocks with fp32 decisions, reproduced at the same coordinate
 in both the original and optimized jars. The original zero-flip census therefore
-does not establish universal equivalence. See
+does not establish universal equivalence: a later census of 3.2 billion blocks found 20
+differences, about one block in 160 million. See
 [`analysis/optimization-2026-09-21.md`](analysis/optimization-2026-09-21.md)
 for the optimization results and precision checks.
 
