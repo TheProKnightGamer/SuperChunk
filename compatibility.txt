@@ -23,7 +23,10 @@ SUMMARY
     PASS after a SuperChunk fix ....... 1  (Radium — see FIXED)
     Unfixable incompatibilities ....... 0  (in the top-50 sweep; see INCOMPATIBLE for those
                                           found later outside it)
-  Found later, outside this run ....... 10 (ModernFix, singleplayer only — FIXED;
+  Found later, outside this run ....... 14 (ModernFix, singleplayer only — FIXED;
+                                          Collections Of Optimizations, Bye?Pregen! YA light,
+                                          Villager Guard Gunners (GitHub #35) — FIXED;
+                                          NTM: Decentralized server freezes (GitHub #36) — FIXED;
                                           mods that @Overwrite a method SuperChunk's access
                                           transformer widened (GitHub #31, seen on Forge) — FIXED;
                                           CBC Neo Warfare — NOT SUPPORTED, by choice;
@@ -168,6 +171,112 @@ COMPATIBLE  (booted cleanly alongside SuperChunk)
 =============================================================
 FIXED  (was incompatible; SuperChunk changed to support it)
 =============================================================
+  collections_of_optimizations  Collections Of Optimizations .. crash creating a world
+    (Neoforge 0.1.0; 6.0.5 on Forge)
+
+    CurseForge report, 2026-11-24. Two of CoO's worldgen mixins inject into methods that SuperChunk
+    replaced with an @Overwrite, and Mixin refused them the first time the class loaded on a
+    worldgen thread ("... cannot inject into ... merged by ..."):
+      - MixinBeardifierReach: a @ModifyExpressionValue on a field read in Beardifier.compute. Neo
+        only; the Forge port had already made its beardifier replica a @WrapMethod.
+      - MixinVerticalGradientRandom: an INVOKE inject in the vertical-gradient surface condition
+        (SurfaceRules$VerticalGradientConditionSource$1VerticalGradientCondition.compute), on both
+        loaders.
+    Both replicas are now @WrapMethods. They run SuperChunk's copy only while no other mod hooks the
+    method, and otherwise call the original with the other mod's hooks in it; the log names the
+    replica that stood down. Worlds without CoO are unchanged: 1,369 chunks' noise-fill and surface
+    hashes equal the 0.6.1 jar's, and the DFC parity self-test passes.
+
+    The stand-down check has to see MixinExtras' hooks as well. MixinExtras applies its late
+    injectors (@WrapOperation, @ModifyExpressionValue, @ModifyReturnValue, @WrapWithCondition,
+    @ModifyReceiver) and every @WrapMethod after the per-class scan SuperChunk did, so CoO's
+    beardifier hook was invisible to it. SuperChunkMixinExtension now scans each probed class again
+    once the class is finished.
+
+    Left as is: "@Redirect conflict. Skipping ...:vanilla.MixinGameEventDispatcherLookup" (neo).
+    Bundled Lithium (world.game_events.dispatch) already redirects that call, as a standalone
+    Lithium would; CoO's speed-up of it is skipped and nothing else changes.
+
+  byepregen ............. Bye?Pregen! YA light ................. crash creating a world
+    (1.2.0.0; 1.1.3.3 on Forge)
+
+    Same report. Bye Pregen's lighting.ya.enabled option replaces vanilla's light engine, as the
+    bundled ScalableLux does. Bye Pregen turns the option off itself when ScalableLux is installed,
+    but it checks for the mod id "scalablelux", which the bundled copy does not have. With YA light
+    on, ScalableLux's ThreadedLevelLightEngineMixin cannot inject over YA's merged methods, and the
+    server crashes before the world loads (InvalidInjectionException "... cannot inject into
+    ThreadedLevelLightEngine::tryScheduleUpdate()V merged by com.moepus.byepregen.mixin.yalight...").
+    Now, two layers:
+      - neoforge.mods.toml declares `[byepregen] conflict = ["lighting.ya.enabled"]`, a table Bye
+        Pregen 1.2 reads from every mod file. While the option is at "Default", Bye Pregen turns it
+        off and logs "Disabled ByePregen option lighting.ya.enabled due to conflicts declared by
+        mods [superchunk]".
+      - Bye Pregen keeps an explicit "True" despite such a declaration, and 1.1.x and the Forge
+        build have no such table. For those cases SuperChunkMixinExtension removes YA's mixins
+        (com.moepus.byepregen.mixin.yalight.*, 19 classes) before they apply, and SuperChunk logs one
+        warning. YA's own setup in Bye Pregen's mod class uses vanilla classes only and does
+        nothing without its mixins.
+    Tested on both loaders with the option at Default and at True: no crash, 1,089 chunks pregen.
+
+    Forge only, Bye Pregen 1.1.3.3: no crash, but its final-density columns never ran ("Cannot bind
+    an unwrapped density subtree containing Interpolated: ...CompiledDensityFunction", then
+    "Disabling final-density column evaluator for one NoiseChunk", 2,069 times in 1,089 chunks).
+    Bye Pregen compiles those columns at the end of the RandomState constructor, the same point
+    where SuperChunk compiled its router, and SuperChunk's callback ran first. With Bye Pregen
+    installed, SuperChunk now compiles from a second callback at priority 1100
+    (MixinNoiseConfigLate), which runs after Bye Pregen's. Bye Pregen 1.2.0.0 compiles when the
+    router field is set, earlier in the constructor, so neo was never affected.
+
+    Also seen, harmless: "Method overwrite conflict for acquire/release in
+    superchunk-lithium.mixins.json:chunk.no_locking.PalettedContainerMixin, previously written by
+    com.moepus.byepregen.mixin.palette.PalettedContainerNoLithiumMixin. Skipping method." Both
+    overwrites make those two methods do nothing, and the rest of Lithium's rule still applies.
+
+  villagerguardgunners .. Villager Guard Gunners ................ crash creating a world (GitHub #35)
+
+    VGG's VillageBuildingTerrainMixin redirects Shapes.joinIsNotEmpty in
+    JigsawPlacement$Placer.tryPlacingChildren, and the redirect is required. SuperChunk's jigsaw
+    octree redirected the same call (and Shapes.create and Shapes.joinUnoptimized next to it), so
+    Mixin skipped VGG's ("@Redirect conflict") and then failed the class: "Critical injection
+    failure: Redirector vgg$rejectUnsafeTerrain ... failed". Every chunk with a village start failed
+    to generate, and world creation stopped at "Preparing spawn area".
+    The octree's three hooks are now @WrapOperations, which nest with another mod's @Redirect. All of
+    the octree (its seed in addPieces, the three hooks, the blocked-jigsaw skip) also stands down
+    while any other mod hooks tryPlacingChildren. Once the octree tracks the free space,
+    tryPlacingChildren's own free shape is never cut down as pieces are placed, and VGG's handler
+    tests candidates against that shape directly. NTM: Decentralized (its MixinPlacer) also hooks
+    tryPlacingChildren.
+    The report's VGG 1.11 could not be downloaded here, and VGG needs Guard Villagers, TACZ, Fzzy
+    Config and Kotlin for Forge. The test used a small fixture mod that copies VGG 1.9's required
+    redirect (1.9 has the same mixin). With the 0.6.1 jar it fails as in the report on both
+    loaders. With the fix the world is created, the fixture's redirect runs (16,384+ calls in a
+    1,089-chunk pregen), and the 1,369 chunks' noise-fill hashes equal those of a world without the
+    fixture, octree on, including the chunks whose terrain is shaped around jigsaw pieces (100 on
+    neo, 17 on Forge). The stand-down line ("The jigsaw octree ... stands down: ... also hooks it") is an
+    INFO line, shown in the Forge log.
+
+  hbm ................... NTM: Decentralized ................... server freezes while exploring (GitHub #36)
+    (1.0.0-beta.14-hotfix)
+
+    After a few minutes in new terrain the server thread stopped for good. When a chunk becomes FULL,
+    NTM indexes the chunk's multiblock cores from a hook at the end of
+    LevelChunk.registerTickContainerInLevel, and that first reads the core's own block through
+    Level.getBlockState. The loader makes that read safe: ChunkStatusTasks.full sets
+    ChunkHolder.currentlyLoading around the post-load step and around block-entity and tick
+    registration and ChunkEvent.Load, and ServerChunkCache.getChunk and getChunkNow return that
+    chunk. SuperChunk's chunk system (inherited from C2ME, which has the same gap) runs those steps in
+    ServerAccessible without setting the field. The read then waited for the chunk to become FULL,
+    on the thread that had to finish making it FULL.
+    ServerAccessible now sets and clears currentlyLoading where the loader does (NeoForge's two
+    windows; Forge 1.20.1's one, through an accessor, since the field is package-private there and
+    Forge returns it only from getChunkNow).
+    Tested on a dedicated server, seed 8675309, a forceload window moved 48 blocks every few
+    seconds along new terrain (no player needed). Without the fix the server froze each time at the
+    same place (x 8184, next to NTM structure chunks), its thread parked in getChunk under NTM's
+    hook. With the fix the same route from x 7800 ran 100 steps, to x 12600, with RCON round trips
+    under 0.6 s. Without NTM, 1,369 chunks' noise-fill and surface hashes are unchanged on both
+    loaders.
+
   (any mod) ............. access transformer widening ........... crash on load
 
     SuperChunk's access transformer made nine vanilla methods public that NeoForge leaves non-public,
