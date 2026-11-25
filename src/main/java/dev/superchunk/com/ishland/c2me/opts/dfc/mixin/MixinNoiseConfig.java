@@ -1,6 +1,7 @@
 package dev.superchunk.com.ishland.c2me.opts.dfc.mixin;
 
 import com.google.common.base.Stopwatch;
+import dev.superchunk.com.ishland.c2me.opts.dfc.common.ducks.IRouterCompile;
 import dev.superchunk.com.ishland.c2me.opts.dfc.common.gen.BytecodeGen;
 import it.unimi.dsi.fastutil.objects.Reference2ReferenceMap;
 import it.unimi.dsi.fastutil.objects.Reference2ReferenceOpenHashMap;
@@ -17,7 +18,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = RandomState.class, priority = 900)
-public class MixinNoiseConfig {
+public class MixinNoiseConfig implements IRouterCompile {
 
     @Mutable
     @Shadow @Final private NoiseRouter router;
@@ -27,6 +28,15 @@ public class MixinNoiseConfig {
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void postCreate(CallbackInfo ci) {
+        // SuperChunk: with Bye?Pregen! installed, MixinNoiseConfigLate compiles instead, after its hooks.
+        if (!dev.superchunk.compat.ByePregenCompat.compileRouterLate()) {
+            this.superchunk$compileRouter();
+        }
+    }
+
+    /** Compiles this level's router and climate sampler, from postCreate or {@link MixinNoiseConfigLate}. */
+    @Override
+    public void superchunk$compileRouter() {
         Stopwatch stopwatch = Stopwatch.createStarted();
         // SuperChunk: optional in-process DFC vanilla-parity self-test. Captures the
         // ORIGINAL (uncompiled, vanilla) density functions, then after compilation

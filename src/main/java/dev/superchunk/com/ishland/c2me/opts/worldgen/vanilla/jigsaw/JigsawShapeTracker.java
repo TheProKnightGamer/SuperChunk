@@ -90,6 +90,10 @@ public final class JigsawShapeTracker {
      */
     public static void seedTopLevel(VoxelShape free, AABB startBox) {
         if (!ACTIVE) return;
+        if (!placerUnhooked()) {
+            MAP.get().clear();
+            return;
+        }
         // VoxelShape.bounds() throws UnsupportedOperationException("No bounds for empty shape") on an
         // empty shape. The top-level free shape is `bounds MINUS startBox`, which vanilla structures
         // never empty out -- but a mod that shrinks the placement bounds or enlarges the start piece
@@ -109,6 +113,29 @@ public final class JigsawShapeTracker {
         IdentityHashMap<VoxelShape, JigsawFreeShape> map = MAP.get();
         map.clear();
         map.put(free, region);
+    }
+
+    /** Whether another mod hooks {@code Placer.tryPlacingChildren} ({@link #placerUnhooked}). */
+    private static volatile byte placerHooks = dev.superchunk.worldgen.ForeignHooks.UNKNOWN;
+
+    /**
+     * Whether the octree may model {@code Placer.tryPlacingChildren}'s free space: no other mod hooks
+     * that method. Once a placed piece is in the octree, {@link #subtractFree} hands back the same
+     * free shape, so code of another mod's in that method reads a free shape the placed pieces were
+     * never cut from. Villager Guard Gunners' terrain check calls {@code Shapes.joinIsNotEmpty} on
+     * it, and its {@code @Redirect} of that call is required: over the octree's old {@code @Redirect}
+     * it failed to apply and creating a world crashed (GitHub #35). Until the class is scanned the
+     * answer is not known, and the octree stays off.
+     */
+    public static boolean placerUnhooked() {
+        byte state = placerHooks;
+        if (state == dev.superchunk.worldgen.ForeignHooks.UNKNOWN) {
+            state = dev.superchunk.worldgen.ForeignHooks.state(
+                    "The jigsaw octree (JigsawPlacement$Placer.tryPlacingChildren)",
+                    "net.minecraft.world.level.levelgen.structure.pools.JigsawPlacement$Placer#tryPlacingChildren");
+            placerHooks = state;
+        }
+        return state == dev.superchunk.worldgen.ForeignHooks.CLEAR;
     }
 
     /** Seed a piece-local free region: {@code free = Shapes.create(box)} == the piece's bounding box. */

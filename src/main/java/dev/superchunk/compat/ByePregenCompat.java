@@ -120,4 +120,42 @@ public final class ByePregenCompat {
         }
         return true;
     }
+
+    /**
+     * Whether the bundled C2ME compiles each level's router after Bye Pregen's hooks on the
+     * {@code RandomState} constructor rather than before them ({@code MixinNoiseConfigLate}), so
+     * that Bye Pregen compiles its own density columns from the vanilla router.
+     */
+    public static boolean compileRouterLate() {
+        return INSTALLED;
+    }
+
+    /** Bye Pregen's YA light mixins: its replacement for vanilla's light engine ({@code lighting.ya.enabled}). */
+    private static final String YA_LIGHT_MIXINS = "com.moepus.byepregen.mixin.yalight.";
+
+    private static volatile boolean yaLightNoticeLogged;
+
+    /**
+     * Whether a mixin of Bye Pregen's must not apply ({@code SuperChunkMixinExtension} drops it).
+     *
+     * <p>Its YA light (off by default) patches vanilla's light engine, and the bundled ScalableLux
+     * replaces that engine. With both, ScalableLux's {@code ThreadedLevelLightEngine} mixin cannot
+     * apply over Bye Pregen's and creating a world crashes. Bye Pregen turns YA light off itself
+     * when ScalableLux is installed, by the mod id {@code scalablelux}, which the bundled copy does
+     * not have. Dropping its YA mixins before they apply does the same here. Bye Pregen still
+     * builds YA's block-state table at startup, which uses only vanilla code; the rest of YA is
+     * reached only through those mixins.
+     */
+    public static boolean dropsMixin(String mixinClassName) {
+        if (!INSTALLED || !mixinClassName.startsWith(YA_LIGHT_MIXINS)) {
+            return false;
+        }
+        if (!yaLightNoticeLogged) {
+            yaLightNoticeLogged = true;
+            LOGGER.warn("[SuperChunk-Compat] Bye Pregen's YA light (lighting.ya.enabled) is off: SuperChunk "
+                    + "includes ScalableLux, which replaces the same light engine. Bye Pregen does this itself "
+                    + "when ScalableLux is installed.");
+        }
+        return true;
+    }
 }

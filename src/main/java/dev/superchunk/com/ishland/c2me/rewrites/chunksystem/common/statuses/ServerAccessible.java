@@ -17,6 +17,7 @@ import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.FullChunkStatus;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -49,14 +50,30 @@ public class ServerAccessible extends NewChunkStatus {
                         worldChunk.setFullStatus(context.holder().getUserData().get()::getLevelType);
                         context.holder().getItem().set(new ChunkState(worldChunk, new ImposterProtoChunk(worldChunk, false), ChunkStatus.FULL));
                         if (!((IWorldChunk) worldChunk).isLoadedToWorld()) {
-                            worldChunk.runPostLoad();
+                            // SuperChunk: NeoForge's ChunkStatusTasks.full sets currentlyLoading
+                            // around these calls, and ServerChunkCache.getChunk/getChunkNow return
+                            // it. Without it, a block-entity load hook that reads its own chunk
+                            // waits on the FULL future this task completes: the server thread
+                            // parks for good (GitHub #36, NTM: Decentralized multiblock cores).
+                            final ChunkHolder vanillaHolder = context.holder().getUserData().get();
+                            try {
+                                vanillaHolder.currentlyLoading = worldChunk;
+                                worldChunk.runPostLoad();
+                            } finally {
+                                vanillaHolder.currentlyLoading = null;
+                            }
                             worldChunk.setLoaded(true);
-                            worldChunk.registerAllBlockEntitiesAfterLevelLoad();
-                            worldChunk.registerTickContainerInLevel(serverWorld);
-                            // No fabric gate: on NeoForge the invoker posts ChunkEvent.Load itself
-                            // (the vanilla post site in ChunkStatusTasks.full is bypassed by this
-                            // chunk system) — upstream C2ME-NeoForge removes the gate the same way.
-                            LifecycleEventInvoker.invokeChunkLoaded(serverWorld, worldChunk, !(protoChunk instanceof ImposterProtoChunk));
+                            try {
+                                vanillaHolder.currentlyLoading = worldChunk;
+                                worldChunk.registerAllBlockEntitiesAfterLevelLoad();
+                                worldChunk.registerTickContainerInLevel(serverWorld);
+                                // No fabric gate: on NeoForge the invoker posts ChunkEvent.Load itself
+                                // (the vanilla post site in ChunkStatusTasks.full is bypassed by this
+                                // chunk system) — upstream C2ME-NeoForge removes the gate the same way.
+                                LifecycleEventInvoker.invokeChunkLoaded(serverWorld, worldChunk, !(protoChunk instanceof ImposterProtoChunk));
+                            } finally {
+                                vanillaHolder.currentlyLoading = null;
+                            }
                         }
 
                         if (LateModStatuses.fabric_lifecycle_events_v1_CHUNK_LEVEL_TYPE_CHANGE) {
