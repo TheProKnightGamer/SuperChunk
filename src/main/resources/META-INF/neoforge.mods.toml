@@ -212,3 +212,9 @@ type = "required"
 versionRange = "[1.21.1]"
 ordering = "NONE"
 side = "BOTH"
+
+# Bye?Pregen! 1.2+ reads this table from every mod file: it turns these options off while they are
+# left at "Default". YA light replaces vanilla's light engine, as the bundled ScalableLux does, and
+# the two crash together; SuperChunkMixinExtension drops YA's mixins when it is set to "True".
+[byepregen]
+conflict = ["lighting.ya.enabled"]
