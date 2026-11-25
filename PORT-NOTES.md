@@ -1,5 +1,46 @@
 # NeoForge 1.21.1 → Forge 1.20.1 port notes
 
+## COLLECTIONS OF OPTIMIZATIONS, BYE PREGEN, VILLAGER GUARD GUNNERS, #36 (2026-11-24, latest) — same changes as neo; neo's compatibility.txt has the write-up
+
+A CurseForge report (CoO and Bye Pregen crash on world creation), GitHub #35 and GitHub #36.
+Identical files in both trees unless noted.
+
+- **CoO 6.0.5:** `vanilla.MixinVerticalGradientRandom` could not inject over our `@Overwrite` of
+  the vertical-gradient condition's `compute` (`m_183479_`). `MixinSurfaceGradientRandom` is now a
+  `@WrapMethod` that runs our copy only while `ForeignHooks` finds no other hook in that method
+  (new `MixinTargetScan` SRG entry, probe target added). The beardifier was already a `@WrapMethod`
+  here (325e205); neo needed that too, for CoO Neoforge's `MixinBeardifierReach`.
+- **Late scan:** `SuperChunkMixinExtension` (replaces `MixinTargetScanExtension`) records each
+  probed class again in the extensions' `postApply`, after MixinExtras has applied its late
+  injectors and `@WrapMethod`s, which the probe's own `postApply` never saw.
+- **Bye Pregen 1.1.3.3, YA light:** with `lighting.ya.enabled = "True"`, ScalableLux's
+  `ThreadedLevelLightEngineMixin` cannot inject over YA's merged methods and the server crashes.
+  Bye Pregen's own ScalableLux check looks for the mod id. `SuperChunkMixinExtension.preApply`
+  removes `com.moepus.byepregen.mixin.yalight.*` from the target's mixin set
+  (`TargetClassContext.mixins`) and `ByePregenCompat` logs one warning. Forge has no equivalent
+  of neo's `[byepregen] conflict` table.
+- **Bye Pregen 1.1.3.3, final-density columns:** it compiles them at `RandomState.<init>` RETURN;
+  our DFC compile's callback ran first, so it found compiled functions and disabled its columns
+  for every noise chunk (2,069 "Cannot bind an unwrapped density subtree" in 1,089 chunks). With
+  Bye Pregen installed we compile from `MixinNoiseConfigLate` (RETURN, priority 1100), after its
+  callback: 0 failures, its 14 "Compiled density column" lines. Without it nothing moves (`postCreate`
+  still compiles).
+- **#35, Villager Guard Gunners:** its required `@Redirect` of `Shapes.joinIsNotEmpty` in
+  `JigsawPlacement$Placer.tryPlacingChildren` (`m_227264_`) lost to the jigsaw octree's
+  `@Redirect` and the class failed to transform. The octree's three hooks are `@WrapOperation`s now,
+  and the whole octree stands down while any other mod hooks that method
+  (`JigsawShapeTracker.placerUnhooked`, probe target and SRG entry added).
+- **#36, NTM: Decentralized (neo only, port for parity):** the server thread froze in
+  `ServerAccessible.upgradeToThis` when NTM's `registerTickContainerInLevel` hook read a block in the
+  chunk being made FULL. Forge's `ChunkMap.protoChunkToFullChunk` sets `ChunkHolder.currentlyLoading`
+  around block-entity and tick registration and `ChunkEvent.Load`, and `getChunkNow` returns it;
+  our chunk system (and upstream C2ME) never set it. `ServerAccessible` sets it at the same point
+  now, through a new `@Accessor(value = "currentlyLoading", remap = false)` on `IChunkHolder` (a
+  package-private Forge field, so no SRG name and no refmap entry). Forge's blocking `getChunk` has
+  no such bypass, with or without us.
+- **Checks:** noise-fill and surface hashes for 1,369 chunks equal the 0.6.1 jar's without the other
+  mods, the DFC parity self-test passes, and the unit tests pass.
+
 ## FLUSH SAVES EMPTIED BLOCK ENTITIES (GitHub #33, 2026-11-16, latest) — same fix as neo
 
 Found and fixed on neo by JacyKu (PR #33); the same guard here.
