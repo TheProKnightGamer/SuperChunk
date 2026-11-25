@@ -217,6 +217,8 @@ public final class MixinTargetScan {
             Map.entry("net.minecraft.world.level.levelgen.NoiseChunk#computePreliminarySurfaceLevel", "m_198249_"),
             Map.entry("net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator#doFill", "m_224284_"),
             Map.entry("net.minecraft.world.level.levelgen.Beardifier#compute", "m_207386_"),
+            Map.entry("net.minecraft.world.level.levelgen.SurfaceRules$VerticalGradientConditionSource$1VerticalGradientCondition#compute", "m_183479_"),
+            Map.entry("net.minecraft.world.level.levelgen.structure.pools.JigsawPlacement$Placer#tryPlacingChildren", "m_227264_"),
             Map.entry("net.minecraft.util.ClassInstanceMultiMap#find", "m_13533_"),
             Map.entry("net.minecraft.world.level.biome.Climate$Sampler#sample", "m_183445_"),
             Map.entry("net.minecraft.world.level.levelgen.NoiseChunk#cachedClimateSampler", "m_224359_"),

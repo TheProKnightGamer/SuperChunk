@@ -1,12 +1,13 @@
 package dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.mixin.jigsaw;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.superchunk.com.ishland.c2me.opts.worldgen.vanilla.jigsaw.JigsawShapeTracker;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.BooleanOp;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
  * SuperChunk jigsaw-octree lever (default ON; disable with {@code -Dsuperchunk.worldgen.jigsawOctree=false})
@@ -27,7 +28,7 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * <p>FORGE 1.20.1 PORT — targets re-verified against the real 1.20.1 mapped sources
  * ({@code forge-1.20.1-47.4.0_mapped_official_1.20.1-sources.jar},
  * {@code net/minecraft/world/level/levelgen/structure/pools/JigsawPlacement.java}). The 1.20.1
- * target method (instance, so the redirect handlers are instance — mixin 0.8.5 static-ness rule):
+ * target method (instance, so the handlers are instance — mixin 0.8.5 static-ness rule):
  * <pre>
  * void tryPlacingChildren(PoolElementStructurePiece p_227265_, MutableObject&lt;VoxelShape&gt; p_227266_,
  *       int p_227267_, boolean p_227268_, LevelHeightAccessor p_227269_, RandomState p_227270_)
@@ -38,12 +39,17 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * ({@code mutableobject.setValue(Shapes.create(AABB.of(boundingbox)))} = ordinal 0 local-free init,
  * then the deflated candidate and the child box), exactly one
  * {@code Shapes.joinIsNotEmpty(..., BooleanOp.ONLY_SECOND)} and exactly one
- * {@code Shapes.joinUnoptimized(..., BooleanOp.ONLY_FIRST)} — so the redirects port unchanged.
+ * {@code Shapes.joinUnoptimized(..., BooleanOp.ONLY_FIRST)} — so the hooks port unchanged.
+ *
+ * <p>The three are {@code @WrapOperation}s, not {@code @Redirect}s, so another mod's {@code @Redirect}
+ * of the same call still applies, and they pass straight through while another mod hooks
+ * {@code tryPlacingChildren} ({@link JigsawShapeTracker#placerUnhooked}): Villager Guard Gunners
+ * redirects the collision test and reads the real free shape (GitHub #35).
  */
 @Mixin(targets = "net.minecraft.world.level.levelgen.structure.pools.JigsawPlacement$Placer")
 public class MixinJigsawPlacementPlacer {
 
-    @Redirect(
+    @WrapOperation(
             method = "tryPlacingChildren",
             at = @At(
                     value = "INVOKE",
@@ -51,29 +57,33 @@ public class MixinJigsawPlacementPlacer {
                     ordinal = 0
             )
     )
-    private VoxelShape superchunk$initLocalFree(AABB box) {
-        return JigsawShapeTracker.initLocal(box);
+    private VoxelShape superchunk$initLocalFree(AABB box, Operation<VoxelShape> original) {
+        return JigsawShapeTracker.placerUnhooked() ? JigsawShapeTracker.initLocal(box) : original.call(box);
     }
 
-    @Redirect(
+    @WrapOperation(
             method = "tryPlacingChildren",
             at = @At(
                     value = "INVOKE",
                     target = "Lnet/minecraft/world/phys/shapes/Shapes;joinIsNotEmpty(Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/BooleanOp;)Z"
             )
     )
-    private boolean superchunk$testFree(VoxelShape free, VoxelShape candidate, BooleanOp op) {
-        return JigsawShapeTracker.testFree(free, candidate, op);
+    private boolean superchunk$testFree(VoxelShape free, VoxelShape candidate, BooleanOp op,
+                                        Operation<Boolean> original) {
+        return JigsawShapeTracker.placerUnhooked()
+                ? JigsawShapeTracker.testFree(free, candidate, op) : original.call(free, candidate, op);
     }
 
-    @Redirect(
+    @WrapOperation(
             method = "tryPlacingChildren",
             at = @At(
                     value = "INVOKE",
                     target = "Lnet/minecraft/world/phys/shapes/Shapes;joinUnoptimized(Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/BooleanOp;)Lnet/minecraft/world/phys/shapes/VoxelShape;"
             )
     )
-    private VoxelShape superchunk$subtractFree(VoxelShape free, VoxelShape childBox, BooleanOp op) {
-        return JigsawShapeTracker.subtractFree(free, childBox, op);
+    private VoxelShape superchunk$subtractFree(VoxelShape free, VoxelShape childBox, BooleanOp op,
+                                               Operation<VoxelShape> original) {
+        return JigsawShapeTracker.placerUnhooked()
+                ? JigsawShapeTracker.subtractFree(free, childBox, op) : original.call(free, childBox, op);
     }
 }

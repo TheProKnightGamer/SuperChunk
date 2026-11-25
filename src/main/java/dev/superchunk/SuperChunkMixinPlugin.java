@@ -66,6 +66,7 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         // Other mods' compat rules that look for a bundled mod by id or by class name.
         dev.superchunk.compat.ModernFixCompat.apply();
         dev.superchunk.compat.MixinSquaredBridge.register();
+        SuperChunkMixinExtension.register();
     }
 
     @Override
@@ -134,6 +135,8 @@ public final class SuperChunkMixinPlugin implements IMixinConfigPlugin {
         // The probe has the highest priority, so every other mod's mixins are already merged.
         if (mixinClassName.endsWith(".MixinProbeBiomeLookup")) {
             MixinTargetScan.record(targetClassName, targetClass);
+            // MixinExtras' late injectors and @WrapMethod run after this: record again then.
+            SuperChunkMixinExtension.pending(targetClass.name);
         }
     }
 }
